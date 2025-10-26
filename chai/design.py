@@ -505,6 +505,7 @@ def optimize_protein_design(
     align_to="all",
     scale_temp_by_plddt=False,
     partial_diffusion=0.0,
+    cycle_templates=False,
     pde_cutoff_intra=1.5,
     pde_cutoff_inter=3.0,
     omit_AA=None,
@@ -608,10 +609,8 @@ def optimize_protein_design(
         
         return weight
     
-    def fold_sequence(prev, is_first_iteration=False):
+    def fold_sequence(seq, prev=None, is_first_iteration=False):
         """Fold sequence and return metrics"""
-
-        seq = prev["sequence"]
         chains = []        
         if is_binder_design:
             # Target chain
@@ -770,8 +769,8 @@ def optimize_protein_design(
     # === MAIN LOOP ===
     
     # Step 0
-    prev = {"sequence":initial_seq}
-    prev["state"] = fold_sequence(prev, is_first_iteration=True)
+    prev = {"seq":initial_seq}
+    prev["state"] = fold_sequence(prev["seq"], is_first_iteration=True)
     prev["bb"] = get_backbone_coords_from_result(prev["state"])
     prev["pdb"] = prefix + "_s0.cif"
     folder.save(prev["pdb"])
@@ -790,8 +789,8 @@ def optimize_protein_design(
                 n_binder = len(initial_seq)
                 prev["plddt"] = prev["plddt"][-n_binder:]
 
-        new = {"sequence": design_sequence(step, prev)}
-        new["state"] = fold_sequence(prev)
+        new = {"seq": design_sequence(step, prev)}
+        new["state"] = fold_sequence(new["seq"], prev)
         new["bb"] = get_backbone_coords_from_result(new["state"])
         new["pdb"] = f"{prefix}_s{step+1}.cif"
         folder.save(new["pdb"])
