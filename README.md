@@ -129,13 +129,6 @@ See the code in `refiner.ipynb` for example usage.
 ## 🎥 Trajectory Visualization
 We have implemented trajectory visualization using LogMD and py2Dmol (developed by Sergey Ovchinnikov).
 
-
-### ProteinMPNN
-- **Use case**: Protein-protein interface design
-
-### LigandMPNN  
-- **Use case**: Protein-ligand and non-protein biomolecule interfaces
-
 ## ✅ Structure Validation
 
 ### Primary Evaluation: AlphaFold3
