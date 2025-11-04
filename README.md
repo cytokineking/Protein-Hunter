@@ -113,7 +113,10 @@ This will take you from an initial input to final designed protein structures an
   ```
 
 ## 2️⃣ Refine your own designs!
-🛠️ You can provide your initial designs as input and further improve their structure by iteratively redesigning and predicting the structure. Repeat as needed for optimal results!
+🛠️ You can provide your initial designs as input and further improve their structures by iteratively redesigning and predicting them. Repeat as needed for optimal results!
+
+See the code in `refiner.ipynb` for example usage.
+
 
 
 
