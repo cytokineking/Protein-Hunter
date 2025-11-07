@@ -153,7 +153,7 @@ Final structures are validated using **AlphaFold3** for:
 
 After running the pipeline with `run_protein_hunter.py`, high-confidence designs can be found in:
 
-`your_output_folder/high_iptm_yaml`
+`your_output_folder/high_iptm_yaml` and `your_output_folder/high_iptm_cif`, with metrics saved in `summary_high_iptm.csv`.
 
 After running AlphaFold3, the validated structures are saved in:
 

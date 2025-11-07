@@ -2,11 +2,13 @@ import os
 import numpy as np
 import yaml
 import torch
+import shutil
 import csv
 import gc
 import re
 import sys
 import py2Dmol
+import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from chai_lab.chai1 import _bin_centers
@@ -470,11 +472,30 @@ def optimize_protein_design(
             metrics_list.append(metric_entry)
 
             print(f"{prefix} | Step {step + 1}: {msg}")
-            if (
+            # --- Check and Save High-Value Designs ---
+            is_high_iptm = (
                 is_binder_design
                 and metric_dict.get("iptm", 0.0) > high_iptm_threshold
                 and "seq" in new
-            ):
+            )
+
+            if is_high_iptm:
+                
+                # --- 1. Define Base Names and Dirs ---
+                # Get the main output dir (e.g., ./results/my_run_name -> ./results)
+                run_prefix_dir = os.path.dirname(str(prefix)) 
+                # Get the run ID (e.g., my_run_name)
+                run_id = os.path.basename(os.path.normpath(str(prefix)))
+                cycle_num = step + 1
+                base_filename = f"{run_id}_cycle_{cycle_num}"
+
+                # --- 2. Save YAML ---
+                yaml_base_name = f"{base_filename}_output.yaml"
+                # 'high_iptm_dir' is already defined as os.path.join(run_prefix_dir, "high_iptm_yaml")
+                yaml_path = os.path.join(high_iptm_dir, yaml_base_name)
+                os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
+                
+                # (Original sequence dictionary logic)
                 sequences=[]
                 sequence_entry = {
                     "protein": {
@@ -502,11 +523,41 @@ def optimize_protein_design(
                         }
                     }
                 sequences.append(target_sequence_entry)
-                yaml_path = os.path.join(high_iptm_dir, os.path.basename(os.path.normpath(str(prefix)))+"_cycle_"+str(step+1)+".yaml")
-                os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
+                
                 with open(yaml_path, "w") as f:
                     yaml.dump({"sequences": sequences}, f)
-                print(f"Saved high-confidence binder sequences to {yaml_path}")
+                print(f"✅ Saved high-ipTM YAML to {yaml_path}")
+                
+                # --- 3. Copy CIF ---
+                high_iptm_cif_dir = os.path.join(run_prefix_dir, "high_iptm_cif")
+                os.makedirs(high_iptm_cif_dir, exist_ok=True)
+                cif_base_name = f"{base_filename}_structure.cif"
+                dest_cif_path = os.path.join(high_iptm_cif_dir, cif_base_name)
+                
+                # The source file is in new["pdb"]
+                source_cif_path = new["pdb"]
+                shutil.copy(source_cif_path, dest_cif_path)
+                print(f"✅ Copied high-ipTM CIF to {dest_cif_path}")
+
+                # --- 4. Append to high-ipTM summary CSV ---
+                summary_csv_path = os.path.join(run_prefix_dir, "summary_high_iptm.csv")
+                
+                # Use the metrics we *just* calculated
+                metrics_to_save = metric_dict.copy()
+                
+                # Add the extra info
+                metrics_to_save["run_id"] = run_id
+                metrics_to_save["cycle"] = cycle_num
+                metrics_to_save["sequence"] = new["seq"]
+                metrics_to_save["cif_filename"] = cif_base_name
+                metrics_to_save["yaml_filename"] = yaml_base_name
+                
+                # Use pandas to append (much cleaner)
+                file_exists = os.path.isfile(summary_csv_path)
+                df_row = pd.DataFrame([metrics_to_save])
+                df_row.to_csv(summary_csv_path, mode='a', header=not file_exists, index=False)
+                print(f"✅ Appended high-ipTM metrics to {summary_csv_path}")
+
             if (
                 new["state"].result["ranking_score"]
                 > best["state"].result["ranking_score"]

@@ -2,9 +2,9 @@ import copy
 import os
 import random
 import sys
+import shutil
 from collections import defaultdict
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import torch
@@ -600,18 +600,54 @@ class ProteinHunter_Boltz:
                     print(
                         f"WARNING: Exception during contact check: {e}. Saving YAML anyway."
                     )
-
             if save_yaml_this_design:
+                # --- Define base names and directories ---
+                base_filename = f"{a.name}_run_{run_id}_cycle_{cycle + 1}"
+                
+                # 1. Save YAML
                 high_iptm_yaml_dir = os.path.join(self.save_dir, "high_iptm_yaml")
                 os.makedirs(high_iptm_yaml_dir, exist_ok=True)
-                yaml_filename = os.path.join(
-                    high_iptm_yaml_dir,
-                    f"{a.name}_run_{run_id}_cycle_{cycle + 1}_output.yaml",
-                )
+                yaml_base_name = f"{base_filename}_output.yaml"
+                yaml_filename = os.path.join(high_iptm_yaml_dir, yaml_base_name)
+                
                 with open(yaml_filename, "w") as f:
                     yaml.dump(data_cp, f, default_flow_style=False)
                 print(f"✅ Saved run {run_id} cycle {cycle + 1} YAML.")
 
+                # 2. Copy PDB
+                high_iptm_pdb_dir = os.path.join(self.save_dir, "high_iptm_pdb")
+                os.makedirs(high_iptm_pdb_dir, exist_ok=True)
+                
+                # Use the 'base_filename' for a consistent destination name
+                pdb_base_name = f"{base_filename}_structure.pdb" 
+                dest_pdb_path = os.path.join(high_iptm_pdb_dir, pdb_base_name)
+                
+                # Use 'pdb_filename', which is *always* defined just above this block
+                # This was the source of the UnboundLocalError
+                shutil.copy(pdb_filename, dest_pdb_path) # <-- MODIFIED LINE
+                print(f"✅ Copied PDB to {dest_pdb_path}")
+
+                # 3. Append to high-ipTM summary CSV
+                summary_csv_path = os.path.join(self.save_dir, "summary_high_iptm.csv")
+                
+                metrics_dict = {
+                    "run_id": run_id,
+                    "cycle": cycle + 1,
+                    "iptm": current_iptm,
+                    "plddt": curr_plddt,
+                    "iplddt": curr_iplddt,
+                    "alanine_count": alanine_count,
+                    "sequence": seq,
+                    "pdb_filename": pdb_base_name, # Log the *new* filename
+                    "yaml_filename": yaml_base_name
+                }
+                
+                # Check if file exists to write header only once
+                file_exists = os.path.isfile(summary_csv_path)
+                
+                df_row = pd.DataFrame([metrics_dict])
+                df_row.to_csv(summary_csv_path, mode='a', header=not file_exists, index=False)
+                print(f"✅ Appended high-ipTM metrics to {summary_csv_path}")
         # End of cycle visualization
         if best_structure is not None and a.plot:
             plot_from_pdb(best_pdb_filename)
