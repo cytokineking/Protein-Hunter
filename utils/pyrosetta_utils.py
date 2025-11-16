@@ -114,67 +114,104 @@ def pr_relax(pdb_file, relaxed_pdb_path):
     clean_pdb(relaxed_pdb_path)
 
 
+
 def hotspot_residues(trajectory_pdb, binder_chain="B", target_chain="A", atom_distance_cutoff=4.0):
     """
-    Identifies interface residues on the binder chain by checking for any binder atom
-    within cutoff of any target atom.
+    Identify interface residues on the binder chain by checking which binder atoms
+    are within cutoff of ANY atom in ANY non-binder chain.
+
+    Target = all chains except binder_chain.
     """
+
+    # Default 3→1 mapping
+    aa3to1_map = {
+        "ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLU":"E","GLN":"Q",
+        "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
+        "PRO":"P","SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V"
+    }
+
     parser = PDBParser(QUIET=True)
+
+    # -----------------------
+    # Load structure
+    # -----------------------
     try:
         structure = parser.get_structure("complex", trajectory_pdb)
     except Exception as e:
-        print(f"Error parsing {trajectory_pdb}: {e}")
+        print(f"[ERROR] Could not parse PDB: {e}")
         return {}
-        
+
     model = structure[0]
-    
-    if binder_chain not in model or target_chain not in model:
-        print(f"Warning: One or both chains ({binder_chain}, {target_chain}) not found for hotspot analysis.")
+
+    # -----------------------
+    # Validate binder chain
+    # -----------------------
+    if binder_chain not in model:
+        print(f"[WARNING] Binder chain '{binder_chain}' not found.")
         return {}
 
+    # -----------------------
+    # Build binder atom list
+    # -----------------------
     binder_atoms = Selection.unfold_entities(model[binder_chain], "A")
-    target_atoms = Selection.unfold_entities(model[target_chain], "A")
-
-    if not binder_atoms or not target_atoms:
+    if len(binder_atoms) == 0:
+        print(f"[WARNING] Binder chain '{binder_chain}' has no atoms.")
         return {}
 
-    binder_coords = np.array([atom.coord for atom in binder_atoms])
-    target_coords = np.array([atom.coord for atom in target_atoms])
+    # -----------------------
+    # Build TARGET atom list = all other chains
+    # -----------------------
+    target_atoms = []
+    for chain in model:
+        if chain.id != binder_chain:
+            target_atoms.extend(Selection.unfold_entities(chain, "A"))
+
+    if len(target_atoms) == 0:
+        print("[WARNING] No non-binder chains found for target atoms.")
+        return {}
+
+    # -----------------------
+    # KD-tree for fast contact search
+    # -----------------------
+    binder_coords = np.array([a.coord for a in binder_atoms])
+    target_coords = np.array([a.coord for a in target_atoms])
 
     binder_tree = cKDTree(binder_coords)
     target_tree = cKDTree(target_coords)
 
-    # Query the tree for pairs of atoms within the distance cutoff
-    # 'pairs' is a list where pairs[i] is a list of indices in target_coords that are near binder_coords[i]
     pairs = binder_tree.query_ball_tree(target_tree, atom_distance_cutoff)
 
-    # Prepare to collect interacting residues (pdb res number: 1-letter AA)
-    interacting_residues = {}
+    # -----------------------
+    # Collect interacting residues
+    # -----------------------
+    interacting = {}
 
-    for binder_idx, close_indices in enumerate(pairs):
-        if close_indices: # If there is at least one interaction
-            binder_residue = binder_atoms[binder_idx].get_parent()
-            pdb_res_num = binder_residue.id[1]
-            resname = binder_residue.get_resname().strip().upper()
-            
-            # Use the global mapping
-            aa_single_letter = RESTYPE_3TO1.get(resname, "X")
+    for binder_idx, close_list in enumerate(pairs):
+        if not close_list:
+            continue
 
-            # Store the residue number and its 1-letter code
-            interacting_residues[pdb_res_num] = aa_single_letter
+        atom = binder_atoms[binder_idx]
+        residue = atom.get_parent()
 
-    return interacting_residues
+        resnum = residue.id[1]
+        res3 = residue.get_resname().upper()
+        aa1 = aa3to1_map.get(res3, "X")
+
+        interacting[resnum] = aa1
+
+    return interacting
 
 
-def score_interface(pdb_file, binder_chain="B", target_chain="A"):
+
+def score_interface(pdb_file, pdb_file_collapsed, binder_chain="B", target_chain="A"):
     """
     Calculates various PyRosetta interface and complex metrics.
     """
     # Load pose
     try:
-        pose = pr.pose_from_pdb(pdb_file)
+        pose = pr.pose_from_pdb(pdb_file_collapsed)
     except Exception as e:
-        print(f"Error loading PDB {pdb_file} for interface scoring: {e}")
+        print(f"Error loading PDB {pdb_file_collapsed} for interface scoring: {e}")
         return {}, {}, ""
 
     # Define interface string for InterfaceAnalyzerMover
@@ -339,20 +376,109 @@ def unaligned_rmsd(reference_pdb, align_pdb, reference_chain_id, align_chain_id)
 
     return round(rmsd, 2)
 
+def collapse_multiple_chains(pdb_in, pdb_out, binder_chain="A", collapse_target="B"):
+    """
+    Generalized chain collapse:
+      - binder_chain stays as-is (e.g. A)
+      - all other chains collapse to collapse_target (e.g. B)
+      - Only *one* TER after binder_chain → collapsed-group
+      - One final TER at the end of collapsed chains
+    """
 
-def get_binder_chain(pdb_file):
-    """Simple utility to get the last chain ID in a PDB file."""
-    parser = PDBParser(QUIET=True)
-    binder_structure = parser.get_structure("protein", pdb_file)
-    chain_ids = [chain.id for model in binder_structure for chain in model]
-    return chain_ids[-1]
+    with open(pdb_in, "r") as f:
+        lines = f.readlines()
 
+    # -------------------------------
+    # STEP 1 — Collect ATOM/HETATM lines & detect chains
+    # -------------------------------
+    atom_indices = []
+    chain_list = []
+    for i, line in enumerate(lines):
+        if line.startswith(("ATOM  ", "HETATM")):
+            atom_indices.append(i)
+            chain_list.append(line[21])
+
+    # Identify all chains
+    all_chains = sorted(set(chain_list))
+
+    # All non-binder chains collapse
+    collapse_chains = [c for c in all_chains if c != binder_chain]
+
+    # -------------------------------
+    # STEP 2 — Detect chain transitions
+    # -------------------------------
+    transitions = []
+    for (idx1, c1), (idx2, c2) in zip(
+            zip(atom_indices, chain_list),
+            zip(atom_indices[1:], chain_list[1:])):
+        if c1 != c2:
+            transitions.append((idx1, c1, c2))
+
+    # -------------------------------
+    # STEP 3 — Choose which transitions get TER
+    # -------------------------------
+    ter_after = set()
+    seen_binder_to_collapsed = False
+
+    for idx, c1, c2 in transitions:
+
+        # If binder → collapsed-group transition
+        if c1 == binder_chain and c2 in collapse_chains:
+            if not seen_binder_to_collapsed:
+                ter_after.add(idx)
+                seen_binder_to_collapsed = True
+            continue
+
+        # All other TERs removed (do nothing)
+
+    # -------------------------------
+    # STEP 4 — Add a final TER at end of collapsed chains
+    # -------------------------------
+    last_collapsed_idx = None
+    for i, line in enumerate(lines):
+        if line.startswith(("ATOM  ", "HETATM")) and line[21] in collapse_chains:
+            last_collapsed_idx = i
+
+    if last_collapsed_idx is not None:
+        ter_after.add(last_collapsed_idx)
+
+    # -------------------------------
+    # STEP 5 — Write output without old TERs
+    # -------------------------------
+    temp_out = []
+    for i, line in enumerate(lines):
+
+        if line.startswith(("ATOM  ", "HETATM")):
+            temp_out.append(line)
+            if i in ter_after:
+                temp_out.append("TER\n")
+            continue
+
+        # remove existing TER lines
+        if line.startswith("TER"):
+            continue
+
+        temp_out.append(line)
+
+    # -------------------------------
+    # STEP 6 — Collapse all other chains into collapse_target
+    # -------------------------------
+    final_out = []
+    for line in temp_out:
+        if (line.startswith(("ATOM  ", "HETATM"))
+            and line[21] in collapse_chains):
+            line = line[:21] + collapse_target + line[22:]
+
+        final_out.append(line)
+
+    with open(pdb_out, "w") as f:
+        f.writelines(final_out)
 
 def measure_rosetta_energy(
     pdbs_path,
     pdbs_apo_path,
     save_dir,
-    binder_holo_chain="B",
+    binder_holo_chain="A",
     binder_apo_chain="A",
     target="peptide",
 ):
@@ -383,33 +509,36 @@ def measure_rosetta_energy(
         if pdb_file.endswith(".pdb") and not pdb_file.startswith("relax_"):
             if pdb_file in processed_files:
                 continue
-
             try:
                 design_pathway = os.path.join(pdbs_path, pdb_file)
                 relax_pathway = os.path.join(relaxed_dir, f"relax_{pdb_file}")
-                
-                # Check for chain ID from holo PDB (might be A or B depending on AF3 processing)
-                binder_chain = get_binder_chain(design_pathway)
-                
+                parser = PDBParser(QUIET=True)
+                structure = parser.get_structure("protein", design_pathway)
+                total_chains = [chain.id for model in structure for chain in model]
                 pr_relax(design_pathway, relax_pathway)
-                
+                if len(total_chains) > 3:
+                    relax_pathway_collapsed = os.path.join(relaxed_dir, f"relax_collapsed_{pdb_file}")
+                    collapse_multiple_chains(relax_pathway, relax_pathway_collapsed, binder_chain=binder_holo_chain)
+                else:
+                    relax_pathway_collapsed = relax_pathway
+
                 (
                     trajectory_interface_scores,
                     trajectory_interface_AA,
                     trajectory_interface_residues,
-                ) = score_interface(relax_pathway, binder_chain, target_chain="A")
-                
+                ) = score_interface(relax_pathway, relax_pathway_collapsed, binder_chain=binder_holo_chain, target_chain="B")
+
+
                 print(f"Rosetta scores for {pdb_file}: {trajectory_interface_scores}")
 
                 row_data = {"PDB": relaxed_dir, "Model": f"relax_{pdb_file}"}
                 row_data.update(trajectory_interface_scores)
                 new_rows.append(row_data)
                 processed_files.add(pdb_file)
-                
+                    
             except Exception as e:
                 print(f"Error processing {pdb_file}: {e}")
 
-    # Append new rows and save
     if new_rows:
         df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
         df.to_csv(output_path, index=False)
@@ -422,7 +551,57 @@ def measure_rosetta_energy(
         print("No data available for filtering.")
         return
 
-    # Define filtering mask based on target type
+    # Define filtering mask based on target type and capture thresholds for failure reason
+    def failure_reasons(row, target="peptide"):
+        reasons = []
+        if target == "peptide":
+            if not row.get("binder_score", float('inf')) < 0:
+                reasons.append("binder_score >= 0")
+            if not row.get("surface_hydrophobicity", float('inf')) < 0.35:
+                reasons.append("surface_hydrophobicity >= 0.35")
+            if not row.get("interface_sc", float('-inf')) > 0.55:
+                reasons.append("interface_sc <= 0.55")
+            if not row.get("interface_packstat", float('-inf')) > 0:
+                reasons.append("interface_packstat <= 0")
+            if not row.get("interface_dG", float('inf')) < 0:
+                reasons.append("interface_dG >= 0")
+            if not row.get("interface_dSASA", float('-inf')) > 1:
+                reasons.append("interface_dSASA <= 1")
+            if not row.get("interface_dG_SASA_ratio", float('inf')) < 0:
+                reasons.append("interface_dG_SASA_ratio >= 0")
+            if not row.get("interface_nres", float('-inf')) > 4:
+                reasons.append("interface_nres <= 4")
+            if not row.get("interface_interface_hbonds", float('-inf')) > 3:
+                reasons.append("interface_interface_hbonds <= 3")
+            if not row.get("interface_hbond_percentage", float('-inf')) > 0:
+                reasons.append("interface_hbond_percentage <= 0")
+            if not row.get("interface_delta_unsat_hbonds", float('inf')) < 2:
+                reasons.append("interface_delta_unsat_hbonds >= 2")
+        else:  # protein, small_molecule, nucleic
+            if not row.get("binder_score", float('inf')) < 0:
+                reasons.append("binder_score >= 0")
+            if not row.get("surface_hydrophobicity", float('inf')) < 0.35:
+                reasons.append("surface_hydrophobicity >= 0.35")
+            if not row.get("interface_sc", float('-inf')) > 0.55:
+                reasons.append("interface_sc <= 0.55")
+            if not row.get("interface_packstat", float('-inf')) > 0:
+                reasons.append("interface_packstat <= 0")
+            if not row.get("interface_dG", float('inf')) < 0:
+                reasons.append("interface_dG >= 0")
+            if not row.get("interface_dSASA", float('-inf')) > 1:
+                reasons.append("interface_dSASA <= 1")
+            if not row.get("interface_dG_SASA_ratio", float('inf')) < 0:
+                reasons.append("interface_dG_SASA_ratio >= 0")
+            if not row.get("interface_nres", float('-inf')) > 7:
+                reasons.append("interface_nres <= 7")
+            if not row.get("interface_interface_hbonds", float('-inf')) > 3:
+                reasons.append("interface_interface_hbonds <= 3")
+            if not row.get("interface_hbond_percentage", float('-inf')) > 0:
+                reasons.append("interface_hbond_percentage <= 0")
+            if not row.get("interface_delta_unsat_hbonds", float('inf')) < 4:
+                reasons.append("interface_delta_unsat_hbonds >= 4")
+        return '; '.join(reasons) if reasons else None
+
     if target == "peptide":
         mask = (
             (df["binder_score"] < 0)
@@ -437,7 +616,7 @@ def measure_rosetta_energy(
             & (df["interface_hbond_percentage"] > 0)
             & (df["interface_delta_unsat_hbonds"] < 2)
         )
-    else: # protein, small_molecule, nucleic (uses general protein interface criteria)
+    else:  # protein, small_molecule, nucleic (uses general protein interface criteria)
         mask = (
             (df["binder_score"] < 0)
             & (df["surface_hydrophobicity"] < 0.35)
@@ -451,7 +630,7 @@ def measure_rosetta_energy(
             & (df["interface_hbond_percentage"] > 0)
             & (df["interface_delta_unsat_hbonds"] < 4)
         )
-        
+
     # Apply mask and filter
     filtered_df = df[mask].copy()
     failed_df = df[~mask].copy()
@@ -461,85 +640,119 @@ def measure_rosetta_energy(
 
     all_filtered_rows = []
     all_failed_rows = []
-    success_sample_num =0
-    
-    if len(filtered_df) > 0:
-        for i in range(len(filtered_df)):
+    success_sample_num = 0
+
+    def get_metrics(row, pdbs_path, pdbs_apo_path, binder_holo_chain, binder_apo_chain):
+        # Returns a new dict with extra annotations (aa_seq, rg, etc)
+        row = row.copy()
+        try:
+            cif_path = row['PDB'] + '/' + row['Model']
+            rg, length = radius_of_gyration(cif_path, chain_id=binder_holo_chain)
+            model_base = row['Model'].split('relax_')[-1].split('_model.pdb')[0] if row['Model'].startswith('relax') else row['Model'].split('_model.pdb')[0]
+            base_path = '/'.join(row['PDB'].split('/')[:-1]) + '/02_design_final_af3/' + model_base
+            confidenece_json_1 = f"{base_path}/{model_base}_summary_confidences.json"
+            confidenece_json_2 = f"{base_path}/{model_base}_confidences.json"
+            af_cif = f"{base_path}/{model_base}_model.cif"
+            aa_seq = get_sequence(af_cif, chain_id=binder_holo_chain)
+            if row['Model'].startswith('relax'):
+                af_holo_pdb = pdbs_path + '/' + row['Model'].split('relax_')[1]
+                af_apo_pdb = pdbs_apo_path + '/' + row['Model'].split('relax_')[1]
+            else:
+                af_holo_pdb = pdbs_path + '/' + row['Model']
+                af_apo_pdb = pdbs_apo_path + '/' + row['Model']
+            xyz_holo, seq_holo = get_CA_and_sequence(af_holo_pdb, chain_id=binder_holo_chain)
+            xyz_apo, seq_apo = get_CA_and_sequence(af_apo_pdb, chain_id=binder_apo_chain)
+            rmsd = np_rmsd(xyz_holo, xyz_apo)
+            row['apo_holo_rmsd'] = rmsd
+            # confidence 1
             try:
-                row = filtered_df.iloc[i].copy()  # Create a copy to avoid SettingWithCopyWarning
-                cif_path = row['PDB'] + '/' + row['Model']
-
-                rg, length = radius_of_gyration(cif_path, chain_id=binder_holo_chain)
-                
-                # Extract model name without relax_ prefix if present
-                model_base = row['Model'].split('relax_')[-1].split('_model.pdb')[0] if row['Model'].startswith('relax') else row['Model'].split('_model.pdb')[0]
-                
-                # Construct paths
-                base_path = '/'.join(row['PDB'].split('/')[:-1]) + '/02_design_final_af3/' + model_base
-                confidenece_json_1 = f"{base_path}/{model_base}_summary_confidences.json"
-                confidenece_json_2 = f"{base_path}/{model_base}_confidences.json"
-                af_cif = f"{base_path}/{model_base}_model.cif"
-                
-                aa_seq = get_sequence(af_cif, chain_id=binder_holo_chain)
-                
-                # Set PDB paths
-                if row['Model'].startswith('relax'):
-                    af_holo_pdb = pdbs_path + '/' + row['Model'].split('relax_')[1]
-                    af_apo_pdb = pdbs_apo_path + '/' + row['Model'].split('relax_')[1]
-                else:
-                    af_holo_pdb = pdbs_path + '/' + row['Model']
-                    af_apo_pdb = pdbs_apo_path + '/' + row['Model']
-
-                xyz_holo, seq_holo = get_CA_and_sequence(af_holo_pdb, chain_id=binder_holo_chain)
-                xyz_apo, seq_apo = get_CA_and_sequence(af_apo_pdb, chain_id=binder_apo_chain)
-                rmsd = np_rmsd(xyz_holo, xyz_apo)
-                row['apo_holo_rmsd'] = rmsd
-            
                 with open(confidenece_json_1, 'r') as f:
                     confidence_data = json.load(f)
                     row['iptm'] = confidence_data['iptm']
-                    
+            except Exception:
+                row['iptm'] = None
+            # confidence 2
+            try:
                 with open(confidenece_json_2, 'r') as f:
                     confidence_data = json.load(f)
-                    
                     row['plddt'] = np.mean(confidence_data['atom_plddts'])
-                    pae_matrix= np.array(confidence_data['pae'])
+                    pae_matrix = np.array(confidence_data['pae'])
                     protein_len = len(aa_seq)
                     interface_pae1 = np.mean(pae_matrix[:protein_len, protein_len:])
                     interface_pae2 = np.mean(pae_matrix[protein_len:, :protein_len])
                     i_pae = (interface_pae1 + interface_pae2) / 2
+                    row['i_pae'] = i_pae
+            except Exception:
+                row['plddt'] = None
+                row['i_pae'] = None
+            row['rg'] = rg
+            row['aa_seq'] = aa_seq
+        except Exception as e:
+            print(f"Error adding metrics for {row.get('Model', 'unknown')}: {e}")
+            row['apo_holo_rmsd'] = None
+            row['iptm'] = None
+            row['plddt'] = None
+            row['i_pae'] = None
+            row['rg'] = None
+            row['aa_seq'] = None
+        return row
 
-                row['i_pae'] = i_pae
-                row['rg'] = rg
-                row['aa_seq'] = aa_seq
-
-                print(f"iptm: {row['iptm']:.2f}, plddt: {row['plddt']:.1f}, rg: {rg:.1f}, i_pae: {row['i_pae']:.1f}, apo_holo_rmsd: {row['apo_holo_rmsd']:.1f}")
-                if row['iptm'] > 0.5 and row['plddt'] > 80 and rg < 17 and row['i_pae'] < 15 and row['apo_holo_rmsd'] < 3.5:
-                    shutil.copy(Path(row['PDB']) / row['Model'], save_dir + '/' + row['Model'])
-                    all_filtered_rows.append(row)
-                    success_sample_num+=1
+    # Process passing (filtered) designs
+    if len(filtered_df) > 0:
+        for i in range(len(filtered_df)):
+            try:
+                row = filtered_df.iloc[i].copy()  # Create a copy to avoid SettingWithCopyWarning
+                metrics_row = get_metrics(
+                    row, pdbs_path, pdbs_apo_path, binder_holo_chain, binder_apo_chain)
+                print(
+                    f"iptm: {metrics_row.get('iptm', float('nan')):.2f}, "
+                    f"plddt: {metrics_row.get('plddt', float('nan')):.1f}, "
+                    f"rg: {metrics_row.get('rg', float('nan')):.1f}, "
+                    f"i_pae: {metrics_row.get('i_pae', float('nan')):.1f}, "
+                    f"apo_holo_rmsd: {metrics_row.get('apo_holo_rmsd', float('nan')):.1f}"
+                )
+                iptm_val = metrics_row.get('iptm', 0 if metrics_row.get('iptm') is None else metrics_row.get('iptm'))
+                plddt_val = metrics_row.get('plddt', 0 if metrics_row.get('plddt') is None else metrics_row.get('plddt'))
+                rg_val = metrics_row.get('rg', 999 if metrics_row.get('rg') is None else metrics_row.get('rg'))
+                i_pae_val = metrics_row.get('i_pae', 999 if metrics_row.get('i_pae') is None else metrics_row.get('i_pae'))
+                rmsd_val = metrics_row.get('apo_holo_rmsd', 999 if metrics_row.get('apo_holo_rmsd') is None else metrics_row.get('apo_holo_rmsd'))
+                if iptm_val > 0.5 and plddt_val > 80 and rg_val < 17 and i_pae_val < 15 and rmsd_val < 3.5:
+                    shutil.copy(Path(metrics_row['PDB']) / metrics_row['Model'], save_dir + '/' + metrics_row['Model'])
+                    all_filtered_rows.append(metrics_row)
+                    success_sample_num += 1
                 else:
-                    all_failed_rows.append(row)
+                    fail_row = metrics_row.copy()
+                    fail_row['failure_reason'] = (
+                        "Does not pass iptm/plddt/rg/i_pae/rmsd thresholds: "
+                        f"iptm={iptm_val}, plddt={plddt_val}, rg={rg_val}, i_pae={i_pae_val}, rmsd={rmsd_val}"
+                    )
+                    all_failed_rows.append(fail_row)
             except Exception as e:
                 print(f"Error processing {row['Model']}: {e}")
                 continue
 
-    # Add all failed cases
-    print("success_sample_num", success_sample_num)
+    # Process failing designs: also annotate with metrics (aa_seq, rg, etc) and add explicit failure reason(s)
     for i in range(len(failed_df)):
-        all_failed_rows.append(failed_df.iloc[i])
+        row = failed_df.iloc[i].copy()
+        metrics_row = get_metrics(
+            row, pdbs_path, pdbs_apo_path, binder_holo_chain, binder_apo_chain
+        )
+        metrics_row['failure_reason'] = failure_reasons(row, target=target)
+        all_failed_rows.append(metrics_row)
+
+    print("success_sample_num", success_sample_num)
 
     success_csv = os.path.join(save_dir, 'success_designs.csv')
     failed_csv = os.path.join(save_dir, 'failed_designs.csv')
     zip_path = save_dir + '.zip'
-    
+
     save_df = pd.DataFrame(all_filtered_rows)
     save_df.to_csv(success_csv, index=False)
-    
+
     print("Number of Success designs", len(save_df))
 
-    failed_df = pd.DataFrame(all_failed_rows)
-    failed_df.to_csv(failed_csv, index=False)
+    failed_df_save = pd.DataFrame(all_failed_rows)
+    failed_df_save.to_csv(failed_csv, index=False)
 
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk(save_dir):
@@ -548,7 +761,6 @@ def measure_rosetta_energy(
                 arcname = os.path.relpath(file_path, save_dir)
                 zipf.write(file_path, arcname)
 
-    
 
 def run_rosetta_step(
     ligandmpnn_dir, af_pdb_dir, af_pdb_dir_apo, binder_id="A", target_type="protein"

@@ -48,40 +48,23 @@ class InputDataBuilder:
 
 
     def _process_sequence_inputs(self):
-        """Parses and groups protein/ligand/nucleic acid inputs from command line arguments."""
+        """
+        Parses and groups protein sequences and MSAs from command line arguments.
+        Ensures protein_seqs_list and protein_msas_list are aligned and padded.
+        """
         a = self.args
-        protein_ids = a.protein_ids
-        protein_seqs = a.protein_seqs
-        protein_msas = a.protein_msas
+        
+        protein_seqs_list = smart_split(a.protein_seqs) if a.protein_seqs else []
 
-        # Handle various separator formats (comma, colon, space) or single string
-        if ":" not in protein_ids and "," not in protein_ids and " " not in protein_ids.strip():
-            protein_ids_list = [protein_ids.strip()] if protein_ids.strip() else []
-            protein_seqs_list = [protein_seqs.strip()] if protein_seqs.strip() else []
-            protein_msas_list = [protein_msas.strip()] if protein_msas.strip() else []
+        # Handle special "empty" case: --protein_msas "empty" applies to all seqs
+        if a.msa_mode == "single":
+            protein_msas_list = ["empty"] * len(protein_seqs_list)
+        elif a.msa_mode == "mmseqs":
+            protein_msas_list = ["mmseqs"] * len(protein_seqs_list)
         else:
-            protein_ids_list = smart_split(protein_ids)
-            protein_seqs_list = smart_split(protein_seqs)
-            protein_msas_list = (
-                smart_split(protein_msas)
-                if protein_msas
-                else [""] * len(protein_ids_list)
-            )
+            raise ValueError(f"Invalid msa_mode: {a.msa_mode}")
 
-        # Pad lists to the max length found
-        max_len = max(
-            len(protein_ids_list),
-            len(protein_seqs_list),
-            len(protein_msas_list),
-        )
-        while len(protein_ids_list) < max_len:
-            protein_ids_list.append("")
-        while len(protein_seqs_list) < max_len:
-            protein_seqs_list.append("")
-        while len(protein_msas_list) < max_len:
-            protein_msas_list.append("")
-
-        return protein_ids_list, protein_seqs_list, protein_msas_list
+        return protein_seqs_list, protein_msas_list
 
 
     def build(self):
@@ -111,7 +94,7 @@ class InputDataBuilder:
             "sequences": [
                 {
                     "protein": {
-                        "id": [self.args.binder_chain],
+                        "id": ["A"],
                         "sequence": "X",
                         "msa": "empty",
                     }
@@ -124,11 +107,27 @@ class InputDataBuilder:
     def _build_conditional_data(self):
         """Constructs data for conditioned design (binder + target + optional non-protein)."""
         a = self.args
-        protein_ids_list, protein_seqs_list, protein_msas_list = (
+        protein_seqs_list, protein_msas_list = (
             self._process_sequence_inputs()
         )
-        print("protein_msas_list", protein_msas_list)
         sequences = []
+        
+        # Assign chain IDs to proteins first
+        protein_chain_ids = [chr(ord('B') + i) for i in range(len(protein_seqs_list))]
+        
+        # Find next available chain letter
+        next_chain_idx = len(protein_chain_ids)
+        
+        ligand_chain_id = None
+        if a.ligand_smiles or a.ligand_ccd:
+            ligand_chain_id = chr(ord('B') + next_chain_idx)
+            next_chain_idx += 1
+            
+        nucleic_chain_id = None
+        if a.nucleic_seq:
+            nucleic_chain_id = chr(ord('B') + next_chain_idx)
+            next_chain_idx += 1
+        # --- END NEW ---
 
         # Step 1: Determine canonical MSA for each unique target sequence
         seq_to_indices = defaultdict(list)
@@ -142,33 +141,25 @@ class InputDataBuilder:
                 (
                     protein_msas_list[i]
                     for i in idx_list
-                    if protein_msas_list[i] not in ["", None]
                 ),
                 None
             )
             chosen_msa = chosen_msa if chosen_msa is not None else ""
 
-            if chosen_msa == "": # If MSA path is empty, run MMseqs2
-                idx0 = idx_list[0]
-                pid0 = (
-                    protein_ids_list[idx0]
-                    if protein_ids_list[idx0]
-                    else f"CHAIN_{idx0}"
-                )
-                print(f"Processing MSA for target sequence in {pid0}...")
-                msa_value = process_msa(
-                    pid0, seq, Path(self.protein_hunter_save_dir)
-                )
+            if chosen_msa == "mmseqs":
+                pid = protein_chain_ids[idx_list[0]]
+                msa_value = process_msa(pid, seq, Path(self.protein_hunter_save_dir))
                 seq_to_final_msa[seq] = str(msa_value)
             elif chosen_msa == "empty":
                 seq_to_final_msa[seq] = "empty"
             else:
-                seq_to_final_msa[seq] = chosen_msa
+                raise ValueError(f"Invalid msa_mode: {a.msa_mode}")
 
         # Step 2: Build sequences list for target proteins
-        for pid, seq in zip(protein_ids_list, protein_seqs_list):
-            if not pid or not seq:
+        for i, (seq, msa) in enumerate(zip(protein_seqs_list, protein_msas_list)):
+            if not seq:
                 continue
+            pid = protein_chain_ids[i]
             final_msa = seq_to_final_msa.get(seq, "empty")
             sequences.append(
                 {
@@ -184,7 +175,7 @@ class InputDataBuilder:
         sequences.append(
             {
                 "protein": {
-                    "id": [a.binder_chain],
+                    "id": ["A"], # Hardcoded 'A'
                     "sequence": "X",
                     "msa": "empty",
                     "cyclic": a.cyclic,
@@ -195,77 +186,93 @@ class InputDataBuilder:
         # Step 4: Add ligands/nucleic acids
         if a.ligand_smiles:
             sequences.append(
-                {"ligand": {"id": [a.ligand_id], "smiles": a.ligand_smiles}}
+                {"ligand": {"id": [ligand_chain_id], "smiles": a.ligand_smiles}}
             )
         elif a.ligand_ccd:
-            sequences.append({"ligand": {"id": [a.ligand_id], "ccd": a.ligand_ccd}})
+            sequences.append({"ligand": {"id": [ligand_chain_id], "ccd": a.ligand_ccd}})
         if a.nucleic_seq:
             sequences.append(
-                {a.nucleic_type: {"id": [a.nucleic_id], "sequence": a.nucleic_seq}}
+                {a.nucleic_type: {"id": [nucleic_chain_id], "sequence": a.nucleic_seq}}
             )
 
         # Step 5: Add templates
-        templates = self._build_templates()
+        templates = self._build_templates(protein_chain_ids)
 
         data = {"sequences": sequences}
         if templates:
             data["templates"] = templates
 
         # Step 6: Add constraints (pocket conditioning)
-        pocket_conditioning = a.add_constraints
-        if a.add_constraints:
-            residues = a.contact_residues.split(",")
-            contacts = [
-                [a.constraint_target_chain, int(res)]
-                for res in residues
-                if res.strip() != ""
-            ]
-            constraints = {
-                "pocket": {"binder": a.binder_chain, "contacts": contacts}
-            }
-            data["constraints"] = [constraints]
+        pocket_conditioning = bool(a.contact_residues and a.contact_residues.strip())
+        if pocket_conditioning:
+            contacts = []
+            residues_chains = a.contact_residues.split("|")
+            for i, residues_chain in enumerate(residues_chains):
+                residues = residues_chain.split(",")
+                contacts.extend([
+                    [protein_chain_ids[i], int(res)]
+                    for res in residues
+                    if res.strip() != ""
+                ])
+            constraints = [{"pocket": {"binder": "A", "contacts": contacts}}]
+            data["constraints"] = constraints
 
         return data, pocket_conditioning
 
-    def _build_templates(self):
-        """Constructs the list of template dictionaries."""
+    def _build_templates(self, protein_chain_ids):
+        """
+        Constructs the list of template dictionaries.
+        """
         a = self.args
         templates = []
         if a.template_path:
             template_path_list = smart_split(a.template_path)
-            template_chain_id_list = (
-                smart_split(a.template_chain_id) if a.template_chain_id else []
-            )
+            # We use the internal protein_chain_ids list
             template_cif_chain_id_list = (
                 smart_split(a.template_cif_chain_id)
                 if a.template_cif_chain_id
                 else []
             )
-            template_files = [get_cif(tp) for tp in template_path_list]
             
-            # Ensure all lists are of the same length, padding with empty strings if necessary
-            max_len = len(template_files)
-            if len(template_chain_id_list) < max_len:
-                template_chain_id_list += [""] * (max_len - len(template_chain_id_list))
-            if len(template_cif_chain_id_list) < max_len:
-                template_cif_chain_id_list += [""] * (max_len - len(template_cif_chain_id_list))
-
-            for i, template_file in enumerate(template_files):
+            # Use protein_chain_ids to determine the number of expected templates
+            num_proteins = len(protein_chain_ids)
+            
+            # Pad template paths list to match number of proteins
+            if len(template_path_list) != num_proteins:
+                print(f"Warning: Mismatch between number of proteins ({num_proteins}) and template paths ({len(template_path_list)}). Padding with empty entries.")
+                while len(template_path_list) < num_proteins:
+                    template_path_list.append("")
+            
+            # Pad cif chains list to match number of proteins
+            if len(template_cif_chain_id_list) != num_proteins:
+                print(f"Warning: Mismatch between number of proteins ({num_proteins}) and template CIF chains ({len(template_cif_chain_id_list)}). Padding with empty entries.")
+                while len(template_cif_chain_id_list) < num_proteins:
+                    template_cif_chain_id_list.append("")
+            
+            # Now, iterate up to num_proteins, linking them
+            for i in range(num_proteins):
+                template_file_path = template_path_list[i]
+                if not template_file_path:
+                    continue # Skip if no template path for this protein
+                    
+                template_file = get_cif(template_file_path)
+                
                 t_block = (
                     {"cif": template_file}
                     if template_file.endswith(".cif")
                     else {"pdb": template_file}
                 )
                 
-                # Only add chain IDs if they exist for this template entry
-                if template_chain_id_list and template_chain_id_list[i]:
-                    t_block["chain_id"] = template_chain_id_list[i]
-                    if template_cif_chain_id_list and template_cif_chain_id_list[i]:
-                        t_block["cif_chain_id"] = template_cif_chain_id_list[i]
+                t_block["chain_id"] = protein_chain_ids[i] # e.g., 'B'
+                
+                # Only add cif_chain_id if provided for this template
+                cif_chain = template_cif_chain_id_list[i]
+                if cif_chain:
+                    t_block["cif_chain_id"] = cif_chain # e.g., 'P'
                 
                 templates.append(t_block)
+                
         return templates
-
 
 class ProteinHunter_Boltz:
     """
@@ -292,7 +299,7 @@ class ProteinHunter_Boltz:
         # 3. Setup Directories
         self.save_dir = self.data_builder.save_dir
         self.protein_hunter_save_dir = self.data_builder.protein_hunter_save_dir
-    
+        self.binder_chain = "A"
 
         print("✅ ProteinHunter_Boltz initialized.")
 
@@ -312,7 +319,7 @@ class ProteinHunter_Boltz:
             predict_args=predict_args,
             device=self.device,
             model_version=self.args.boltz_model_version,
-            no_potentials=self.args.no_potentials,
+            no_potentials=False if self.args.contact_residues else True,
             grad_enabled=self.args.grad_enabled,
         )
 
@@ -338,16 +345,23 @@ class ProteinHunter_Boltz:
         best_alanine_percentage = None
         run_metrics = {"run_id": run_id}
 
-        binder_length = random.randint(
-            a.min_design_protein_length, a.max_design_protein_length
-        )
+
+        if a.seq =="":
+            binder_length = random.randint(
+                a.min_protein_length, a.max_protein_length
+            )
+        else:
+            binder_length = len(a.seq)
+
+        if "constraints" in data_cp:
+            protein_chain_ids = sorted({chain for chain, _ in data_cp["constraints"][0]["pocket"]["contacts"]})
 
         # Helper function to update sequence in the data dictionary
         def update_binder_sequence(new_seq):
             for seq_entry in data_cp["sequences"]:
                 if (
                     "protein" in seq_entry
-                    and a.binder_chain in seq_entry["protein"]["id"]
+                    and self.binder_chain in seq_entry["protein"]["id"]
                 ):
                     seq_entry["protein"]["sequence"] = new_seq
                     return
@@ -355,15 +369,17 @@ class ProteinHunter_Boltz:
             raise ValueError("Binder chain not found in data dictionary.")
 
         # Set initial binder sequence
-        initial_seq = sample_seq(
-            binder_length, exclude_P=a.exclude_P, frac_X=a.percent_X/100
-        )
+        if a.seq =="":
+            initial_seq = sample_seq(
+                binder_length, exclude_P=a.exclude_P, frac_X=a.percent_X/100
+            )
+        else:
+            initial_seq = a.seq
         update_binder_sequence(initial_seq)
         print(f"Binder initial sequence length: {binder_length}")
 
         # --- Cycle 0 structure prediction, with contact filtering check ---
         contact_filter_attempt = 0
-        target_chain_for_contacts = a.constraint_target_chain
         pdb_filename = ""
         structure = None
         output = None
@@ -371,7 +387,7 @@ class ProteinHunter_Boltz:
         while True:
             output, structure = run_prediction(
                 data_cp,
-                a.binder_chain,
+                self.binder_chain,
                 randomly_kill_helix_feature=a.randomly_kill_helix_feature,
                 negative_helix_constant=a.negative_helix_constant,
                 boltz_model=self.boltz_model,
@@ -389,13 +405,15 @@ class ProteinHunter_Boltz:
             contact_check_okay = True
             if a.contact_residues.strip() and not a.no_contact_filter:
                 try:
-                    binds = binder_binds_contacts(
+                    binds = all([binder_binds_contacts(
                         pdb_filename,
-                        a.binder_chain,
-                        target_chain_for_contacts,
-                        a.contact_residues,
+                        self.binder_chain,
+                        protein_chain_ids[i],
+                        contact_res,
                         cutoff=a.contact_cutoff,
                     )
+                    for i, contact_res in enumerate(a.contact_residues.split("|"))
+                ])
                     if not binds:
                         print(
                             "❌ Binder does NOT contact required residues after cycle 0. Retrying..."
@@ -419,7 +437,7 @@ class ProteinHunter_Boltz:
 
         clean_memory() # <-- ADD THIS CALL HERE
         # Capture Cycle 0 metrics
-        binder_chain_idx = CHAIN_TO_NUMBER[a.binder_chain]
+        binder_chain_idx = CHAIN_TO_NUMBER[self.binder_chain]
         pair_chains = output["pair_chains_iptm"]
         
         # Calculate i-pTM
@@ -455,9 +473,6 @@ class ProteinHunter_Boltz:
             alpha = a.alanine_bias_start - cycle_norm * (
                 a.alanine_bias_start - a.alanine_bias_end
             )
-            temperature = a.temperature_start - cycle_norm * (
-                a.temperature_start - a.temperature_end
-            )
 
             # 1. Design Sequence
             model_type = (
@@ -467,8 +482,8 @@ class ProteinHunter_Boltz:
             )
             design_kwargs = {
                 "pdb_file": pdb_filename,
-                "temperature": temperature,
-                "chains_to_design": a.binder_chain,
+                "temperature": a.temperature,
+                "chains_to_design": self.binder_chain,
                 "omit_AA": f"{a.omit_AA},P" if cycle == 0 else a.omit_AA,
                 "bias_AA": f"A:{alpha}" if a.alanine_bias else "",
             }
@@ -477,7 +492,7 @@ class ProteinHunter_Boltz:
                 self.designer, model_type, **design_kwargs
             )
             # The output seq_str is a dictionary-like string, we extract the binder chain sequence
-            seq = seq_str.split(":")[CHAIN_TO_NUMBER[a.binder_chain]] 
+            seq = seq_str.split(":")[CHAIN_TO_NUMBER[self.binder_chain]] 
 
             # Update data_cp with new sequence
             alanine_count = seq.count("A")
@@ -489,7 +504,7 @@ class ProteinHunter_Boltz:
             # 2. Structure Prediction
             output, structure = run_prediction(
                 data_cp,
-                a.binder_chain,
+                self.binder_chain,
                 seq=seq,
                 randomly_kill_helix_feature=False,
                 negative_helix_constant=0.0,
@@ -501,7 +516,7 @@ class ProteinHunter_Boltz:
             )
 
             # Calculate ipTM
-            current_chain_idx = CHAIN_TO_NUMBER[a.binder_chain]
+            current_chain_idx = CHAIN_TO_NUMBER[self.binder_chain]
             pair_chains = output["pair_chains_iptm"]
             if len(pair_chains) > 1:
                 values = [
@@ -570,18 +585,21 @@ class ProteinHunter_Boltz:
             # 4. Save YAML for High ipTM
             save_yaml_this_design = (alanine_percentage <= 0.20) and (
                 current_iptm > a.high_iptm_threshold
+                and curr_plddt > a.high_plddt_threshold
             )
 
             if save_yaml_this_design and a.contact_residues.strip():
                 this_cycle_pdb_filename = f"{run_save_dir}/{a.name}_run_{run_id}_predicted_cycle_{cycle + 1}.pdb"
                 try:
-                    contact_binds = binder_binds_contacts(
+                    contact_binds = all([binder_binds_contacts(
                         this_cycle_pdb_filename,
-                        a.binder_chain,
-                        target_chain_for_contacts,
-                        a.contact_residues,
+                        self.binder_chain,
+                        protein_chain_ids[i],
+                        contact_res,
                         cutoff=a.contact_cutoff,
                     )
+                    for i, contact_res in enumerate(a.contact_residues.split("|"))
+                ])
                     if not contact_binds:
                         save_yaml_this_design = False
                         print(
@@ -615,7 +633,7 @@ class ProteinHunter_Boltz:
                 
                 # Use 'pdb_filename', which is *always* defined just above this block
                 # This was the source of the UnboundLocalError
-                shutil.copy(pdb_filename, dest_pdb_path) # <-- MODIFIED LINE
+                shutil.copy(pdb_filename, dest_pdb_path)
                 print(f"✅ Copied PDB to {dest_pdb_path}")
 
                 # 3. Append to high-ipTM summary CSV
@@ -715,8 +733,6 @@ class ProteinHunter_Boltz:
             target_type = "nucleic"
         elif any_ligand_or_nucleic:
             target_type = "small_molecule"
-        elif a.protein_ids.strip() and a.protein_seqs.strip():
-            target_type = "protein"
         else:
             target_type = "protein" # Default for unconditional mode
 
@@ -736,7 +752,7 @@ class ProteinHunter_Boltz:
                     os.path.expanduser(a.hmmer_path),
                     success_dir,
                     os.path.expanduser(a.work_dir) or os.getcwd(),
-                    binder_id=a.binder_chain,
+                    binder_id=self.binder_chain,
                     gpu_id=a.gpu_id,
                     high_iptm=True,
                     use_msa_for_af3=a.use_msa_for_af3,
@@ -748,7 +764,7 @@ class ProteinHunter_Boltz:
                     success_dir,
                     af_pdb_dir,
                     af_pdb_dir_apo,
-                    binder_id=a.binder_chain,
+                    binder_id=self.binder_chain,
                     target_type=target_type,
                 )
 
@@ -766,7 +782,7 @@ class ProteinHunter_Boltz:
             print(f"=== Starting Design Run {run_id}/{self.args.num_designs - 1} ===")
             print("=======================================================")
 
-            # Deep copy to allow modification of 'sequence' per run
+        
             data_cp = copy.deepcopy(base_data)
 
             run_metrics = self._run_design_cycle(data_cp, run_id, pocket_conditioning)

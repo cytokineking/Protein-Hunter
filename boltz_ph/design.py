@@ -28,40 +28,29 @@ def parse_args():
     parser.add_argument("--num_designs", default=50, type=int)
     parser.add_argument("--num_cycles", default=5, type=int)
     parser.add_argument("--cyclic", action="store_true", default=False, help="Enable cyclic peptide design.")
-    parser.add_argument("--binder_chain", default="A", type=str)
-    parser.add_argument("--min_design_protein_length", default=100, type=int)
-    parser.add_argument("--max_design_protein_length", default=150, type=int)
-    parser.add_argument("--protein_ids", default="B", type=str)
+    parser.add_argument("--min_protein_length", default=100, type=int)
+    parser.add_argument("--max_protein_length", default=150, type=int)
+    parser.add_argument("--seq", default="", type=str)
+    parser.add_argument("--refiner_mode", action="store_true", default=False)
     parser.add_argument(
         "--protein_seqs",
         default="",
         type=str,
     )
-    parser.add_argument("--protein_msas", default="empty", type=str)
-    
-    parser.add_argument("--ligand_id", default="B", type=str)
+    parser.add_argument("--msa_mode", default="mmseqs", choices=["single", "mmseqs"], type=str)
+
     parser.add_argument("--ligand_smiles", default="", type=str)
     parser.add_argument("--ligand_ccd", default="", type=str)
     parser.add_argument(
         "--nucleic_type", default="dna", choices=["dna", "rna"], type=str
     )
-    parser.add_argument("--nucleic_id", default="B", type=str)
     parser.add_argument("--nucleic_seq", default="", type=str)
     parser.add_argument(
         "--template_path", default="", type=str
     )  #pdb code or path(s) to .cif/.pdb, multiple allowed separated by colon or comma
     parser.add_argument(
-        "--template_chain_id", default="", type=str
-    )  # for prediction, the chain id to use for the template
-    parser.add_argument(
         "--template_cif_chain_id", default="", type=str
     )  # for mmCIF files, the chain id to use for the template (for alignment)
-    parser.add_argument(
-        "--no_potentials",
-        type=str2bool,
-        default=True,
-        help="Disable potentials (True/False)"
-    )
     parser.add_argument("--diffuse_steps", default=200, type=int)
     parser.add_argument("--recycling_steps", default=3, type=int)
     parser.add_argument("--boltz_model_version", default="boltz2", type=str)
@@ -75,26 +64,22 @@ def parse_args():
     parser.add_argument("--negative_helix_constant", default=0.2, type=float)
     parser.add_argument("--logmd", action="store_true", default=False)
     parser.add_argument("--save_dir", default="", type=str)
-    parser.add_argument("--add_constraints", action="store_true")
-    parser.add_argument("--contact_residues", default="", type=str)
     parser.add_argument("--omit_AA", default="C", type=str)
     parser.add_argument("--exclude_P", action="store_true", default=False)
-    parser.add_argument("--percent_X", default=80, type=int)
+    parser.add_argument("--percent_X", default=90, type=int)
     parser.add_argument(
         "--plot",
         action="store_true",
         help="Plot cycles figs per run (requires matplotlib)",
     )
 
-    # NEW: Add constraint_target_chain argument
     parser.add_argument(
-        "--constraint_target_chain",
-        default="B",
+        "--contact_residues", 
+        default="", 
         type=str,
-        help="Target chain for constraints and contact calculations",
+        help="Specify which target chain residues must contact the binder (currently only supports protein contacts). For more than two chains, separate by |, e.g., '1,2,5,10 | 3,5,10'."
     )
 
-    # NEW: Add no_contact_filter argument
     parser.add_argument(
         "--no_contact_filter",
         action="store_true",
@@ -120,13 +105,12 @@ def parse_args():
     parser.add_argument("--work_dir", default="", type=str)
 
     # temp and bias params
-    parser.add_argument("--temperature_start", default=0.05, type=float)
-    parser.add_argument("--temperature_end", default=0.001, type=float)
+    parser.add_argument("--temperature", default=0.1, type=float)
     parser.add_argument("--alanine_bias_start", default=-0.5, type=float)
-    parser.add_argument("--alanine_bias_end", default=-0.2, type=float)
+    parser.add_argument("--alanine_bias_end", default=-0.1, type=float)
     parser.add_argument("--alanine_bias", action="store_true")
-
     parser.add_argument("--high_iptm_threshold", default=0.8, type=float)
+    parser.add_argument("--high_plddt_threshold", default=0.8, type=float)
     # --- End Existing Arguments ---
 
     return parser.parse_args()

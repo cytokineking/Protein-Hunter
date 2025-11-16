@@ -353,8 +353,6 @@ def get_batch(
             options.pocket_constraints,
             options.contact_constraints,
         )
-        print("pocket_constraints", pocket_constraints)
-        print("contact_constraints", contact_constraints)
         if boltz_model_version == "boltz2":
             batch = featurizer.process(
                 tokenized,

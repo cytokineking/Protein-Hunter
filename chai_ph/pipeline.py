@@ -7,6 +7,7 @@ import csv
 import gc
 import re
 import sys
+import random
 import py2Dmol
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -30,10 +31,8 @@ def optimize_protein_design(
     folder: ChaiFolder,
     designer: LigandMPNNWrapper,
     initial_seq: str,
-    binder_chain: str = "A",
     target_seq: Optional[str] = None,
     target_pdb: Optional[str] = None,
-    target_chain: Optional[str] = "B",
     target_pdb_chain: Optional[str] = None,
     binder_mode: str = "protein",
     prefix: str = "test",
@@ -42,6 +41,9 @@ def optimize_protein_design(
     num_diffn_timesteps: int = 200,
     num_diffn_samples: int = 1,
     temperature: float = 0.1,
+    alanine_bias: bool = False,
+    alanine_bias_start: float = -1.0,
+    alanine_bias_end: float = -0.1,
     use_esm: bool = False,
     use_esm_target: bool = False,
     use_alignment: bool = True,
@@ -51,8 +53,8 @@ def optimize_protein_design(
     pde_cutoff_intra: float = 1.5,
     pde_cutoff_inter: float = 3.0,
     high_iptm_threshold: float = 0.8,
+    high_plddt_threshold: float = 0.8,
     omit_AA: Optional[str] = None,
-    bias_AA: Optional[str] = None,
     randomize_template_sequence: bool = True,
     cyclic: bool = False,
     final_validation: bool = True,
@@ -64,8 +66,44 @@ def optimize_protein_design(
 
     """
     Optimize protein design through iterative folding and sequence design.
-    Now also saves all cycle metrics to summary_all_runs.csv (outside run folder, one row per run).
+
+    Args:
+        folder: ChaiFolder instance
+        designer: LigandMPNNWrapper instance
+        initial_seq: Initial sequence to optimize
+        target_seq: Target (protein sequence OR SMILES for ligand). If None with target_pdb, extracts from PDB.
+        target_pdb: Optional template PDB
+        target_pdb_chain: Chain ID in template PDB (required if target_pdb provided)
+        prefix: Output file prefix
+        n_steps: Number of optimization steps
+        num_trunk_recycles: Trunk recycles per fold
+        num_diffn_timesteps: Diffusion timesteps
+        num_diffn_samples: Number of Diffusion samples per step
+        temperature: MPNN sampling temperature
+        alanine_bias: Use alanine bias to negatively bias alanine residues
+        alanine_bias_start: Alanine bias start value
+        alanine_bias_end: Alanine bias end value
+        use_esm: Use ESM for binder/unconditional (all iterations)
+        use_esm_target: Use ESM for target protein (all iterations, ignored for ligands)
+        use_alignment: Enable alignment during diffusion
+        scale_temp_by_plddt: Scale MPNN temperature by inverse pLDDT
+        partial_diffusion: Use partial diffusion refinement
+        pde_cutoff_intra: Intra-chain PDE cutoff (Å)
+        pde_cutoff_inter: Inter-chain PDE cutoff (Å)
+        omit_AA: Amino acids to exclude from MPNN
+        randomize_template_sequence: Randomize template sequence identity
+        cyclic: Enable cyclic topology
+        final_validation: Run final fold without templates
+        verbose: Print detailed progress
+
+    Supports:
+        - Unconditional design (no target)
+        - Protein-protein binder design
+        - Protein-ligand binder design (target_seq = SMILES)
     """
+
+    binder_chain = 'A'
+    target_chain = 'B'
 
     high_iptm_dir = os.path.join(os.path.dirname(str(prefix)), "high_iptm_yaml")
 
@@ -248,7 +286,7 @@ def optimize_protein_design(
         )
         return folder.save_state()
 
-    def design_sequence(step, prev, design_chain):
+    def design_sequence(step, prev, design_chain, alpha=0, temperature=0.1):
         """Design sequence with MPNN"""
         temp_per_residue = None
         if (
@@ -296,9 +334,8 @@ def optimize_protein_design(
             )
         if omit_AA:
             extra_args["--omit_AA"] = omit_AA
-        if bias_AA:
-            extra_args["--bias_AA"] = bias_AA
-
+        if alpha != 0:
+            extra_args["--bias_AA"] = f"A:{alpha}"
         CHAIN_TO_NUMBER = {
             "A": 0,"B": 1,"C": 2,"D": 3,"E": 4,"F": 5,"G": 6,"H": 7,"I": 8,"J": 9,
         }
@@ -433,7 +470,11 @@ def optimize_protein_design(
     best = copy_prev(prev)
     for step in range(n_steps):
         try:
-            new_seq = design_sequence(step, prev, binder_chain)
+            if alanine_bias:
+                alpha = alanine_bias_start - (step / (n_steps - 1)) * (alanine_bias_start - alanine_bias_end) if n_steps > 1 else alanine_bias_start
+            else:
+                alpha = 0
+            new_seq = design_sequence(step, prev, binder_chain, alpha=alpha, temperature=temperature)
             new = {"seq": new_seq}
             new["state"] = fold_sequence(new["seq"], prev)
             if new["state"] is None or new["state"].result is None:
@@ -473,14 +514,15 @@ def optimize_protein_design(
 
             print(f"{prefix} | Step {step + 1}: {msg}")
             # --- Check and Save High-Value Designs ---
-            is_high_iptm = (
+            save_yaml_this_design = (
                 is_binder_design
                 and metric_dict.get("iptm", 0.0) > high_iptm_threshold
+                and metric_dict.get("plddt", 0.0) > high_plddt_threshold
+                and metric_dict.get("alanine_count", 0)/len(new_seq) <= 0.2
                 and "seq" in new
             )
 
-            if is_high_iptm:
-                
+            if save_yaml_this_design:
                 # --- 1. Define Base Names and Dirs ---
                 # Get the main output dir (e.g., ./results/my_run_name -> ./results)
                 run_prefix_dir = os.path.dirname(str(prefix)) 
@@ -491,7 +533,6 @@ def optimize_protein_design(
 
                 # --- 2. Save YAML ---
                 yaml_base_name = f"{base_filename}_output.yaml"
-                # 'high_iptm_dir' is already defined as os.path.join(run_prefix_dir, "high_iptm_yaml")
                 yaml_path = os.path.join(high_iptm_dir, yaml_base_name)
                 os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
                 
@@ -774,13 +815,12 @@ class ProteinHunter_Chai:
         # Unpack arguments to variables (for easier translation)
         self.args = args
         self.jobname = args.jobname
-        self.length = args.length
         self.percent_X = args.percent_X
         self.seq = args.seq
-        self.binder_chain = args.binder_chain
+        self.min_protein_length = args.min_protein_length
+        self.max_protein_length = args.max_protein_length
         self.target_seq = args.target_seq
         self.target_pdb = args.target_pdb
-        self.target_chain = args.target_chain
         self.target_pdb_chain = args.target_pdb_chain
         self.cyclic = args.cyclic
         self.n_trials = args.n_trials
@@ -790,8 +830,10 @@ class ProteinHunter_Chai:
         self.hysteresis_mode = args.hysteresis_mode
         self.repredict = args.repredict
         self.omit_aa = args.omit_aa
-        self.bias_aa = args.bias_aa
         self.temperature = args.temperature
+        self.alanine_bias = args.alanine_bias
+        self.alanine_bias_start = args.alanine_bias_start
+        self.alanine_bias_end = args.alanine_bias_end
         self.scale_temp_by_plddt = args.scale_temp_by_plddt
         self.show_visual = args.show_visual
         self.render_freq = args.render_freq
@@ -805,7 +847,10 @@ class ProteinHunter_Chai:
         self.use_msa_for_af3 = args.use_msa_for_af3
         self.work_dir = args.work_dir
         self.high_iptm_threshold = args.high_iptm_threshold
+        self.high_plddt_threshold = args.high_plddt_threshold
         self.plot = args.plot
+        self.binder_chain = "A"
+        self.target_chain = "B"
 
         def check(folder):
             return os.path.exists(folder)
@@ -828,11 +873,8 @@ class ProteinHunter_Chai:
 
         self.seq_clean = clean_protein_sequence(self.seq)
         self.omit_AA = clean_protein_sequence(self.omit_aa)
-        self.bias_AA = self.bias_aa
         if self.omit_AA == "":
             self.omit_AA = None
-        if self.bias_AA == "":
-            self.bias_AA = None
 
         if self.show_visual: 
             self.viewer = py2Dmol.view((600, 400), color="plddt")
@@ -881,7 +923,8 @@ class ProteinHunter_Chai:
         X = []
         for t in range(self.n_trials):
             if self.seq_clean == "":
-                trial_seq = sample_seq(self.length, frac_X=self.percent_X / 100)
+                length = random.randint(self.min_protein_length, self.max_protein_length)
+                trial_seq = sample_seq(length, frac_X=self.percent_X / 100)
             else:
                 trial_seq = self.seq_clean
 
@@ -894,10 +937,8 @@ class ProteinHunter_Chai:
                 self.folder,
                 self.designer,
                 initial_seq=trial_seq,
-                binder_chain=self.binder_chain,
                 target_seq=self.target_seq,
                 target_pdb=self.target_pdb,
-                target_chain=self.target_chain,
                 target_pdb_chain=self.target_pdb_chain,
                 binder_mode=self.binder_mode,
                 prefix=f"{prefix}/run_{t}",
@@ -906,13 +947,16 @@ class ProteinHunter_Chai:
                 num_diffn_timesteps=self.n_diff_steps,
                 num_diffn_samples=1,
                 temperature=self.temperature,
+                alanine_bias=self.alanine_bias,
+                alanine_bias_start=self.alanine_bias_start,
+                alanine_bias_end=self.alanine_bias_end,
                 scale_temp_by_plddt=self.scale_temp_by_plddt,
                 use_alignment=True,
                 align_to="all",
                 high_iptm_threshold=self.high_iptm_threshold,
+                high_plddt_threshold=self.high_plddt_threshold,
                 randomize_template_sequence=True,
                 omit_AA=self.omit_AA,
-                bias_AA=self.bias_AA,
                 cyclic=self.cyclic,
                 verbose=False,
                 viewer=self.viewer,

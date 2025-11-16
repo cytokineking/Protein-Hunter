@@ -499,7 +499,7 @@ def process_yaml_files(
         for target_seq, msa_path, chain_id, query_seq in zip(
             all_protein_seqs, all_protein_msas, all_protein_ids, query_seqs
         ):
-            if chain_id == binder_chain or msa_path == "empty":
+            if chain_id == binder_chain or (msa_path == "empty" and not use_msa_for_af3):
                 # For binder or explicitly empty MSA, use query sequence only
                 processed_msas.append(f">query\n{query_seq}")
                 continue

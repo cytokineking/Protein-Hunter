@@ -15,12 +15,6 @@ def parse_args():
         "--jobname", type=str, default="test", help="Job name for output files and folders."
     )
     sequence_group.add_argument(
-        "--length", type=int, default=150, help="Length of the designed protein chain."
-    )
-    sequence_group.add_argument(
-        "--binder_chain", type=str, default="A", help="Chain ID for binder design."
-    )
-    sequence_group.add_argument(
         "--percent_X",
         type=int,
         default=80,
@@ -30,16 +24,22 @@ def parse_args():
         "--seq", type=str, default="", help="Input sequence for the binder chain (optional). If empty, sequence is randomly sampled."
     )
     sequence_group.add_argument(
+        "--min_protein_length", type=int, default=100, help="Minimum length of the designed protein chain."
+    )
+    sequence_group.add_argument(
+        "--max_protein_length", type=int, default=150, help="Maximum length of the designed protein chain."
+    )
+    sequence_group.add_argument(
+        "--binder_seq", default="", type=str, help="Initial sequence for the binder chain."
+    )
+    sequence_group.add_argument(
+        "--refiner_mode", action="store_true", default=False, help="Enable refiner mode."
+    )
+    sequence_group.add_argument(
         "--target_seq",
         type=str,
         default="",
         help="Target sequence (protein) or SMILES (ligand) for binder design (optional).",
-    )
-    sequence_group.add_argument(
-        "--target_chain",
-        type=str,
-        default="B",
-        help="Chain ID for target protein (default: B).",
     )
     sequence_group.add_argument(
         "--target_pdb",
@@ -105,18 +105,13 @@ def parse_args():
     mpnn_group.add_argument(
         "--omit_aa", type=str, default="", help="Amino acid types to omit from design (e.g., 'C')."
     )
-    mpnn_group.add_argument(
-        "--bias_aa",
-        type=str,
-        default="",
-        help="Amino acid types to bias (e.g., 'A:-2.0,P:-1.0').",
-    )
-    mpnn_group.add_argument(
-        "--temperature",
-        type=float,
-        default=0.01,
-        help="ProteinMPNN sampling temperature.",
-    )
+
+    # temp and bias params
+    mpnn_group.add_argument("--temperature", default=0.1, type=float)
+    mpnn_group.add_argument("--alanine_bias_start", default=-0.5, type=float)
+    mpnn_group.add_argument("--alanine_bias_end", default=-0.1, type=float)
+    mpnn_group.add_argument("--alanine_bias", action="store_true")
+
     mpnn_group.add_argument(
         "--scale_temp_by_plddt",
         action="store_true",
@@ -164,7 +159,7 @@ def parse_args():
     af_group.add_argument("--use_msa_for_af3", action="store_true")
     af_group.add_argument("--work_dir", default="", type=str)
     af_group.add_argument("--high_iptm_threshold", default=0.8, type=float)
-
+    af_group.add_argument("--high_plddt_threshold", default=0.8, type=float)
     return parser.parse_args()
 
 
