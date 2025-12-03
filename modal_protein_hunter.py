@@ -31,8 +31,6 @@ Usage:
         --output-dir ./results
 """
 
-import copy
-import csv
 import datetime
 import gc
 import json
@@ -45,7 +43,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import modal
 
@@ -184,6 +182,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
         sample_seq as ph_sample_seq,
         binder_binds_contacts,
     )
+    from utils.ipsae_utils import calculate_ipsae_from_boltz_output
     from LigandMPNN.wrapper import LigandMPNNWrapper
     
     # Extract task parameters
@@ -273,7 +272,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                 dest_file = mpnn_dest / model_file.name
                 if not dest_file.exists():
                     os.symlink(model_file, dest_file)
-            print(f"Symlinked LigandMPNN models from cache")
+            print("Symlinked LigandMPNN models from cache")
         
         # Load CCD library
         print("Loading CCD library...")
@@ -286,7 +285,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
             "sampling_steps": diffuse_steps,
             "diffusion_samples": 1,
             "write_confidence_summary": True,
-            "write_full_pae": False,
+            "write_full_pae": True,  # Enable for ipSAE calculation
             "write_full_pde": False,
             "max_parallel_samples": 1,
         }
@@ -346,16 +345,16 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
         best_seq = None
         best_pdb_content = None
         best_cycle_idx = -1
-        best_alanine_pct = None
         
         # ===== CYCLE 0: Initial prediction with contact filtering =====
         print("\n--- Cycle 0: Initial structure prediction ---")
         
         contact_filter_attempt = 0
-        pdb_file = work_dir / f"cycle_0.pdb"
+        pdb_file = work_dir / "cycle_0.pdb"
+        batch_feats = None  # Will be set in the loop
         
         while True:
-            output, structure = run_prediction(
+            output, structure, batch_feats = run_prediction(
                 data,
                 binder_chain,
                 randomly_kill_helix_feature=randomly_kill_helix_feature,
@@ -367,6 +366,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                 device=device,
                 boltz_model_version=boltz_model_version,
                 pocket_conditioning=pocket_conditioning,
+                return_feats=True,
             )
             
             plddts = output["plddt"].detach().cpu().numpy()[0]
@@ -428,20 +428,27 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
         cycle_0_plddt = float(output.get("complex_plddt", torch.tensor([0.0])).detach().cpu().numpy()[0])
         cycle_0_iplddt = float(output.get("complex_iplddt", torch.tensor([0.0])).detach().cpu().numpy()[0])
         
+        # Calculate ipSAE for cycle 0
+        ipsae_result = calculate_ipsae_from_boltz_output(
+            output, batch_feats, binder_chain_idx=binder_chain_idx
+        )
+        cycle_0_ipsae = ipsae_result['ipSAE']
+        
         result["cycles"].append({
             "cycle": 0,
             "iptm": cycle_0_iptm,
+            "ipsae": cycle_0_ipsae,
             "plddt": cycle_0_plddt,
             "iplddt": cycle_0_iplddt,
             "alanine_count": 0,
             "seq": initial_seq,
         })
         
-        print(f"  Cycle 0: ipTM={cycle_0_iptm:.3f}, pLDDT={cycle_0_plddt:.1f}, iPLDDT={cycle_0_iplddt:.1f}")
+        print(f"  Cycle 0: ipTM={cycle_0_iptm:.3f}, ipSAE={cycle_0_ipsae:.3f}, pLDDT={cycle_0_plddt:.1f}, iPLDDT={cycle_0_iplddt:.1f}")
         
         # Stream cycle 0 results
         if stream_to_dict:
-            _stream_result(run_id, design_idx, 0, cycle_0_iptm, cycle_0_plddt, initial_seq, pdb_file)
+            _stream_result(run_id, design_idx, 0, cycle_0_iptm, cycle_0_ipsae, cycle_0_plddt, initial_seq, pdb_file)
         
         clean_memory()
         
@@ -479,7 +486,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                 alanine_pct = alanine_count / binder_length if binder_length > 0 else 0.0
                 
                 # Predict structure
-                output, structure = run_prediction(
+                output, structure, batch_feats = run_prediction(
                     data,
                     binder_chain,
                     seq=seq,
@@ -490,6 +497,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                     ccd_path=ccd_path,
                     logmd=False,
                     device=device,
+                    return_feats=True,
                 )
                 
                 # Save PDB
@@ -510,15 +518,22 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                 else:
                     current_iptm = 0.0
                 
+                # Calculate ipSAE
+                ipsae_result = calculate_ipsae_from_boltz_output(
+                    output, batch_feats, binder_chain_idx=binder_chain_idx
+                )
+                current_ipsae = ipsae_result['ipSAE']
+                
                 current_plddt = float(output.get("complex_plddt", torch.tensor([0.0])).detach().cpu().numpy()[0])
                 current_iplddt = float(output.get("complex_iplddt", torch.tensor([0.0])).detach().cpu().numpy()[0])
                 
-                print(f"  ipTM={current_iptm:.3f}, pLDDT={current_plddt:.1f}, iPLDDT={current_iplddt:.1f}, Ala={alanine_count} ({alanine_pct*100:.1f}%)")
+                print(f"  ipTM={current_iptm:.3f}, ipSAE={current_ipsae:.3f}, pLDDT={current_plddt:.1f}, iPLDDT={current_iplddt:.1f}, Ala={alanine_count} ({alanine_pct*100:.1f}%)")
                 
                 # Store cycle results
                 result["cycles"].append({
                     "cycle": cycle + 1,
                     "iptm": current_iptm,
+                    "ipsae": current_ipsae,
                     "plddt": current_plddt,
                     "iplddt": current_iplddt,
                     "alanine_count": alanine_count,
@@ -527,7 +542,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                 
                 # Stream cycle results
                 if stream_to_dict:
-                    _stream_result(run_id, design_idx, cycle + 1, current_iptm, current_plddt, seq, pdb_file)
+                    _stream_result(run_id, design_idx, cycle + 1, current_iptm, current_ipsae, current_plddt, seq, pdb_file)
                 
                 # Update best if acceptable
                 if alanine_pct <= 0.20 and current_iptm > best_iptm:
@@ -535,7 +550,6 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                     best_seq = seq
                     best_pdb_content = pdb_file.read_text()
                     best_cycle_idx = cycle + 1
-                    best_alanine_pct = alanine_pct
                 
                 # Check for high-ipTM design
                 save_high_iptm = (
@@ -559,12 +573,12 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                         ])
                         if not contact_binds:
                             save_high_iptm = False
-                            print(f"  ⛔️ Not saving high-ipTM: binder failed contact check.")
+                            print("  ⛔️ Not saving high-ipTM: binder failed contact check.")
                     except Exception as e:
                         print(f"  WARNING: Contact check exception: {e}. Saving anyway.")
                 
                 if save_high_iptm:
-                    print(f"  ✅ High-ipTM design found!")
+                    print("  ✅ High-ipTM design found!")
                     
                     # Build YAML content
                     yaml_content = yaml.dump(data, default_flow_style=False)
@@ -572,6 +586,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                     high_design = {
                         "cycle": cycle + 1,
                         "iptm": current_iptm,
+                        "ipsae": current_ipsae,
                         "plddt": current_plddt,
                         "iplddt": current_iplddt,
                         "alanine_count": alanine_count,
@@ -754,7 +769,7 @@ def _build_input_data(
     return data
 
 
-def _stream_result(run_id: str, design_idx: int, cycle: int, iptm: float, plddt: float, seq: str, pdb_file: Path):
+def _stream_result(run_id: str, design_idx: int, cycle: int, iptm: float, ipsae: float, plddt: float, seq: str, pdb_file: Path):
     """Stream a cycle result to the Modal Dict."""
     try:
         key = f"{run_id}:design_{design_idx}:cycle_{cycle}"
@@ -763,6 +778,7 @@ def _stream_result(run_id: str, design_idx: int, cycle: int, iptm: float, plddt:
             "design_idx": design_idx,
             "cycle": cycle,
             "iptm": iptm,
+            "ipsae": ipsae,
             "plddt": plddt,
             "seq": seq,
             "pdb": pdb_file.read_text() if pdb_file.exists() else None,
@@ -781,13 +797,14 @@ def _stream_high_iptm(run_id: str, design_idx: int, cycle: int, design_data: Dic
             "design_idx": design_idx,
             "cycle": cycle,
             "iptm": design_data["iptm"],
+            "ipsae": design_data.get("ipsae", 0.0),
             "plddt": design_data["plddt"],
             "seq": design_data["seq"],
             "pdb": design_data["pdb"],
             "yaml": design_data["yaml"],
             "timestamp": time.time(),
         }
-        print(f"  → Streamed high-ipTM to Dict")
+        print("  → Streamed high-ipTM to Dict")
     except Exception as e:
         print(f"  Stream error: {e}")
 
@@ -1000,7 +1017,6 @@ def run_pipeline(
     """
     import base64
     import pandas as pd
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     
     stream = not no_stream
     run_id = f"{name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -1168,6 +1184,7 @@ def run_pipeline(
         for cycle_data in r.get("cycles", []):
             c = cycle_data.get("cycle", 0)
             row[f"cycle_{c}_iptm"] = cycle_data.get("iptm")
+            row[f"cycle_{c}_ipsae"] = cycle_data.get("ipsae")
             row[f"cycle_{c}_plddt"] = cycle_data.get("plddt")
             row[f"cycle_{c}_iplddt"] = cycle_data.get("iplddt")
             row[f"cycle_{c}_alanine"] = cycle_data.get("alanine_count")
@@ -1175,7 +1192,7 @@ def run_pipeline(
     
     summary_df = pd.DataFrame(summary_rows)
     summary_df.to_csv(output_path / "summary_all_runs.csv", index=False)
-    print(f"  ✓ summary_all_runs.csv")
+    print("  ✓ summary_all_runs.csv")
     
     # Save high-ipTM designs
     high_iptm_dir = output_path / "high_iptm_yaml"
@@ -1201,6 +1218,7 @@ def run_pipeline(
                 "design_idx": design_idx,
                 "cycle": cycle,
                 "iptm": design.get("iptm"),
+                "ipsae": design.get("ipsae"),
                 "plddt": design.get("plddt"),
                 "iplddt": design.get("iplddt"),
                 "seq": design.get("seq"),
@@ -1249,7 +1267,7 @@ def _sync_worker(run_id: str, output_path: Path, stop_event: threading.Event, in
                     result = results_dict[key]
                     _save_synced_result(output_path, result, key)
                     synced_keys.add(key)
-                except Exception as e:
+                except Exception:
                     pass  # Ignore individual sync errors
         except Exception:
             pass  # Ignore Dict access errors

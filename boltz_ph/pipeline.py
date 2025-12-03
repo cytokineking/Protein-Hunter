@@ -16,6 +16,7 @@ from LigandMPNN.wrapper import LigandMPNNWrapper
 from boltz_ph.constants import CHAIN_TO_NUMBER
 from utils.metrics import get_CA_and_sequence # Used implicitly in design.py
 from utils.convert import calculate_holo_apo_rmsd, convert_cif_files_to_pdb
+from utils.ipsae_utils import calculate_ipsae_from_boltz_output
 
 
 from model_utils import (
@@ -310,7 +311,7 @@ class ProteinHunter_Boltz:
             "sampling_steps": self.args.diffuse_steps,
             "diffusion_samples": 1,
             "write_confidence_summary": True,
-            "write_full_pae": False,
+            "write_full_pae": True,  # Enable for ipSAE calculation
             "write_full_pde": False,
             "max_parallel_samples": 1,
         }
@@ -384,8 +385,9 @@ class ProteinHunter_Boltz:
         structure = None
         output = None
 
+        batch_feats = None  # Will be set in the loop
         while True:
-            output, structure = run_prediction(
+            output, structure, batch_feats = run_prediction(
                 data_cp,
                 self.binder_chain,
                 randomly_kill_helix_feature=a.randomly_kill_helix_feature,
@@ -397,6 +399,7 @@ class ProteinHunter_Boltz:
                 device=self.device,
                 boltz_model_version=a.boltz_model_version,
                 pocket_conditioning=pocket_conditioning,
+                return_feats=True,
             )
             pdb_filename = f"{run_save_dir}/{a.name}_run_{run_id}_predicted_cycle_0.pdb"
             plddts = output["plddt"].detach().cpu().numpy()[0]
@@ -435,7 +438,7 @@ class ProteinHunter_Boltz:
             update_binder_sequence(new_seq)
             clean_memory()
 
-        clean_memory() # <-- ADD THIS CALL HERE
+        clean_memory()
         # Capture Cycle 0 metrics
         binder_chain_idx = CHAIN_TO_NUMBER[self.binder_chain]
         pair_chains = output["pair_chains_iptm"]
@@ -455,7 +458,14 @@ class ProteinHunter_Boltz:
         else:
             cycle_0_iptm = 0.0
 
+        # Calculate ipSAE for cycle 0
+        ipsae_result = calculate_ipsae_from_boltz_output(
+            output, batch_feats, binder_chain_idx=binder_chain_idx
+        )
+        cycle_0_ipsae = ipsae_result['ipSAE']
+
         run_metrics["cycle_0_iptm"] = cycle_0_iptm
+        run_metrics["cycle_0_ipsae"] = cycle_0_ipsae
         run_metrics["cycle_0_plddt"] = float(
             output.get("complex_plddt", torch.tensor([0.0])).detach().cpu().numpy()[0]
         )
@@ -463,6 +473,8 @@ class ProteinHunter_Boltz:
             output.get("complex_iplddt", torch.tensor([0.0])).detach().cpu().numpy()[0]
         )
         run_metrics["cycle_0_alanine"] = 0
+        
+        print(f"Cycle 0: ipTM={cycle_0_iptm:.3f}, ipSAE={cycle_0_ipsae:.3f}")
 
         # --- Optimization Cycles ---
         for cycle in range(a.num_cycles):
@@ -502,7 +514,7 @@ class ProteinHunter_Boltz:
             update_binder_sequence(seq) # Use the helper function
 
             # 2. Structure Prediction
-            output, structure = run_prediction(
+            output, structure, batch_feats = run_prediction(
                 data_cp,
                 self.binder_chain,
                 seq=seq,
@@ -513,6 +525,7 @@ class ProteinHunter_Boltz:
                 ccd_path=self.ccd_path,
                 logmd=False,
                 device=self.device,
+                return_feats=True,
             )
 
             # Calculate ipTM
@@ -531,6 +544,12 @@ class ProteinHunter_Boltz:
                 current_iptm = float(np.mean(values) if values else 0.0)
             else:
                 current_iptm = 0.0
+
+            # Calculate ipSAE
+            ipsae_result = calculate_ipsae_from_boltz_output(
+                output, batch_feats, binder_chain_idx=current_chain_idx
+            )
+            current_ipsae = ipsae_result['ipSAE']
 
             # Update best structure (only if alanine content is acceptable)
             if alanine_percentage <= 0.20 and current_iptm > best_iptm:
@@ -566,6 +585,7 @@ class ProteinHunter_Boltz:
             )
 
             run_metrics[f"cycle_{cycle + 1}_iptm"] = current_iptm
+            run_metrics[f"cycle_{cycle + 1}_ipsae"] = current_ipsae
             run_metrics[f"cycle_{cycle + 1}_plddt"] = curr_plddt
             run_metrics[f"cycle_{cycle + 1}_iplddt"] = curr_iplddt
             run_metrics[f"cycle_{cycle + 1}_alanine"] = alanine_count
@@ -579,7 +599,7 @@ class ProteinHunter_Boltz:
             clean_memory()
 
             print(
-                f"ipTM: {current_iptm:.2f} pLDDT: {curr_plddt:.2f} iPLDDT: {curr_iplddt:.2f} Alanine count: {alanine_count}"
+                f"ipTM: {current_iptm:.3f} ipSAE: {current_ipsae:.3f} pLDDT: {curr_plddt:.2f} iPLDDT: {curr_iplddt:.2f} Ala: {alanine_count}"
             )
 
             # 4. Save YAML for High ipTM
@@ -643,6 +663,7 @@ class ProteinHunter_Boltz:
                     "run_id": run_id,
                     "cycle": cycle + 1,
                     "iptm": current_iptm,
+                    "ipsae": current_ipsae,
                     "plddt": curr_plddt,
                     "iplddt": curr_iplddt,
                     "alanine_count": alanine_count,
@@ -696,6 +717,7 @@ class ProteinHunter_Boltz:
             columns.extend(
                 [
                     f"cycle_{i}_iptm",
+                    f"cycle_{i}_ipsae",
                     f"cycle_{i}_plddt",
                     f"cycle_{i}_iplddt",
                     f"cycle_{i}_alanine",

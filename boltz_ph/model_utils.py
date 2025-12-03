@@ -500,8 +500,17 @@ def run_prediction(
     device="cpu",
     boltz_model_version="boltz2",
     pocket_conditioning=False,
+    return_feats=False,
 ):
-    """Parses data, generates batch, and runs a single Boltz prediction step."""
+    """Parses data, generates batch, and runs a single Boltz prediction step.
+    
+    Args:
+        return_feats: If True, also return the batch features needed for ipSAE calculation.
+    
+    Returns:
+        If return_feats=False: (output, structure)
+        If return_feats=True: (output, structure, batch_feats)
+    """
     # 1. Update sequence if provided
     if seq is not None:
         # Assumes data["sequences"] is sorted by chain ID where binder_chain is in the position corresponding to its CHAIN_TO_NUMBER value
@@ -553,6 +562,15 @@ def run_prediction(
         logmd=logmd,
         structure=structure,
     )
+    
+    if return_feats:
+        # Return batch features needed for ipSAE calculation
+        batch_feats = {
+            'asym_id': batch.get('asym_id'),
+            'token_pad_mask': batch.get('token_pad_mask'),
+        }
+        return output, structure, batch_feats
+    
     return output, structure
 
 
