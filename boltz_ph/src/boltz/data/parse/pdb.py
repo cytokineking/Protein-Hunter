@@ -10,6 +10,7 @@ def parse_pdb(
     moldir: Optional[str] = None,
     use_assembly: bool = True,
     compute_interfaces: bool = True,
+    ignore_ligands: bool = False,
 ) -> ParsedStructure:
     with NamedTemporaryFile(suffix=".cif") as tmp_cif_file:
         tmp_cif_path = tmp_cif_file.name
@@ -35,5 +36,6 @@ def parse_pdb(
             mols=mols,
             moldir=moldir,
             use_assembly=use_assembly,
-            compute_interfaces=compute_interfaces
+            compute_interfaces=compute_interfaces,
+            ignore_ligands=ignore_ligands,
         )
