@@ -51,7 +51,24 @@ Protein Hunter uses an iterative **hallucination-based design** approach:
 - **Binder (Chain A)**: The protein being designed
 - **Target (Chain B, C, ...)**: What you want to bind (provided by you)
 - **Design run**: One complete optimization trajectory
-- **Cycle**: One iteration of fold → design
+- **Cycle** (`--num_cycles`): One iteration of fold → design in the outer optimization loop
+- **Recycle** (`--recycling_steps`): Internal refinement passes within each structure prediction
+
+**Cycles vs Recycles:**
+```
+Design Run (1 of num_designs)
+│
+├── Cycle 0: Initial prediction
+│   └── [recycle 1] → [recycle 2] → [recycle 3] → structure
+│
+├── Cycle 1: Redesign → predict
+│   └── [recycle 1] → [recycle 2] → [recycle 3] → structure
+│
+├── Cycle 2: Redesign → predict
+│   └── ...
+│
+└── ... (num_cycles iterations)
+```
 
 ---
 
@@ -351,7 +368,10 @@ python boltz_ph/design.py \
 |----------|------|---------|-------------|
 | `--boltz_model_version` | str | `"boltz2"` | `"boltz1"` or `"boltz2"` |
 | `--diffuse_steps` | int | `200` | Diffusion timesteps |
-| `--recycling_steps` | int | `3` | Trunk recycles |
+| `--recycling_steps` | int | `3` | Model recycling passes per prediction |
+
+**Note on `--recycling_steps`:**
+This controls the number of internal refinement passes within each structure prediction. More recycles = more refined prediction per cycle, but slower. This is different from `--num_cycles` which controls the outer design loop (fold → redesign → fold → ...). Default of 3 is standard for AlphaFold-style models.
 
 ### Output Settings
 
@@ -559,12 +579,20 @@ This downloads Boltz2 weights, CCD data, and LigandMPNN models to a persistent M
 ### Modal Quick Start
 
 ```bash
-# Basic design run
+# Basic design run (uses defaults: 50 designs, 5 cycles, mmseqs MSA)
 modal run modal_protein_hunter.py::run_pipeline \
     --name "my_design" \
     --target-seq "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALEHHHHHH" \
+    --alanine-bias \
+    --gpu H100
+
+# Quick test run (fewer designs)
+modal run modal_protein_hunter.py::run_pipeline \
+    --name "quick_test" \
+    --target-seq "YOUR_TARGET_SEQUENCE" \
     --num-designs 5 \
-    --num-cycles 7 \
+    --num-cycles 5 \
+    --alanine-bias \
     --gpu H100
 
 # List available GPUs
@@ -604,21 +632,25 @@ modal run modal_protein_hunter.py::list_gpus
 | `--seq` | str | None | Starting binder sequence (empty = random) |
 | `--min-protein-length` | int | `100` | Minimum binder length |
 | `--max-protein-length` | int | `150` | Maximum binder length |
-| `--percent-x` | int | `50` | % of "X" (unknown) in initial sequence |
+| `--percent-x` | int | `90` | % of "X" (unknown) in initial sequence |
 | `--cyclic` | flag | `False` | Design cyclic peptide |
+| `--exclude-p` | flag | `False` | Exclude proline from initial sequence |
 
 #### Design Parameters
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--num-designs` | int | `5` | Number of independent design runs |
-| `--num-cycles` | int | `7` | Fold→design iterations per run |
+| `--num-designs` | int | `50` | Number of independent design runs |
+| `--num-cycles` | int | `5` | Fold→design iterations per run |
 | `--contact-residues` | str | None | Hotspot residues (e.g., `"10,20,30"` or `"10,20\|5,15"` for multi-chain) |
 | `--temperature` | float | `0.1` | MPNN sampling temperature |
 | `--omit-aa` | str | `"C"` | Amino acids to exclude |
-| `--alanine-bias` | flag | `True` | Penalize alanine (prevents poly-A) |
-| `--high-iptm-threshold` | float | `0.7` | Min ipTM to save design |
-| `--high-plddt-threshold` | float | `0.7` | Min pLDDT to save design |
+| `--alanine-bias` | flag | `False` | Penalize alanine (prevents poly-A) |
+| `--high-iptm-threshold` | float | `0.8` | Min ipTM to save design |
+| `--high-plddt-threshold` | float | `0.8` | Min pLDDT to save design |
+| `--msa-mode` | str | `"mmseqs"` | MSA generation: `"mmseqs"` or `"single"` |
+| `--recycling-steps` | int | `3` | Model recycling passes per prediction |
+| `--diffuse-steps` | int | `200` | Diffusion timesteps |
 
 #### Execution Control
 
@@ -693,7 +725,7 @@ modal run modal_protein_hunter.py::run_pipeline \
     --name "PDL1_binder" \
     --target-seq "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
     --num-designs 10 \
-    --num-cycles 7 \
+    --num-cycles 5 \
     --min-protein-length 90 \
     --max-protein-length 150 \
     --alanine-bias \
@@ -710,7 +742,8 @@ modal run modal_protein_hunter.py::run_pipeline \
     --target-seq "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
     --contact-residues "54,56,66,115,121" \
     --num-designs 10 \
-    --num-cycles 7 \
+    --num-cycles 5 \
+    --alanine-bias \
     --high-iptm-threshold 0.7 \
     --gpu H100
 ```
@@ -729,6 +762,7 @@ modal run modal_protein_hunter.py::run_pipeline \
     --max-concurrent 8 \
     --min-protein-length 60 \
     --max-protein-length 120 \
+    --alanine-bias \
     --high-iptm-threshold 0.8 \
     --gpu H100 \
     --output-dir ./pMHC_results
@@ -741,9 +775,10 @@ modal run modal_protein_hunter.py::run_pipeline \
     --name "SAM_binder" \
     --ligand-ccd "SAM" \
     --num-designs 5 \
-    --num-cycles 7 \
+    --num-cycles 5 \
     --min-protein-length 130 \
     --max-protein-length 150 \
+    --alanine-bias \
     --high-iptm-threshold 0.7 \
     --gpu H100
 ```
@@ -777,14 +812,6 @@ output_dir/
     ├── cycle_1.pdb
     └── ...
 ```
-
-### Modal Cost Estimation
-
-| Scenario | GPUs | Time | Est. Cost |
-|----------|------|------|-----------|
-| 5 designs × 7 cycles (H100) | 5 | ~20 min | ~$6 |
-| 16 designs × 5 cycles (H100, 8 concurrent) | 8 | ~40 min | ~$20 |
-| 10 designs × 7 cycles (L4) | 10 | ~45 min | ~$6 |
 
 ---
 

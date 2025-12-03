@@ -961,12 +961,12 @@ def run_pipeline(
     cyclic: bool = False,
     exclude_p: bool = False,
     # Design parameters
-    num_designs: int = 5,
-    num_cycles: int = 7,
+    num_designs: int = 50,
+    num_cycles: int = 5,
     contact_residues: Optional[str] = None,
     temperature: float = 0.1,
     omit_aa: str = "C",
-    alanine_bias: bool = True,
+    alanine_bias: bool = False,
     alanine_bias_start: float = -0.5,
     alanine_bias_end: float = -0.1,
     high_iptm_threshold: float = 0.8,
@@ -976,7 +976,7 @@ def run_pipeline(
     max_contact_filter_retries: int = 6,
     contact_cutoff: float = 15.0,
     # MSA options
-    msa_mode: str = "single",  # "single" or "mmseqs"
+    msa_mode: str = "mmseqs",  # "single" or "mmseqs"
     # Model parameters
     diffuse_steps: int = 200,
     recycling_steps: int = 3,
@@ -1037,7 +1037,7 @@ def run_pipeline(
             print(f"Warning: Template file not found: {template_path}")
     
     # Setup output directory
-    output_path = Path(output_dir) if output_dir else Path(f"./results_modal/{name}")
+    output_path = Path(output_dir) if output_dir else Path(f"./modal_results/{name}")
     output_path.mkdir(parents=True, exist_ok=True)
     
     # Print configuration
