@@ -181,7 +181,6 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
         save_pdb,
         design_sequence,
         clean_memory,
-        process_msa,
         sample_seq as ph_sample_seq,
         binder_binds_contacts,
     )
@@ -209,6 +208,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
     max_length = task_dict.get("max_protein_length", 150)
     percent_X = task_dict.get("percent_X", 50)
     cyclic = task_dict.get("cyclic", False)
+    exclude_P = task_dict.get("exclude_P", False)
     
     # Optimization parameters
     num_cycles = task_dict.get("num_cycles", 7)
@@ -221,14 +221,19 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
     high_iptm_threshold = task_dict.get("high_iptm_threshold", 0.7)
     high_plddt_threshold = task_dict.get("high_plddt_threshold", 0.7)
     
+    # Contact filtering
+    no_contact_filter = task_dict.get("no_contact_filter", False)
+    contact_cutoff = task_dict.get("contact_cutoff", 15.0)
+    max_contact_filter_retries = task_dict.get("max_contact_filter_retries", 6)
+    
     # Model parameters
     diffuse_steps = task_dict.get("diffuse_steps", 200)
     recycling_steps = task_dict.get("recycling_steps", 3)
     boltz_model_version = task_dict.get("boltz_model_version", "boltz2")
-    
-    # Contact filtering
-    contact_cutoff = task_dict.get("contact_cutoff", 15.0)
-    max_contact_filter_retries = task_dict.get("max_contact_filter_retries", 6)
+    randomly_kill_helix_feature = task_dict.get("randomly_kill_helix_feature", False)
+    negative_helix_constant = task_dict.get("negative_helix_constant", 0.2)
+    grad_enabled = task_dict.get("grad_enabled", False)
+    logmd = task_dict.get("logmd", False)
     
     # Setup
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -291,7 +296,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
             device=device,
             model_version=boltz_model_version,
             no_potentials=not bool(contact_residues),
-            grad_enabled=False,
+            grad_enabled=grad_enabled,
         )
         
         # Initialize LigandMPNN
@@ -327,7 +332,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
             initial_seq = starting_seq
         else:
             binder_length = random.randint(min_length, max_length)
-            initial_seq = ph_sample_seq(binder_length, exclude_P=False, frac_X=percent_X/100)
+            initial_seq = ph_sample_seq(binder_length, exclude_P=exclude_P, frac_X=percent_X/100)
         
         # Update binder sequence in data
         for seq_entry in data["sequences"]:
@@ -343,26 +348,68 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
         best_cycle_idx = -1
         best_alanine_pct = None
         
-        # ===== CYCLE 0: Initial prediction =====
+        # ===== CYCLE 0: Initial prediction with contact filtering =====
         print("\n--- Cycle 0: Initial structure prediction ---")
         
-        output, structure = run_prediction(
-            data,
-            binder_chain,
-            randomly_kill_helix_feature=False,
-            negative_helix_constant=0.0,
-            boltz_model=boltz_model,
-            ccd_lib=ccd_lib,
-            ccd_path=ccd_path,
-            logmd=False,
-            device=device,
-            boltz_model_version=boltz_model_version,
-            pocket_conditioning=pocket_conditioning,
-        )
-        
+        contact_filter_attempt = 0
         pdb_file = work_dir / f"cycle_0.pdb"
-        plddts = output["plddt"].detach().cpu().numpy()[0]
-        save_pdb(structure, output["coords"], plddts, str(pdb_file))
+        
+        while True:
+            output, structure = run_prediction(
+                data,
+                binder_chain,
+                randomly_kill_helix_feature=randomly_kill_helix_feature,
+                negative_helix_constant=negative_helix_constant,
+                boltz_model=boltz_model,
+                ccd_lib=ccd_lib,
+                ccd_path=ccd_path,
+                logmd=logmd,
+                device=device,
+                boltz_model_version=boltz_model_version,
+                pocket_conditioning=pocket_conditioning,
+            )
+            
+            plddts = output["plddt"].detach().cpu().numpy()[0]
+            save_pdb(structure, output["coords"], plddts, str(pdb_file))
+            
+            # Contact filtering check
+            contact_check_okay = True
+            if contact_residues and contact_residues.strip() and not no_contact_filter:
+                try:
+                    # Check if binder contacts required residues
+                    binds = all([
+                        binder_binds_contacts(
+                            str(pdb_file),
+                            binder_chain,
+                            protein_chain_ids[i] if i < len(protein_chain_ids) else protein_chain_ids[0],
+                            contact_res,
+                            cutoff=contact_cutoff,
+                        )
+                        for i, contact_res in enumerate(contact_residues.split("|"))
+                    ])
+                    if not binds:
+                        print("  ❌ Binder does NOT contact required residues. Retrying...")
+                        contact_check_okay = False
+                except Exception as e:
+                    print(f"  WARNING: Could not perform contact check: {e}")
+                    contact_check_okay = True  # Fail open
+            
+            if contact_check_okay:
+                break
+            
+            contact_filter_attempt += 1
+            if contact_filter_attempt >= max_contact_filter_retries:
+                print(f"  WARNING: Max retries ({max_contact_filter_retries}) reached. Proceeding anyway.")
+                break
+            
+            # Resample initial sequence and try again
+            initial_seq = ph_sample_seq(binder_length, exclude_P=exclude_P, frac_X=percent_X/100)
+            for seq_entry in data["sequences"]:
+                if "protein" in seq_entry and binder_chain in seq_entry["protein"]["id"]:
+                    seq_entry["protein"]["sequence"] = initial_seq
+            clean_memory()
+        
+        clean_memory()
         
         # Calculate cycle 0 metrics
         binder_chain_idx = CHAIN_TO_NUMBER[binder_chain]
@@ -379,16 +426,18 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
             cycle_0_iptm = 0.0
         
         cycle_0_plddt = float(output.get("complex_plddt", torch.tensor([0.0])).detach().cpu().numpy()[0])
+        cycle_0_iplddt = float(output.get("complex_iplddt", torch.tensor([0.0])).detach().cpu().numpy()[0])
         
         result["cycles"].append({
             "cycle": 0,
             "iptm": cycle_0_iptm,
             "plddt": cycle_0_plddt,
+            "iplddt": cycle_0_iplddt,
             "alanine_count": 0,
             "seq": initial_seq,
         })
         
-        print(f"  Cycle 0: ipTM={cycle_0_iptm:.3f}, pLDDT={cycle_0_plddt:.1f}")
+        print(f"  Cycle 0: ipTM={cycle_0_iptm:.3f}, pLDDT={cycle_0_plddt:.1f}, iPLDDT={cycle_0_iplddt:.1f}")
         
         # Stream cycle 0 results
         if stream_to_dict:
@@ -462,14 +511,16 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                     current_iptm = 0.0
                 
                 current_plddt = float(output.get("complex_plddt", torch.tensor([0.0])).detach().cpu().numpy()[0])
+                current_iplddt = float(output.get("complex_iplddt", torch.tensor([0.0])).detach().cpu().numpy()[0])
                 
-                print(f"  ipTM={current_iptm:.3f}, pLDDT={current_plddt:.1f}, Ala={alanine_count} ({alanine_pct*100:.1f}%)")
+                print(f"  ipTM={current_iptm:.3f}, pLDDT={current_plddt:.1f}, iPLDDT={current_iplddt:.1f}, Ala={alanine_count} ({alanine_pct*100:.1f}%)")
                 
                 # Store cycle results
                 result["cycles"].append({
                     "cycle": cycle + 1,
                     "iptm": current_iptm,
                     "plddt": current_plddt,
+                    "iplddt": current_iplddt,
                     "alanine_count": alanine_count,
                     "seq": seq,
                 })
@@ -487,13 +538,32 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                     best_alanine_pct = alanine_pct
                 
                 # Check for high-ipTM design
-                is_high_iptm = (
+                save_high_iptm = (
                     alanine_pct <= 0.20 and
                     current_iptm > high_iptm_threshold and
                     current_plddt > high_plddt_threshold
                 )
                 
-                if is_high_iptm:
+                # Add contact validation for high-ipTM saves (matching local pipeline)
+                if save_high_iptm and contact_residues and contact_residues.strip():
+                    try:
+                        contact_binds = all([
+                            binder_binds_contacts(
+                                str(pdb_file),
+                                binder_chain,
+                                protein_chain_ids[i] if i < len(protein_chain_ids) else protein_chain_ids[0],
+                                contact_res,
+                                cutoff=contact_cutoff,
+                            )
+                            for i, contact_res in enumerate(contact_residues.split("|"))
+                        ])
+                        if not contact_binds:
+                            save_high_iptm = False
+                            print(f"  ⛔️ Not saving high-ipTM: binder failed contact check.")
+                    except Exception as e:
+                        print(f"  WARNING: Contact check exception: {e}. Saving anyway.")
+                
+                if save_high_iptm:
                     print(f"  ✅ High-ipTM design found!")
                     
                     # Build YAML content
@@ -503,6 +573,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                         "cycle": cycle + 1,
                         "iptm": current_iptm,
                         "plddt": current_plddt,
+                        "iplddt": current_iplddt,
                         "alanine_count": alanine_count,
                         "seq": seq,
                         "pdb": pdb_file.read_text(),
@@ -574,6 +645,7 @@ def _build_input_data(
                            e.g., "A,B,C" means use chain A for first target, B for second, C for third
     """
     import base64
+    from boltz_ph.model_utils import process_msa
     
     sequences = []
     
@@ -593,11 +665,27 @@ def _build_input_data(
         nucleic_chain_id = chr(ord('B') + next_chain_idx)
         next_chain_idx += 1
     
+    # Track unique sequences for MSA deduplication
+    seq_to_msa_path = {}
+    
     # Add target protein chains
     for i, seq in enumerate(protein_seqs_list):
         if not seq:
             continue
-        msa_value = "empty"  # For now, skip MSA generation in Modal
+        
+        # Determine MSA value based on mode
+        if msa_mode == "mmseqs":
+            # Use cached MSA if same sequence was already processed
+            if seq in seq_to_msa_path:
+                msa_value = str(seq_to_msa_path[seq])
+            else:
+                print(f"  Generating MSA for chain {protein_chain_ids[i]}...")
+                msa_path = process_msa(protein_chain_ids[i], seq, work_dir)
+                seq_to_msa_path[seq] = msa_path
+                msa_value = str(msa_path)
+        else:
+            msa_value = "empty"
+        
         sequences.append({
             "protein": {
                 "id": [protein_chain_ids[i]],
@@ -852,8 +940,9 @@ def run_pipeline(
     seq: Optional[str] = None,
     min_protein_length: int = 100,
     max_protein_length: int = 150,
-    percent_x: int = 50,
+    percent_x: int = 90,
     cyclic: bool = False,
+    exclude_p: bool = False,
     # Design parameters
     num_designs: int = 5,
     num_cycles: int = 7,
@@ -861,11 +950,23 @@ def run_pipeline(
     temperature: float = 0.1,
     omit_aa: str = "C",
     alanine_bias: bool = True,
-    high_iptm_threshold: float = 0.7,
-    high_plddt_threshold: float = 0.7,
+    alanine_bias_start: float = -0.5,
+    alanine_bias_end: float = -0.1,
+    high_iptm_threshold: float = 0.8,
+    high_plddt_threshold: float = 0.8,
+    # Contact filtering
+    no_contact_filter: bool = False,
+    max_contact_filter_retries: int = 6,
+    contact_cutoff: float = 15.0,
+    # MSA options
+    msa_mode: str = "single",  # "single" or "mmseqs"
     # Model parameters
     diffuse_steps: int = 200,
     recycling_steps: int = 3,
+    randomly_kill_helix_feature: bool = False,
+    negative_helix_constant: float = 0.2,
+    grad_enabled: bool = False,
+    logmd: bool = False,
     # Execution
     gpu: str = DEFAULT_GPU,
     max_concurrent: int = 0,  # 0 = unlimited, otherwise limit concurrent GPUs
@@ -939,6 +1040,7 @@ def run_pipeline(
         print(f"Template chains: {template_chain_id}")
     if contact_residues:
         print(f"Hotspots: {contact_residues}")
+    print(f"MSA mode: {msa_mode}")
     print(f"{'='*70}\n")
     
     # Build tasks
@@ -957,24 +1059,35 @@ def run_pipeline(
             "nucleic_type": nucleic_type,
             "template_content": template_content,  # Base64-encoded PDB content
             "template_chain_ids": template_chain_id or "",  # Chain IDs from template file
-            "msa_mode": "single",  # Skip MSA for now
+            "msa_mode": msa_mode,
             # Binder
             "seq": seq or "",
             "min_protein_length": min_protein_length,
             "max_protein_length": max_protein_length,
             "percent_X": percent_x,
             "cyclic": cyclic,
+            "exclude_P": exclude_p,
             # Design
             "num_cycles": num_cycles,
             "contact_residues": contact_residues or "",
             "temperature": temperature,
             "omit_AA": omit_aa,
             "alanine_bias": alanine_bias,
+            "alanine_bias_start": alanine_bias_start,
+            "alanine_bias_end": alanine_bias_end,
             "high_iptm_threshold": high_iptm_threshold,
             "high_plddt_threshold": high_plddt_threshold,
+            # Contact filtering
+            "no_contact_filter": no_contact_filter,
+            "max_contact_filter_retries": max_contact_filter_retries,
+            "contact_cutoff": contact_cutoff,
             # Model
             "diffuse_steps": diffuse_steps,
             "recycling_steps": recycling_steps,
+            "randomly_kill_helix_feature": randomly_kill_helix_feature,
+            "negative_helix_constant": negative_helix_constant,
+            "grad_enabled": grad_enabled,
+            "logmd": logmd,
         }
         tasks.append(task)
     
@@ -1056,6 +1169,7 @@ def run_pipeline(
             c = cycle_data.get("cycle", 0)
             row[f"cycle_{c}_iptm"] = cycle_data.get("iptm")
             row[f"cycle_{c}_plddt"] = cycle_data.get("plddt")
+            row[f"cycle_{c}_iplddt"] = cycle_data.get("iplddt")
             row[f"cycle_{c}_alanine"] = cycle_data.get("alanine_count")
         summary_rows.append(row)
     
@@ -1088,6 +1202,7 @@ def run_pipeline(
                 "cycle": cycle,
                 "iptm": design.get("iptm"),
                 "plddt": design.get("plddt"),
+                "iplddt": design.get("iplddt"),
                 "seq": design.get("seq"),
             })
     
