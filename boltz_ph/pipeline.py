@@ -509,6 +509,13 @@ class ProteinHunter_Boltz:
             "target_seqs": a.protein_seqs or "",
             "contact_residues": a.contact_residues or "",
             "msa_mode": a.msa_mode,
+            # Fields for AF3 reconstruction
+            "ligand_smiles": a.ligand_smiles or "",
+            "ligand_ccd": a.ligand_ccd or "",
+            "nucleic_seq": a.nucleic_seq or "",
+            "nucleic_type": a.nucleic_type or "",
+            "template_path": a.template or "",
+            "template_mapping": a.template_mapping or "",
             "timestamp": dt.datetime.now().isoformat(),
         }
         append_to_csv_safe(Path(self.designs_dir) / "design_stats.csv", csv_row)
@@ -643,6 +650,13 @@ class ProteinHunter_Boltz:
                 "target_seqs": a.protein_seqs or "",
                 "contact_residues": a.contact_residues or "",
                 "msa_mode": a.msa_mode,
+                # Fields for AF3 reconstruction
+                "ligand_smiles": a.ligand_smiles or "",
+                "ligand_ccd": a.ligand_ccd or "",
+                "nucleic_seq": a.nucleic_seq or "",
+                "nucleic_type": a.nucleic_type or "",
+                "template_path": a.template or "",
+                "template_mapping": a.template_mapping or "",
                 "timestamp": dt.datetime.now().isoformat(),
             }
             append_to_csv_safe(Path(self.designs_dir) / "design_stats.csv", csv_row)
@@ -738,12 +752,12 @@ class ProteinHunter_Boltz:
         print(f"\n✅ All run/cycle metrics saved to {summary_csv}")
 
     def _run_downstream_validation(self):
+        """Executes AlphaFold and Rosetta validation steps."""
         # This ensures they are in scope when called later in this function
         sys.path.append(os.path.join(os.path.dirname(__file__), "utils"))
-        from utils.alphafold_utils import run_alphafold_step
+        from utils.alphafold_utils import run_alphafold_step_from_csv
         from utils.pyrosetta_utils import run_rosetta_step
 
-        """Executes AlphaFold and Rosetta validation steps."""
         a = self.args
 
         # Determine target type for Rosetta validation
@@ -757,34 +771,32 @@ class ProteinHunter_Boltz:
 
         success_dir = f"{self.save_dir}/1_af3_rosetta_validation"
 
-        # Use best_designs/ folder for downstream validation (replaces high_iptm_yaml/)
+        # Use best_designs.csv for downstream validation (replaces high_iptm_yaml/)
+        best_designs_csv = os.path.join(self.save_dir, "best_designs", "best_designs.csv")
         best_designs_dir = os.path.join(self.save_dir, "best_designs")
 
-        if os.path.exists(best_designs_dir) and list(Path(best_designs_dir).glob("*.pdb")):
+        if os.path.exists(best_designs_csv):
             print("Starting downstream validation (AlphaFold3 and Rosetta)...")
-            print(f"Using designs from: {best_designs_dir}")
-
-            # Note: alphafold_utils may need updates to work with PDBs instead of YAML
-            # For now, we pass the best_designs_dir which contains PDBs
-            # TODO: Update alphafold_utils.run_alphafold_step to work with new structure
+            print(f"Using designs from: {best_designs_csv}")
 
             # --- AlphaFold Step ---
+            # Uses run_alphafold_step_from_csv which converts CSV -> YAML -> AF3 JSON
             af_output_dir, af_output_apo_dir, af_pdb_dir, af_pdb_dir_apo = (
-                run_alphafold_step(
-                    best_designs_dir,  # Now passes best_designs/ with PDBs
-                    os.path.expanduser(a.alphafold_dir),
-                    a.af3_docker_name,
-                    os.path.expanduser(a.af3_database_settings),
-                    os.path.expanduser(a.hmmer_path),
-                    success_dir,
-                    os.path.expanduser(a.work_dir) or os.getcwd(),
+                run_alphafold_step_from_csv(
+                    csv_path=best_designs_csv,
+                    alphafold_dir=os.path.expanduser(a.alphafold_dir),
+                    af3_docker_name=a.af3_docker_name,
+                    af3_database_settings=os.path.expanduser(a.af3_database_settings),
+                    hmmer_path=os.path.expanduser(a.hmmer_path),
+                    ligandmpnn_dir=success_dir,
+                    work_dir=os.path.expanduser(a.work_dir) or os.getcwd(),
                     binder_id=self.binder_chain,
                     gpu_id=a.gpu_id,
                     high_iptm=True,
                     use_msa_for_af3=a.use_msa_for_af3,
                 )
             )
-            if target_type == "protein":
+            if af_pdb_dir and target_type == "protein":
                 # --- Rosetta Step ---
                 run_rosetta_step(
                     success_dir,
@@ -794,7 +806,7 @@ class ProteinHunter_Boltz:
                     target_type=target_type,
                 )
         else:
-            print("No best designs found for downstream validation.")
+            print(f"No best_designs.csv found at {best_designs_csv}. Skipping downstream validation.")
 
 
     def run_pipeline(self):
@@ -864,6 +876,13 @@ class ProteinHunter_Boltz:
                     "target_seqs": a.protein_seqs or "",
                     "contact_residues": a.contact_residues or "",
                     "msa_mode": a.msa_mode,
+                    # Fields for AF3 reconstruction
+                    "ligand_smiles": a.ligand_smiles or "",
+                    "ligand_ccd": a.ligand_ccd or "",
+                    "nucleic_seq": a.nucleic_seq or "",
+                    "nucleic_type": a.nucleic_type or "",
+                    "template_path": a.template or "",
+                    "template_mapping": a.template_mapping or "",
                 })
 
         if best_rows:

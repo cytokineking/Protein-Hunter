@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shutil
 import sys
 import subprocess
 import time
@@ -22,7 +23,7 @@ from boltz_ph.constants import RNA_CHAIN_POLY_TYPE
 from utils.convert import convert_cif_files_to_pdb, download_with_progress, calculate_holo_apo_rmsd, RNA_DATABASE_INFO, AF3_SOURCE
 from utils.msa_tools import Nhmmer, Msa, parse_fasta
 from boltz_ph.model_utils import process_msa, get_cif # MMseqs2 wrapper and PDB fetcher
-from typing import Optional
+from typing import Optional, Dict, List
 
 # Default settings for RNA MSA generation (from ColabNuFold/AlphaFold3 pipeline)
 RNA_DEFAULT_SETTINGS = {
@@ -637,3 +638,188 @@ def process_yaml_files(
                 json.dump(json_result_apo, f, indent=4)
         else:
              print(f"Skipping APO JSON generation for {name}: No binder protein found.")
+
+
+def csv_row_to_yaml(row: Dict, binder_chain: str = "A") -> Dict:
+    """
+    Convert a row from design_stats.csv or best_designs.csv to YAML format
+    compatible with process_yaml_files.
+    
+    This bridges the new CSV-based output structure with the existing AF3 pipeline.
+    
+    Args:
+        row: Dictionary representing a CSV row (from pandas df.to_dict('records'))
+        binder_chain: Chain ID for the binder (default "A")
+    
+    Returns:
+        Dictionary in Boltz YAML format that process_yaml_files can handle
+    """
+    sequences = []
+    
+    # 1. Add binder sequence
+    binder_entry = {
+        "protein": {
+            "id": [binder_chain],
+            "sequence": row.get("binder_sequence", ""),
+            "msa": row.get("msa_mode", "empty"),
+        }
+    }
+    if row.get("cyclic"):
+        binder_entry["protein"]["cyclic"] = True
+    sequences.append(binder_entry)
+    
+    # 2. Add target sequences from JSON-encoded field
+    target_seqs = row.get("target_seqs", "{}")
+    if isinstance(target_seqs, str):
+        target_seqs = json.loads(target_seqs)
+    
+    for chain_id, seq in target_seqs.items():
+        target_entry = {
+            "protein": {
+                "id": [chain_id],
+                "sequence": seq,
+                "msa": row.get("msa_mode", "empty"),
+            }
+        }
+        sequences.append(target_entry)
+    
+    # 3. Add ligand if present
+    if row.get("ligand_smiles"):
+        # Find next available chain letter
+        used_chains = {binder_chain} | set(target_seqs.keys())
+        ligand_chain = next(c for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_chains)
+        sequences.append({
+            "ligand": {
+                "id": [ligand_chain],
+                "smiles": row["ligand_smiles"]
+            }
+        })
+    elif row.get("ligand_ccd"):
+        used_chains = {binder_chain} | set(target_seqs.keys())
+        ligand_chain = next(c for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_chains)
+        sequences.append({
+            "ligand": {
+                "id": [ligand_chain],
+                "ccd": row["ligand_ccd"]
+            }
+        })
+    
+    # 4. Add nucleic acid if present
+    if row.get("nucleic_seq") and row.get("nucleic_type"):
+        used_chains = {binder_chain} | set(target_seqs.keys())
+        if row.get("ligand_smiles") or row.get("ligand_ccd"):
+            used_chains.add(next(c for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_chains))
+        nucleic_chain = next(c for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_chains)
+        sequences.append({
+            row["nucleic_type"]: {
+                "id": [nucleic_chain],
+                "sequence": row["nucleic_seq"]
+            }
+        })
+    
+    yaml_data = {"sequences": sequences}
+    
+    # 5. Add template info if present (for AF3)
+    if row.get("template_path"):
+        yaml_data["templates"] = [{
+            "cif": row["template_path"],
+            "chain_id": row.get("template_mapping", "").split(":")[0] if row.get("template_mapping") else None
+        }]
+    
+    return yaml_data
+
+
+def generate_yamls_from_csv(
+    csv_path: str,
+    output_dir: str,
+    binder_chain: str = "A"
+) -> int:
+    """
+    Generate YAML files from a design stats CSV for AF3 processing.
+    
+    This function reads the CSV produced by the new output structure and
+    creates temporary YAML files that the existing process_yaml_files 
+    function can consume.
+    
+    Args:
+        csv_path: Path to design_stats.csv or best_designs.csv
+        output_dir: Directory to write YAML files to
+        binder_chain: Chain ID for the binder (default "A")
+    
+    Returns:
+        Number of YAML files generated
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    df = pd.read_csv(csv_path)
+    count = 0
+    
+    for _, row in df.iterrows():
+        design_id = row.get("design_id", f"design_{count}")
+        yaml_data = csv_row_to_yaml(row.to_dict(), binder_chain)
+        
+        yaml_path = os.path.join(output_dir, f"{design_id}.yaml")
+        with open(yaml_path, "w") as f:
+            yaml.dump(yaml_data, f, default_flow_style=False)
+        
+        count += 1
+    
+    print(f"Generated {count} YAML files from {csv_path}")
+    return count
+
+
+def run_alphafold_step_from_csv(
+    csv_path: str,
+    alphafold_dir: str,
+    af3_docker_name: str,
+    af3_database_settings: str,
+    hmmer_path: str,
+    ligandmpnn_dir: str,
+    work_dir: str,
+    binder_id: str = "A",
+    gpu_id: int = 0,
+    high_iptm: bool = False,
+    use_msa_for_af3: bool = False,
+):
+    """
+    Run AlphaFold validation using a CSV file as input.
+    
+    This is a wrapper around run_alphafold_step that first converts
+    CSV data to YAML format.
+    
+    Args:
+        csv_path: Path to design_stats.csv or best_designs.csv
+        ... (other args same as run_alphafold_step)
+    
+    Returns:
+        Same as run_alphafold_step: (af_output_dir, af_output_apo_dir, af_pdb_dir, af_pdb_dir_apo)
+    """
+    # Create temporary YAML directory
+    yaml_dir = os.path.join(ligandmpnn_dir, "tmp_yamls_for_af3")
+    
+    # Generate YAMLs from CSV
+    count = generate_yamls_from_csv(csv_path, yaml_dir, binder_chain=binder_id)
+    
+    if count == 0:
+        print("No designs found in CSV. Skipping AlphaFold step.")
+        return None, None, None, None
+    
+    # Run the standard AlphaFold step with generated YAMLs
+    result = run_alphafold_step(
+        yaml_dir=yaml_dir,
+        alphafold_dir=alphafold_dir,
+        af3_docker_name=af3_docker_name,
+        af3_database_settings=af3_database_settings,
+        hmmer_path=hmmer_path,
+        ligandmpnn_dir=ligandmpnn_dir,
+        work_dir=work_dir,
+        binder_id=binder_id,
+        gpu_id=gpu_id,
+        high_iptm=high_iptm,
+        use_msa_for_af3=use_msa_for_af3,
+    )
+    
+    # Clean up temporary YAMLs
+    shutil.rmtree(yaml_dir, ignore_errors=True)
+    
+    return result
