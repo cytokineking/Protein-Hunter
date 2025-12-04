@@ -17,9 +17,10 @@ from boltz_ph.constants import CHAIN_TO_NUMBER
 from utils.metrics import get_CA_and_sequence # Used implicitly in design.py
 from utils.convert import calculate_holo_apo_rmsd, convert_cif_files_to_pdb
 from utils.ipsae_utils import calculate_ipsae_from_boltz_output
+from utils.csv_utils import append_to_csv_safe
 
 
-from model_utils import (
+from boltz_ph.model_utils import (
     binder_binds_contacts,
     clean_memory,
     design_sequence,
@@ -41,11 +42,15 @@ class InputDataBuilder:
 
     def __init__(self, args):
         self.args = args
+        # New output structure: results_{name}/
         self.save_dir = (
-            args.save_dir if args.save_dir else f"./results_boltz/{args.name}"
+            args.save_dir if args.save_dir else f"./results_{args.name}"
         )
-        self.protein_hunter_save_dir = f"{self.save_dir}/0_protein_hunter_design"
-        os.makedirs(self.protein_hunter_save_dir, exist_ok=True)
+        # Flat designs directory (replaces 0_protein_hunter_design/run_X/)
+        self.designs_dir = f"{self.save_dir}/designs"
+        os.makedirs(self.designs_dir, exist_ok=True)
+        # Keep for backward compatibility with MSA generation
+        self.protein_hunter_save_dir = self.designs_dir
 
 
     def _process_sequence_inputs(self):
@@ -299,7 +304,8 @@ class ProteinHunter_Boltz:
 
         # 3. Setup Directories
         self.save_dir = self.data_builder.save_dir
-        self.protein_hunter_save_dir = self.data_builder.protein_hunter_save_dir
+        self.designs_dir = self.data_builder.designs_dir
+        self.protein_hunter_save_dir = self.data_builder.protein_hunter_save_dir  # Keep for backward compat
         self.binder_chain = "A"
 
         print("✅ ProteinHunter_Boltz initialized.")
@@ -328,13 +334,14 @@ class ProteinHunter_Boltz:
         """
         Executes a single design run, including Cycle 0 contact filtering and
         the subsequent design/prediction cycles.
-        
+
         Note: The cycle logic remains highly coupled due to the nature of the
         sequential design process, but relies on modular imports.
         """
+        import datetime as dt
+
         a = self.args
-        run_save_dir = os.path.join(self.protein_hunter_save_dir, f"run_{run_id}")
-        os.makedirs(run_save_dir, exist_ok=True)
+        design_idx = int(run_id)  # run_id is already the design index
 
         # Initialize run metrics and tracking variables
         best_iptm = float("-inf")
@@ -344,6 +351,10 @@ class ProteinHunter_Boltz:
         best_pdb_filename = None
         best_cycle_idx = -1
         best_alanine_percentage = None
+        best_ipsae = None
+        best_plddt = None
+        best_iplddt = None
+        best_alanine_count = None
         run_metrics = {"run_id": run_id}
 
 
@@ -401,7 +412,9 @@ class ProteinHunter_Boltz:
                 pocket_conditioning=pocket_conditioning,
                 return_feats=True,
             )
-            pdb_filename = f"{run_save_dir}/{a.name}_run_{run_id}_predicted_cycle_0.pdb"
+            # New naming: {name}_d{N}_c{M}.pdb in flat designs/ folder
+            design_id = f"{a.name}_d{design_idx}_c0"
+            pdb_filename = f"{self.designs_dir}/{design_id}.pdb"
             plddts = output["plddt"].detach().cpu().numpy()[0]
             save_pdb(structure, output["coords"], plddts, pdb_filename)
 
@@ -464,17 +477,41 @@ class ProteinHunter_Boltz:
         )
         cycle_0_ipsae = ipsae_result['ipSAE']
 
-        run_metrics["cycle_0_iptm"] = cycle_0_iptm
-        run_metrics["cycle_0_ipsae"] = cycle_0_ipsae
-        run_metrics["cycle_0_plddt"] = float(
+        cycle_0_plddt = float(
             output.get("complex_plddt", torch.tensor([0.0])).detach().cpu().numpy()[0]
         )
-        run_metrics["cycle_0_iplddt"] = float(
+        cycle_0_iplddt = float(
             output.get("complex_iplddt", torch.tensor([0.0])).detach().cpu().numpy()[0]
         )
+
+        run_metrics["cycle_0_iptm"] = cycle_0_iptm
+        run_metrics["cycle_0_ipsae"] = cycle_0_ipsae
+        run_metrics["cycle_0_plddt"] = cycle_0_plddt
+        run_metrics["cycle_0_iplddt"] = cycle_0_iplddt
         run_metrics["cycle_0_alanine"] = 0
-        
+
         print(f"Cycle 0: ipTM={cycle_0_iptm:.3f}, ipSAE={cycle_0_ipsae:.3f}")
+
+        # Write cycle 0 to design_stats.csv
+        csv_row = {
+            "design_id": design_id,
+            "design_num": design_idx,
+            "cycle": 0,
+            "binder_sequence": initial_seq,
+            "binder_length": binder_length,
+            "cyclic": a.cyclic,
+            "iptm": cycle_0_iptm,
+            "ipsae": cycle_0_ipsae,
+            "plddt": cycle_0_plddt,
+            "iplddt": cycle_0_iplddt,
+            "alanine_count": 0,
+            "alanine_pct": 0.0,
+            "target_seqs": a.protein_seqs or "",
+            "contact_residues": a.contact_residues or "",
+            "msa_mode": a.msa_mode,
+            "timestamp": dt.datetime.now().isoformat(),
+        }
+        append_to_csv_safe(Path(self.designs_dir) / "design_stats.csv", csv_row)
 
         # --- Optimization Cycles ---
         for cycle in range(a.num_cycles):
@@ -557,18 +594,10 @@ class ProteinHunter_Boltz:
                 best_seq = seq
                 best_structure = copy.deepcopy(structure)
                 best_output = shallow_copy_tensor_dict(output)
-                best_pdb_filename = (
-                    f"{run_save_dir}/{a.name}_run_{run_id}_best_structure.pdb"
-                )
-                best_plddts = best_output["plddt"].detach().cpu().numpy()[0]
-                save_pdb(
-                    best_structure,
-                    best_output["coords"],
-                    best_plddts,
-                    best_pdb_filename,
-                )
                 best_cycle_idx = cycle + 1
                 best_alanine_percentage = alanine_percentage
+                best_ipsae = current_ipsae
+                best_alanine_count = alanine_count
 
             # 3. Log Metrics and Save PDB
             curr_plddt = float(
@@ -591,95 +620,50 @@ class ProteinHunter_Boltz:
             run_metrics[f"cycle_{cycle + 1}_alanine"] = alanine_count
             run_metrics[f"cycle_{cycle + 1}_seq"] = seq
 
-            pdb_filename = (
-                f"{run_save_dir}/{a.name}_run_{run_id}_predicted_cycle_{cycle + 1}.pdb"
-            )
+            # New naming: {name}_d{N}_c{M}.pdb in flat designs/ folder
+            design_id = f"{a.name}_d{design_idx}_c{cycle + 1}"
+            pdb_filename = f"{self.designs_dir}/{design_id}.pdb"
             plddts = output["plddt"].detach().cpu().numpy()[0]
             save_pdb(structure, output["coords"], plddts, pdb_filename)
+
+            # Write cycle to design_stats.csv
+            csv_row = {
+                "design_id": design_id,
+                "design_num": design_idx,
+                "cycle": cycle + 1,
+                "binder_sequence": seq,
+                "binder_length": binder_length,
+                "cyclic": a.cyclic,
+                "iptm": current_iptm,
+                "ipsae": current_ipsae,
+                "plddt": curr_plddt,
+                "iplddt": curr_iplddt,
+                "alanine_count": alanine_count,
+                "alanine_pct": round(alanine_percentage * 100, 2),
+                "target_seqs": a.protein_seqs or "",
+                "contact_residues": a.contact_residues or "",
+                "msa_mode": a.msa_mode,
+                "timestamp": dt.datetime.now().isoformat(),
+            }
+            append_to_csv_safe(Path(self.designs_dir) / "design_stats.csv", csv_row)
+
             clean_memory()
 
             print(
                 f"ipTM: {current_iptm:.3f} ipSAE: {current_ipsae:.3f} pLDDT: {curr_plddt:.2f} iPLDDT: {curr_iplddt:.2f} Ala: {alanine_count}"
             )
 
-            # 4. Save YAML for High ipTM
-            save_yaml_this_design = (alanine_percentage <= 0.20) and (
-                current_iptm > a.high_iptm_threshold
-                and curr_plddt > a.high_plddt_threshold
-            )
+            # Note: high_iptm_yaml and high_iptm_pdb folders are eliminated.
+            # All designs stream to designs/ and downstream tools query the CSV.
+        # Build best_pdb_filename from best cycle info
+        if best_cycle_idx >= 0:
+            best_design_id = f"{a.name}_d{design_idx}_c{best_cycle_idx}"
+            best_pdb_filename = f"{self.designs_dir}/{best_design_id}.pdb"
+        else:
+            best_pdb_filename = None
 
-            if save_yaml_this_design and a.contact_residues.strip():
-                this_cycle_pdb_filename = f"{run_save_dir}/{a.name}_run_{run_id}_predicted_cycle_{cycle + 1}.pdb"
-                try:
-                    contact_binds = all([binder_binds_contacts(
-                        this_cycle_pdb_filename,
-                        self.binder_chain,
-                        protein_chain_ids[i],
-                        contact_res,
-                        cutoff=a.contact_cutoff,
-                    )
-                    for i, contact_res in enumerate(a.contact_residues.split("|"))
-                ])
-                    if not contact_binds:
-                        save_yaml_this_design = False
-                        print(
-                            "⛔️ Not saving YAML: binder failed contact check for high ipTM save."
-                        )
-                except Exception as e:
-                    print(
-                        f"WARNING: Exception during contact check: {e}. Saving YAML anyway."
-                    )
-            if save_yaml_this_design:
-                # --- Define base names and directories ---
-                base_filename = f"{a.name}_run_{run_id}_cycle_{cycle + 1}"
-                
-                # 1. Save YAML
-                high_iptm_yaml_dir = os.path.join(self.save_dir, "high_iptm_yaml")
-                os.makedirs(high_iptm_yaml_dir, exist_ok=True)
-                yaml_base_name = f"{base_filename}_output.yaml"
-                yaml_filename = os.path.join(high_iptm_yaml_dir, yaml_base_name)
-                
-                with open(yaml_filename, "w") as f:
-                    yaml.dump(data_cp, f, default_flow_style=False)
-                print(f"✅ Saved run {run_id} cycle {cycle + 1} YAML.")
-
-                # 2. Copy PDB
-                high_iptm_pdb_dir = os.path.join(self.save_dir, "high_iptm_pdb")
-                os.makedirs(high_iptm_pdb_dir, exist_ok=True)
-                
-                # Use the 'base_filename' for a consistent destination name
-                pdb_base_name = f"{base_filename}_structure.pdb" 
-                dest_pdb_path = os.path.join(high_iptm_pdb_dir, pdb_base_name)
-                
-                # Use 'pdb_filename', which is *always* defined just above this block
-                # This was the source of the UnboundLocalError
-                shutil.copy(pdb_filename, dest_pdb_path)
-                print(f"✅ Copied PDB to {dest_pdb_path}")
-
-                # 3. Append to high-ipTM summary CSV
-                summary_csv_path = os.path.join(self.save_dir, "summary_high_iptm.csv")
-                
-                metrics_dict = {
-                    "run_id": run_id,
-                    "cycle": cycle + 1,
-                    "iptm": current_iptm,
-                    "ipsae": current_ipsae,
-                    "plddt": curr_plddt,
-                    "iplddt": curr_iplddt,
-                    "alanine_count": alanine_count,
-                    "sequence": seq,
-                    "pdb_filename": pdb_base_name, # Log the *new* filename
-                    "yaml_filename": yaml_base_name
-                }
-                
-                # Check if file exists to write header only once
-                file_exists = os.path.isfile(summary_csv_path)
-                
-                df_row = pd.DataFrame([metrics_dict])
-                df_row.to_csv(summary_csv_path, mode='a', header=not file_exists, index=False)
-                print(f"✅ Appended high-ipTM metrics to {summary_csv_path}")
         # End of cycle visualization
-        if best_structure is not None and a.plot:
+        if best_structure is not None and best_pdb_filename and a.plot:
             plot_from_pdb(best_pdb_filename)
         elif best_structure is None:
             print(
@@ -696,15 +680,28 @@ class ProteinHunter_Boltz:
                 .cpu()
                 .numpy()[0]
             )
+            run_metrics["best_iplddt"] = float(
+                best_output.get("complex_iplddt", torch.tensor([0.0]))
+                .detach()
+                .cpu()
+                .numpy()[0]
+            )
             run_metrics["best_seq"] = best_seq
+            run_metrics["best_ipsae"] = best_ipsae
+            run_metrics["best_alanine_count"] = best_alanine_count
+            run_metrics["best_pdb_filename"] = best_pdb_filename
         else:
             run_metrics["best_iptm"] = float("nan")
             run_metrics["best_cycle"] = None
             run_metrics["best_plddt"] = float("nan")
+            run_metrics["best_iplddt"] = float("nan")
             run_metrics["best_seq"] = None
+            run_metrics["best_ipsae"] = float("nan")
+            run_metrics["best_alanine_count"] = None
+            run_metrics["best_pdb_filename"] = None
 
         if a.plot:
-            plot_run_metrics(run_save_dir, a.name, run_id, a.num_cycles, run_metrics)
+            plot_run_metrics(self.designs_dir, a.name, run_id, a.num_cycles, run_metrics)
 
         return run_metrics
 
@@ -745,10 +742,10 @@ class ProteinHunter_Boltz:
         sys.path.append(os.path.join(os.path.dirname(__file__), "utils"))
         from utils.alphafold_utils import run_alphafold_step
         from utils.pyrosetta_utils import run_rosetta_step
-        
+
         """Executes AlphaFold and Rosetta validation steps."""
         a = self.args
-        
+
         # Determine target type for Rosetta validation
         any_ligand_or_nucleic = a.ligand_smiles or a.ligand_ccd or a.nucleic_seq
         if a.nucleic_type.strip() and a.nucleic_seq.strip():
@@ -756,18 +753,25 @@ class ProteinHunter_Boltz:
         elif any_ligand_or_nucleic:
             target_type = "small_molecule"
         else:
-            target_type = "protein" # Default for unconditional mode
+            target_type = "protein"  # Default for unconditional mode
 
         success_dir = f"{self.save_dir}/1_af3_rosetta_validation"
-        high_iptm_yaml_dir = os.path.join(self.save_dir, "high_iptm_yaml")
 
-        if os.path.exists(high_iptm_yaml_dir):
+        # Use best_designs/ folder for downstream validation (replaces high_iptm_yaml/)
+        best_designs_dir = os.path.join(self.save_dir, "best_designs")
+
+        if os.path.exists(best_designs_dir) and list(Path(best_designs_dir).glob("*.pdb")):
             print("Starting downstream validation (AlphaFold3 and Rosetta)...")
+            print(f"Using designs from: {best_designs_dir}")
+
+            # Note: alphafold_utils may need updates to work with PDBs instead of YAML
+            # For now, we pass the best_designs_dir which contains PDBs
+            # TODO: Update alphafold_utils.run_alphafold_step to work with new structure
 
             # --- AlphaFold Step ---
             af_output_dir, af_output_apo_dir, af_pdb_dir, af_pdb_dir_apo = (
                 run_alphafold_step(
-                    high_iptm_yaml_dir,
+                    best_designs_dir,  # Now passes best_designs/ with PDBs
                     os.path.expanduser(a.alphafold_dir),
                     a.af3_docker_name,
                     os.path.expanduser(a.af3_database_settings),
@@ -789,6 +793,8 @@ class ProteinHunter_Boltz:
                     binder_id=self.binder_chain,
                     target_type=target_type,
                 )
+        else:
+            print("No best designs found for downstream validation.")
 
 
     def run_pipeline(self):
@@ -804,15 +810,89 @@ class ProteinHunter_Boltz:
             print(f"=== Starting Design Run {run_id}/{self.args.num_designs - 1} ===")
             print("=======================================================")
 
-        
             data_cp = copy.deepcopy(base_data)
 
             run_metrics = self._run_design_cycle(data_cp, run_id, pocket_conditioning)
             all_run_metrics.append(run_metrics)
 
-        # 3. Save Summary
-        self._save_summary_metrics(all_run_metrics)
+        # 3. Save best_designs/ folder (copy best cycle per design)
+        self._save_best_designs(all_run_metrics)
 
-        # 4. Run Downstream Validation
+        # 4. Print summary
+        self._print_summary(all_run_metrics)
+
+        # 5. Run Downstream Validation
         if self.args.use_alphafold3_validation:
             self._run_downstream_validation()
+
+    def _save_best_designs(self, all_run_metrics):
+        """Copy best cycle PDBs to best_designs/ folder and create best_designs.csv."""
+        a = self.args
+        best_dir = os.path.join(self.save_dir, "best_designs")
+        os.makedirs(best_dir, exist_ok=True)
+
+        best_rows = []
+        for metrics in all_run_metrics:
+            best_pdb = metrics.get("best_pdb_filename")
+            if best_pdb and os.path.exists(best_pdb):
+                # Copy PDB to best_designs/
+                design_idx = int(metrics.get("run_id", 0))
+                best_cycle = metrics.get("best_cycle", 0)
+                design_id = f"{a.name}_d{design_idx}_c{best_cycle}"
+                dest_pdb = os.path.join(best_dir, f"{design_id}.pdb")
+                shutil.copy(best_pdb, dest_pdb)
+
+                # Build row for best_designs.csv
+                seq = metrics.get("best_seq", "")
+                binder_length = len(seq) if seq else 0
+                alanine_count = metrics.get("best_alanine_count", 0)
+                alanine_pct = (alanine_count / binder_length * 100) if binder_length > 0 else 0.0
+
+                best_rows.append({
+                    "design_id": design_id,
+                    "design_num": design_idx,
+                    "cycle": best_cycle,
+                    "binder_sequence": seq,
+                    "binder_length": binder_length,
+                    "cyclic": a.cyclic,
+                    "iptm": metrics.get("best_iptm", 0.0),
+                    "ipsae": metrics.get("best_ipsae", 0.0),
+                    "plddt": metrics.get("best_plddt", 0.0),
+                    "iplddt": metrics.get("best_iplddt", 0.0),
+                    "alanine_count": alanine_count,
+                    "alanine_pct": round(alanine_pct, 2),
+                    "target_seqs": a.protein_seqs or "",
+                    "contact_residues": a.contact_residues or "",
+                    "msa_mode": a.msa_mode,
+                })
+
+        if best_rows:
+            best_df = pd.DataFrame(best_rows)
+            best_df.to_csv(os.path.join(best_dir, "best_designs.csv"), index=False)
+            print(f"\n✅ Saved {len(best_rows)} best designs to {best_dir}/")
+
+    def _print_summary(self, all_run_metrics):
+        """Print summary of all runs."""
+        a = self.args
+        designs_dir = self.designs_dir
+
+        # Count designs
+        design_pdbs = list(Path(designs_dir).glob("*.pdb"))
+        successful = [m for m in all_run_metrics if m.get("best_cycle") is not None]
+
+        print(f"\n{'='*70}")
+        print("SUMMARY")
+        print(f"{'='*70}")
+        print(f"Successful: {len(successful)}/{len(all_run_metrics)}")
+
+        if successful:
+            best_overall = max(successful, key=lambda m: m.get("best_iptm", 0))
+            print(f"Best overall: {a.name}_d{best_overall['run_id']} with ipTM={best_overall['best_iptm']:.3f}")
+
+        print(f"Total cycles saved: {len(design_pdbs)}")
+        print(f"Best designs: {len(successful)}")
+        print(f"\nOutput structure:")
+        print(f"  {self.save_dir}/")
+        print(f"  ├── designs/           # ALL cycles (PDBs + design_stats.csv)")
+        print(f"  └── best_designs/      # Best cycle per design run")
+        print(f"\nResults saved to: {self.save_dir}")

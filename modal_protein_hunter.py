@@ -249,7 +249,6 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
         "best_cycle": -1,
         "best_seq": None,
         "best_pdb": None,
-        "high_iptm_designs": [],
         "error": None,
     }
     
@@ -445,10 +444,29 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
         })
         
         print(f"  Cycle 0: ipTM={cycle_0_iptm:.3f}, ipSAE={cycle_0_ipsae:.3f}, pLDDT={cycle_0_plddt:.1f}, iPLDDT={cycle_0_iplddt:.1f}")
-        
+
+        # Get binder name from run_id (format: name_timestamp)
+        binder_name = "_".join(run_id.split("_")[:-2]) if "_" in run_id else run_id
+
         # Stream cycle 0 results
         if stream_to_dict:
-            _stream_result(run_id, design_idx, 0, cycle_0_iptm, cycle_0_ipsae, cycle_0_plddt, initial_seq, pdb_file)
+            _stream_result(
+                run_id=run_id,
+                design_idx=design_idx,
+                cycle=0,
+                iptm=cycle_0_iptm,
+                ipsae=cycle_0_ipsae,
+                plddt=cycle_0_plddt,
+                iplddt=cycle_0_iplddt,
+                seq=initial_seq,
+                pdb_file=pdb_file,
+                binder_name=binder_name,
+                target_seqs=protein_seqs,
+                contact_residues=contact_residues,
+                msa_mode=msa_mode,
+                cyclic=cyclic,
+                alanine_count=0,
+            )
         
         clean_memory()
         
@@ -542,64 +560,31 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                 
                 # Stream cycle results
                 if stream_to_dict:
-                    _stream_result(run_id, design_idx, cycle + 1, current_iptm, current_ipsae, current_plddt, seq, pdb_file)
+                    _stream_result(
+                        run_id=run_id,
+                        design_idx=design_idx,
+                        cycle=cycle + 1,
+                        iptm=current_iptm,
+                        ipsae=current_ipsae,
+                        plddt=current_plddt,
+                        iplddt=current_iplddt,
+                        seq=seq,
+                        pdb_file=pdb_file,
+                        binder_name=binder_name,
+                        target_seqs=protein_seqs,
+                        contact_residues=contact_residues,
+                        msa_mode=msa_mode,
+                        cyclic=cyclic,
+                        alanine_count=alanine_count,
+                    )
                 
-                # Update best if acceptable
+                # Update best if acceptable (low alanine %)
                 if alanine_pct <= 0.20 and current_iptm > best_iptm:
                     best_iptm = current_iptm
                     best_seq = seq
                     best_pdb_content = pdb_file.read_text()
                     best_cycle_idx = cycle + 1
-                
-                # Check for high-ipTM design
-                save_high_iptm = (
-                    alanine_pct <= 0.20 and
-                    current_iptm > high_iptm_threshold and
-                    current_plddt > high_plddt_threshold
-                )
-                
-                # Add contact validation for high-ipTM saves (matching local pipeline)
-                if save_high_iptm and contact_residues and contact_residues.strip():
-                    try:
-                        contact_binds = all([
-                            binder_binds_contacts(
-                                str(pdb_file),
-                                binder_chain,
-                                protein_chain_ids[i] if i < len(protein_chain_ids) else protein_chain_ids[0],
-                                contact_res,
-                                cutoff=contact_cutoff,
-                            )
-                            for i, contact_res in enumerate(contact_residues.split("|"))
-                        ])
-                        if not contact_binds:
-                            save_high_iptm = False
-                            print("  ⛔️ Not saving high-ipTM: binder failed contact check.")
-                    except Exception as e:
-                        print(f"  WARNING: Contact check exception: {e}. Saving anyway.")
-                
-                if save_high_iptm:
-                    print("  ✅ High-ipTM design found!")
-                    
-                    # Build YAML content
-                    yaml_content = yaml.dump(data, default_flow_style=False)
-                    
-                    high_design = {
-                        "cycle": cycle + 1,
-                        "iptm": current_iptm,
-                        "ipsae": current_ipsae,
-                        "plddt": current_plddt,
-                        "iplddt": current_iplddt,
-                        "alanine_count": alanine_count,
-                        "seq": seq,
-                        "pdb": pdb_file.read_text(),
-                        "yaml": yaml_content,
-                    }
-                    result["high_iptm_designs"].append(high_design)
-                    
-                    # Stream high-ipTM design
-                    if stream_to_dict:
-                        _stream_high_iptm(run_id, design_idx, cycle + 1, high_design)
-                
+
                 clean_memory()
                 
             except Exception as cycle_error:
@@ -769,10 +754,26 @@ def _build_input_data(
     return data
 
 
-def _stream_result(run_id: str, design_idx: int, cycle: int, iptm: float, ipsae: float, plddt: float, seq: str, pdb_file: Path):
-    """Stream a cycle result to the Modal Dict."""
+def _stream_result(
+    run_id: str,
+    design_idx: int,
+    cycle: int,
+    iptm: float,
+    ipsae: float,
+    plddt: float,
+    iplddt: float,
+    seq: str,
+    pdb_file: Path,
+    binder_name: str,
+    target_seqs: str = "",
+    contact_residues: str = "",
+    msa_mode: str = "empty",
+    cyclic: bool = False,
+    alanine_count: int = 0,
+):
+    """Stream a cycle result to the Modal Dict with full config for CSV."""
     try:
-        key = f"{run_id}:design_{design_idx}:cycle_{cycle}"
+        key = f"{run_id}:d{design_idx}:c{cycle}"
         results_dict[key] = {
             "run_id": run_id,
             "design_idx": design_idx,
@@ -780,33 +781,22 @@ def _stream_result(run_id: str, design_idx: int, cycle: int, iptm: float, ipsae:
             "iptm": iptm,
             "ipsae": ipsae,
             "plddt": plddt,
+            "iplddt": iplddt,
             "seq": seq,
             "pdb": pdb_file.read_text() if pdb_file.exists() else None,
             "timestamp": time.time(),
+            # Additional config for reproducibility
+            "binder_name": binder_name,
+            "target_seqs": target_seqs,
+            "contact_residues": contact_residues,
+            "msa_mode": msa_mode,
+            "cyclic": cyclic,
+            "alanine_count": alanine_count,
         }
     except Exception as e:
         print(f"  Stream error: {e}")
 
 
-def _stream_high_iptm(run_id: str, design_idx: int, cycle: int, design_data: Dict):
-    """Stream a high-ipTM design to the Modal Dict."""
-    try:
-        key = f"{run_id}:design_{design_idx}:high_iptm:cycle_{cycle}"
-        results_dict[key] = {
-            "run_id": run_id,
-            "design_idx": design_idx,
-            "cycle": cycle,
-            "iptm": design_data["iptm"],
-            "ipsae": design_data.get("ipsae", 0.0),
-            "plddt": design_data["plddt"],
-            "seq": design_data["seq"],
-            "pdb": design_data["pdb"],
-            "yaml": design_data["yaml"],
-            "timestamp": time.time(),
-        }
-        print("  → Streamed high-ipTM to Dict")
-    except Exception as e:
-        print(f"  Stream error: {e}")
 
 
 # =============================================================================
@@ -1036,8 +1026,8 @@ def run_pipeline(
         else:
             print(f"Warning: Template file not found: {template_path}")
     
-    # Setup output directory
-    output_path = Path(output_dir) if output_dir else Path(f"./modal_results/{name}")
+    # Setup output directory with new naming convention
+    output_path = Path(output_dir) if output_dir else Path(f"./results_{name}")
     output_path.mkdir(parents=True, exist_ok=True)
     
     # Print configuration
@@ -1167,79 +1157,69 @@ def run_pipeline(
         stop_sync.set()
         sync_thread.join(timeout=30)
     
-    # Save results
+    # Save results with new flat structure
     print(f"\nSaving results to {output_path}...")
-    
-    # Save summary CSV
-    summary_rows = []
-    for r in all_results:
-        row = {
-            "design_idx": r.get("design_idx"),
-            "status": r.get("status"),
-            "best_iptm": r.get("best_iptm"),
-            "best_cycle": r.get("best_cycle"),
-            "best_seq": r.get("best_seq"),
-        }
-        # Add per-cycle metrics
-        for cycle_data in r.get("cycles", []):
-            c = cycle_data.get("cycle", 0)
-            row[f"cycle_{c}_iptm"] = cycle_data.get("iptm")
-            row[f"cycle_{c}_ipsae"] = cycle_data.get("ipsae")
-            row[f"cycle_{c}_plddt"] = cycle_data.get("plddt")
-            row[f"cycle_{c}_iplddt"] = cycle_data.get("iplddt")
-            row[f"cycle_{c}_alanine"] = cycle_data.get("alanine_count")
-        summary_rows.append(row)
-    
-    summary_df = pd.DataFrame(summary_rows)
-    summary_df.to_csv(output_path / "summary_all_runs.csv", index=False)
-    print("  ✓ summary_all_runs.csv")
-    
-    # Save high-ipTM designs
-    high_iptm_dir = output_path / "high_iptm_yaml"
-    high_iptm_pdb_dir = output_path / "high_iptm_pdb"
-    high_iptm_rows = []
-    
-    for r in all_results:
-        for design in r.get("high_iptm_designs", []):
-            design_idx = r.get("design_idx")
-            cycle = design.get("cycle")
-            
-            # Save YAML
-            high_iptm_dir.mkdir(exist_ok=True)
-            yaml_file = high_iptm_dir / f"design_{design_idx}_cycle_{cycle}.yaml"
-            yaml_file.write_text(design.get("yaml", ""))
-            
-            # Save PDB
-            high_iptm_pdb_dir.mkdir(exist_ok=True)
-            pdb_file = high_iptm_pdb_dir / f"design_{design_idx}_cycle_{cycle}.pdb"
-            pdb_file.write_text(design.get("pdb", ""))
-            
-            high_iptm_rows.append({
-                "design_idx": design_idx,
-                "cycle": cycle,
-                "iptm": design.get("iptm"),
-                "ipsae": design.get("ipsae"),
-                "plddt": design.get("plddt"),
-                "iplddt": design.get("iplddt"),
-                "seq": design.get("seq"),
-            })
-    
-    if high_iptm_rows:
-        high_iptm_df = pd.DataFrame(high_iptm_rows)
-        high_iptm_df.to_csv(output_path / "summary_high_iptm.csv", index=False)
-        print(f"  ✓ summary_high_iptm.csv ({len(high_iptm_rows)} designs)")
-        print(f"  ✓ high_iptm_yaml/ ({len(high_iptm_rows)} files)")
-        print(f"  ✓ high_iptm_pdb/ ({len(high_iptm_rows)} files)")
-    
-    # Save best structures
-    best_dir = output_path / "best_structures"
+
+    # Ensure designs folder exists (sync worker may have created it already)
+    designs_dir = output_path / "designs"
+    designs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save best designs (best cycle per design run)
+    best_dir = output_path / "best_designs"
     best_dir.mkdir(exist_ok=True)
+    best_rows = []
+
     for r in all_results:
-        if r.get("best_pdb"):
-            pdb_file = best_dir / f"design_{r['design_idx']}_best.pdb"
+        if r.get("best_pdb") and r.get("best_seq"):
+            design_idx = r.get("design_idx", 0)
+            best_cycle = r.get("best_cycle", 0)
+            design_id = f"{name}_d{design_idx}_c{best_cycle}"
+
+            # Save best PDB with new naming
+            pdb_file = best_dir / f"{design_id}.pdb"
             pdb_file.write_text(r["best_pdb"])
-    print(f"  ✓ best_structures/ ({len([r for r in all_results if r.get('best_pdb')])} files)")
-    
+
+            # Find best cycle metrics
+            best_cycle_data = None
+            for cycle_data in r.get("cycles", []):
+                if cycle_data.get("cycle") == best_cycle:
+                    best_cycle_data = cycle_data
+                    break
+
+            # Build row for best_designs.csv
+            seq = r.get("best_seq", "")
+            binder_length = len(seq) if seq else 0
+            alanine_count = best_cycle_data.get("alanine_count", 0) if best_cycle_data else 0
+            alanine_pct = (alanine_count / binder_length * 100) if binder_length > 0 else 0.0
+
+            best_rows.append({
+                "design_id": design_id,
+                "design_num": design_idx,
+                "cycle": best_cycle,
+                "binder_sequence": seq,
+                "binder_length": binder_length,
+                "cyclic": cyclic,
+                "iptm": r.get("best_iptm", 0.0),
+                "ipsae": best_cycle_data.get("ipsae", 0.0) if best_cycle_data else 0.0,
+                "plddt": best_cycle_data.get("plddt", 0.0) if best_cycle_data else 0.0,
+                "iplddt": best_cycle_data.get("iplddt", 0.0) if best_cycle_data else 0.0,
+                "alanine_count": alanine_count,
+                "alanine_pct": round(alanine_pct, 2),
+                "target_seqs": target_seq or "",
+                "contact_residues": contact_residues or "",
+                "msa_mode": msa_mode,
+            })
+
+    if best_rows:
+        best_df = pd.DataFrame(best_rows)
+        best_df.to_csv(best_dir / "best_designs.csv", index=False)
+        print(f"  ✓ best_designs/ ({len(best_rows)} PDBs + best_designs.csv)")
+
+    # Count designs in designs folder
+    design_pdbs = list(designs_dir.glob("*.pdb"))
+    design_csv = designs_dir / "design_stats.csv"
+    print(f"  ✓ designs/ ({len(design_pdbs)} PDBs + design_stats.csv)")
+
     # Print summary
     print(f"\n{'='*70}")
     print("SUMMARY")
@@ -1248,9 +1228,14 @@ def run_pipeline(
     print(f"Successful: {len(successful)}/{len(all_results)}")
     if successful:
         best_overall = max(successful, key=lambda r: r.get("best_iptm", 0))
-        print(f"Best overall: design_{best_overall['design_idx']} with ipTM={best_overall['best_iptm']:.3f}")
-    print(f"High-ipTM designs: {len(high_iptm_rows)}")
-    print(f"Results saved to: {output_path}")
+        print(f"Best overall: {name}_d{best_overall['design_idx']} with ipTM={best_overall['best_iptm']:.3f}")
+    print(f"Total cycles saved: {len(design_pdbs)}")
+    print(f"Best designs: {len(best_rows)}")
+    print(f"\nOutput structure:")
+    print(f"  {output_path}/")
+    print(f"  ├── designs/           # ALL cycles (PDBs + design_stats.csv)")
+    print(f"  └── best_designs/      # Best cycle per design run")
+    print(f"\nResults saved to: {output_path}")
 
 
 def _sync_worker(run_id: str, output_path: Path, stop_event: threading.Event, interval: float):
@@ -1290,38 +1275,58 @@ def _sync_worker(run_id: str, output_path: Path, stop_event: threading.Event, in
 
 
 def _save_synced_result(output_path: Path, result: Dict, key: str):
-    """Save a synced result from Dict to local filesystem."""
+    """Save a synced result from Dict to local filesystem with new flat structure."""
+    from utils.csv_utils import append_to_csv_safe
+    import datetime as dt
+
     design_idx = result.get("design_idx", 0)
     cycle = result.get("cycle", 0)
-    
-    # Create design directory
-    design_dir = output_path / f"design_{design_idx}"
-    design_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Save PDB if present
+    binder_name = result.get("binder_name", "design")
+
+    # Create flat designs directory
+    designs_dir = output_path / "designs"
+    designs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build design_id with descriptive naming: {name}_d{N}_c{M}
+    design_id = f"{binder_name}_d{design_idx}_c{cycle}"
+
+    # Save PDB with new naming convention
     if result.get("pdb"):
-        pdb_file = design_dir / f"cycle_{cycle}.pdb"
+        pdb_file = designs_dir / f"{design_id}.pdb"
         pdb_file.write_text(result["pdb"])
-    
-    # Save metrics JSON
-    metrics_file = design_dir / f"cycle_{cycle}_metrics.json"
-    metrics = {k: v for k, v in result.items() if k != "pdb" and k != "yaml"}
-    with open(metrics_file, "w") as f:
-        json.dump(metrics, f, indent=2)
-    
-    # If high-ipTM, also save to dedicated folder
-    if ":high_iptm:" in key:
-        high_dir = output_path / "high_iptm_streaming"
-        high_dir.mkdir(exist_ok=True)
-        
-        if result.get("pdb"):
-            pdb_file = high_dir / f"design_{design_idx}_cycle_{cycle}.pdb"
-            pdb_file.write_text(result["pdb"])
-        if result.get("yaml"):
-            yaml_file = high_dir / f"design_{design_idx}_cycle_{cycle}.yaml"
-            yaml_file.write_text(result["yaml"])
-        
-        print(f"  [SYNC] ✅ High-ipTM: design_{design_idx} cycle_{cycle}")
+
+    # Calculate alanine percentage
+    seq = result.get("seq", "")
+    binder_length = len(seq) if seq else 0
+    alanine_count = result.get("alanine_count", seq.count("A") if seq else 0)
+    alanine_pct = (alanine_count / binder_length * 100) if binder_length > 0 else 0.0
+
+    # Append to design_stats.csv with all columns for reproducibility
+    csv_file = designs_dir / "design_stats.csv"
+    row = {
+        # Core identification
+        "design_id": design_id,
+        "design_num": design_idx,
+        "cycle": cycle,
+        # Designed binder
+        "binder_sequence": seq,
+        "binder_length": binder_length,
+        "cyclic": result.get("cyclic", False),
+        # Prediction metrics
+        "iptm": result.get("iptm", 0.0),
+        "ipsae": result.get("ipsae", 0.0),
+        "plddt": result.get("plddt", 0.0),
+        "iplddt": result.get("iplddt", 0.0),
+        "alanine_count": alanine_count,
+        "alanine_pct": round(alanine_pct, 2),
+        # Job configuration (enables reproducibility without YAML files)
+        "target_seqs": result.get("target_seqs", ""),
+        "contact_residues": result.get("contact_residues", ""),
+        "msa_mode": result.get("msa_mode", "empty"),
+        # Run metadata
+        "timestamp": dt.datetime.fromtimestamp(result.get("timestamp", time.time())).isoformat(),
+    }
+    append_to_csv_safe(csv_file, row)
 
 
 @app.local_entrypoint()
