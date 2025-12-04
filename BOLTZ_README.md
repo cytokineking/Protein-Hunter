@@ -392,29 +392,54 @@ This controls the number of internal refinement passes within each structure pre
 
 ## Output Files
 
-Results are saved to `./results_boltz/{name}/`:
+Results are saved to `./results_{name}/`:
 
 ```
-results_boltz/my_design/
-├── 0_protein_hunter_design/
-│   ├── run_0/
-│   │   ├── my_design_run_0_predicted_cycle_0.pdb
-│   │   ├── my_design_run_0_predicted_cycle_1.pdb
-│   │   ├── ...
-│   │   └── my_design_run_0_best_structure.pdb
-│   ├── run_1/
-│   │   └── ...
-│   └── B_msa.a3m                    # MSA file (if mmseqs used)
-├── high_iptm_yaml/                  # YAML inputs for successful designs
-├── high_iptm_pdb/                   # Structures for successful designs
-├── summary_all_runs.csv             # All metrics for all runs/cycles
-└── summary_high_iptm.csv            # Summary of high-quality designs
+results_my_design/
+├── designs/                         # ALL cycles from all design runs
+│   ├── my_design_d0_c0.pdb          # Design 0, Cycle 0
+│   ├── my_design_d0_c1.pdb          # Design 0, Cycle 1
+│   ├── my_design_d0_c2.pdb          # ...
+│   ├── my_design_d1_c0.pdb          # Design 1, Cycle 0
+│   ├── my_design_d1_c1.pdb          # ...
+│   └── design_stats.csv             # Full metrics for ALL cycles
+└── best_designs/                    # Best cycle per design run
+    ├── my_design_d0_c2.pdb          # Best cycle from design 0
+    ├── my_design_d1_c3.pdb          # Best cycle from design 1
+    └── best_designs.csv             # Summary of best designs only
 ```
+
+**File naming convention:** `{name}_d{design_num}_c{cycle}.pdb`
 
 **Key files:**
-- `summary_all_runs.csv` — Complete metrics for every run and cycle
-- `high_iptm_yaml/` — Input files for designs exceeding quality thresholds
-- `high_iptm_pdb/` — Structures ready for downstream analysis
+
+| File | Description |
+|------|-------------|
+| `designs/design_stats.csv` | Complete metrics for every cycle of every design |
+| `designs/*.pdb` | All PDB structures from all cycles |
+| `best_designs/best_designs.csv` | Summary of best cycle per design (highest ipTM with ≤20% alanine) |
+| `best_designs/*.pdb` | Best structure from each design run |
+
+**CSV columns in `design_stats.csv`:**
+
+| Column | Description |
+|--------|-------------|
+| `design_id` | Unique identifier (`{name}_d{N}_c{M}`) |
+| `design_num` | Design run index |
+| `cycle` | Cycle number within design run |
+| `binder_sequence` | Designed binder sequence |
+| `binder_length` | Length of binder |
+| `cyclic` | Whether cyclic topology was used |
+| `iptm` | Interface pTM score |
+| `ipsae` | Interface pSAE score |
+| `plddt` | Complex pLDDT |
+| `iplddt` | Interface pLDDT |
+| `alanine_count` | Number of alanines |
+| `alanine_pct` | Percentage alanine |
+| `target_seqs` | Target sequence(s) used |
+| `contact_residues` | Hotspot residues (if specified) |
+| `msa_mode` | MSA mode used |
+| `timestamp` | When the cycle completed |
 
 ---
 
@@ -606,7 +631,7 @@ modal run modal_protein_hunter.py::list_gpus
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--name` | str | `"protein_hunter_run"` | Job name (used for output folder) |
-| `--output-dir` | str | `"./results_modal/{name}"` | Local output directory |
+| `--output-dir` | str | `"./results_{name}"` | Local output directory |
 
 #### Target Specification
 
@@ -663,15 +688,15 @@ modal run modal_protein_hunter.py::list_gpus
 
 #### Available GPU Types
 
-| GPU | VRAM | Cost/hour | Notes |
-|-----|------|-----------|-------|
-| `T4` | 16GB | $0.59 | Budget option |
-| `L4` | 24GB | $0.80 | Good value |
-| `A10G` | 24GB | $1.10 | |
-| `L40S` | 48GB | $1.95 | |
-| `A100-40GB` | 40GB | $2.10 | |
-| `A100-80GB` | 80GB | $2.50 | |
-| `H100` | 80GB | $3.95 | **Recommended** |
+| GPU | VRAM | Cost/hour |
+|-----|------|-----------|
+| `T4` | 16GB | $0.59 |
+| `L4` | 24GB | $0.80 |
+| `A10G` | 24GB | $1.10 |
+| `L40S` | 48GB | $1.95 |
+| `A100-40GB` | 40GB | $2.10 |
+| `A100-80GB` | 80GB | $2.50 |
+| `H100` | 80GB | $3.95 |
 
 ### Parallelization & Concurrency
 
@@ -797,21 +822,34 @@ modal run modal_protein_hunter.py::run_pipeline \
 
 ### Modal Output Files
 
-Results are saved to your local filesystem:
+Results are streamed to your local filesystem in real-time:
 
 ```
-output_dir/
-├── summary_all_runs.csv          # All designs with per-cycle metrics
-├── summary_high_iptm.csv         # High-quality designs only
-├── high_iptm_yaml/               # YAML input files for high-quality designs
-├── high_iptm_pdb/                # PDB structures for high-quality designs
-├── best_structures/              # Best structure from each design run
-└── design_N/                     # Per-design streaming results
-    ├── cycle_0.pdb
-    ├── cycle_0_metrics.json
-    ├── cycle_1.pdb
-    └── ...
+results_{name}/
+├── designs/                      # ALL cycles (streamed as they complete)
+│   ├── {name}_d0_c0.pdb
+│   ├── {name}_d0_c1.pdb
+│   ├── {name}_d1_c0.pdb
+│   └── design_stats.csv          # Appended incrementally
+└── best_designs/                 # Created at end of run
+    ├── {name}_d0_c2.pdb          # Best cycle per design
+    └── best_designs.csv
 ```
+
+The `designs/` folder is populated in real-time as each cycle completes across all parallel GPU workers. The `design_stats.csv` is thread-safe and can be monitored during execution.
+
+### Running Without Streaming (Test Mode)
+
+For testing the local pipeline code on Modal without streaming or parallelization:
+
+```bash
+modal run test_local_pipeline_modal.py --name my_test --num-designs 1 --num-cycles 2
+```
+
+This runs `boltz_ph/pipeline.py` directly on a single Modal GPU, useful for:
+- Testing local pipeline changes before production runs
+- Debugging without the complexity of parallel execution
+- Quick validation with minimal cycles
 
 ---
 
