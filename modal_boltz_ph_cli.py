@@ -586,6 +586,7 @@ def run_pipeline(
                             "design_id": design_id,
                             "af3_structure": result["af3_structure"],
                             "af3_iptm": result.get("af3_iptm", 0),
+                            "af3_ptm": result.get("af3_ptm", 0),
                             "af3_plddt": result.get("af3_plddt", 0),
                             "binder_chain": "A",
                             "target_chain": "B",
@@ -599,11 +600,22 @@ def run_pipeline(
                 
                 try:
                     pr_results_list = list(run_pyrosetta_single.starmap([
-                        (t["design_id"], t["af3_structure"], t["af3_iptm"], t["af3_plddt"], 
+                        (t["design_id"], t["af3_structure"], t["af3_iptm"], t["af3_ptm"], t["af3_plddt"], 
                          t["binder_chain"], t["target_chain"], t["apo_structure"], t["af3_confidence_json"],
                          t["target_type"])
                         for t in pr_tasks
                     ]))
+                    
+                    # Add design metadata from best_rows to PyRosetta results
+                    best_rows_by_id = {r["design_id"]: r for r in best_rows}
+                    for pr_result in pr_results_list:
+                        design_id = pr_result["design_id"]
+                        if design_id in best_rows_by_id:
+                            best_row = best_rows_by_id[design_id]
+                            pr_result["design_num"] = best_row.get("design_num", 0)
+                            pr_result["cycle"] = best_row.get("cycle", 0)
+                            pr_result["binder_sequence"] = best_row.get("binder_sequence", "")
+                            pr_result["binder_length"] = best_row.get("binder_length", 0)
                     
                     accepted = [r for r in pr_results_list if r.get("accepted")]
                     rejected = [r for r in pr_results_list if not r.get("accepted")]

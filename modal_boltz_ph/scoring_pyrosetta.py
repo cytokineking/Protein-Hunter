@@ -21,6 +21,7 @@ def run_pyrosetta_single(
     design_id: str,
     af3_structure: str,
     af3_iptm: float,
+    af3_ptm: float,
     af3_plddt: float,
     binder_chain: str = "A",
     target_chain: str = "B",
@@ -67,6 +68,7 @@ def run_pyrosetta_single(
     result = {
         "design_id": design_id,
         "af3_iptm": float(af3_iptm),
+        "af3_ptm": float(af3_ptm),
         "af3_plddt": float(af3_plddt),
         "accepted": False,
         "rejection_reason": None,

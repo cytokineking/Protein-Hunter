@@ -318,6 +318,223 @@ def filter_mmcif_by_chain(mmcif_text, chain_id):
     return '\n'.join(filtered_lines)
 
 
+def run_af3_native(
+    json_path: str,
+    output_dir: str,
+    model_dir: str = "/af3_weights",
+    alphafold_script: str = "/app/alphafold/run_alphafold.py",
+) -> Dict:
+    """
+    Run AF3 directly without Docker (for Modal containers or native installations).
+    
+    This function calls run_alphafold.py directly via subprocess, suitable for
+    environments where AF3 is installed natively (e.g., Modal containers).
+    
+    Args:
+        json_path: Path to AF3 input JSON file
+        output_dir: Directory for AF3 output
+        model_dir: Path to AF3 weights directory (default: /af3_weights for Modal)
+        alphafold_script: Path to run_alphafold.py script
+    
+    Returns:
+        Dict with af3_iptm, af3_ptm, af3_plddt, af3_structure, af3_confidence_json, error
+    """
+    name = Path(json_path).stem
+    result = {
+        "design_id": name,
+        "af3_iptm": 0,
+        "af3_ptm": 0,
+        "af3_plddt": 0,
+        "af3_structure": None,
+        "af3_confidence_json": None,
+        "error": None,
+    }
+    
+    # Check weights exist
+    weights_file = Path(model_dir) / "af3.bin"
+    if not weights_file.exists():
+        result["error"] = f"AF3 weights not found at {weights_file}"
+        return result
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    try:
+        proc = subprocess.run([
+            "python", alphafold_script,
+            f"--json_path={json_path}",
+            f"--model_dir={model_dir}",
+            f"--output_dir={output_dir}",
+            "--run_data_pipeline=false",
+            "--run_inference=true",
+        ], capture_output=True, text=True, timeout=1800, cwd="/app/alphafold")
+        
+        if proc.returncode != 0:
+            result["error"] = f"AF3 failed with code {proc.returncode}: {proc.stderr[:500]}"
+            return result
+            
+    except subprocess.TimeoutExpired:
+        result["error"] = "AF3 prediction timed out (30 min)"
+        return result
+    except Exception as e:
+        result["error"] = f"AF3 subprocess error: {str(e)}"
+        return result
+    
+    # Parse results - handle lowercase output dir name (AF3 convention)
+    output_subdir = Path(output_dir) / name.lower()
+    if not output_subdir.exists():
+        output_subdir = Path(output_dir) / name  # Try original case
+    
+    if output_subdir.exists():
+        # Try both naming conventions for confidence file
+        confidence_file = output_subdir / f"{name}_confidences.json"
+        if not confidence_file.exists():
+            confidence_file = output_subdir / f"{name.lower()}_confidences.json"
+        if not confidence_file.exists():
+            confidence_file = output_subdir / "confidence.json"
+        
+        # Try both naming conventions for structure file
+        structure_file = output_subdir / f"{name}_model.cif"
+        if not structure_file.exists():
+            structure_file = output_subdir / f"{name.lower()}_model.cif"
+        if not structure_file.exists():
+            structure_file = output_subdir / "model.cif"
+        
+        if confidence_file.exists():
+            try:
+                confidence_text = confidence_file.read_text()
+                confidence = json.loads(confidence_text)
+                result["af3_confidence_json"] = confidence_text
+                
+                # Get pLDDT - average of atom_plddts
+                atom_plddts = confidence.get("atom_plddts", [])
+                if atom_plddts:
+                    result["af3_plddt"] = sum(atom_plddts) / len(atom_plddts)
+                
+                # Check for summary file with ipTM
+                summary_file = output_subdir / f"{name}_summary_confidences.json"
+                if not summary_file.exists():
+                    summary_file = output_subdir / f"{name.lower()}_summary_confidences.json"
+                
+                if summary_file.exists():
+                    summary = json.loads(summary_file.read_text())
+                    result["af3_iptm"] = summary.get("iptm", summary.get("ptm", 0))
+                    result["af3_ptm"] = summary.get("ptm", 0)
+                else:
+                    result["af3_iptm"] = confidence.get("iptm", confidence.get("ranking_score", 0))
+                    result["af3_ptm"] = confidence.get("ptm", 0)
+            except Exception as e:
+                result["error"] = f"Error reading confidence: {e}"
+        
+        if structure_file.exists():
+            result["af3_structure"] = structure_file.read_text()
+    else:
+        result["error"] = f"Output directory not found: {output_subdir}"
+    
+    return result
+
+
+def build_af3_json_holo(
+    design_id: str,
+    binder_seq: str,
+    target_seq: str,
+    output_dir: str,
+    binder_chain: str = "A",
+    target_chain: str = "B",
+) -> str:
+    """
+    Build AF3 JSON input for holo (complex) prediction.
+    
+    Args:
+        design_id: Unique identifier for this design
+        binder_seq: Binder protein sequence
+        target_seq: Target protein sequence
+        output_dir: Directory to write JSON file
+        binder_chain: Chain ID for binder (default "A")
+        target_chain: Chain ID for target (default "B")
+    
+    Returns:
+        Path to the generated JSON file
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    af3_input = {
+        "name": design_id,
+        "modelSeeds": [1],
+        "dialect": "alphafold3",
+        "version": 1,
+        "sequences": [
+            {
+                "protein": {
+                    "id": binder_chain,
+                    "sequence": binder_seq,
+                    "unpairedMsa": f">query\n{binder_seq}\n",
+                    "pairedMsa": f">query\n{binder_seq}\n",
+                    "templates": [],
+                }
+            },
+            {
+                "protein": {
+                    "id": target_chain,
+                    "sequence": target_seq,
+                    "unpairedMsa": f">query\n{target_seq}\n",
+                    "pairedMsa": f">query\n{target_seq}\n",
+                    "templates": [],
+                }
+            }
+        ]
+    }
+    
+    json_path = os.path.join(output_dir, f"{design_id}.json")
+    with open(json_path, "w") as f:
+        json.dump(af3_input, f, indent=2)
+    
+    return json_path
+
+
+def build_af3_json_apo(
+    design_id: str,
+    binder_seq: str,
+    output_dir: str,
+    binder_chain: str = "A",
+) -> str:
+    """
+    Build AF3 JSON input for apo (binder-only) prediction.
+    
+    Args:
+        design_id: Unique identifier for this design
+        binder_seq: Binder protein sequence
+        output_dir: Directory to write JSON file
+        binder_chain: Chain ID for binder (default "A")
+    
+    Returns:
+        Path to the generated JSON file
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    apo_name = f"{design_id}_apo"
+    af3_input = {
+        "name": apo_name,
+        "modelSeeds": [1],
+        "dialect": "alphafold3",
+        "version": 1,
+        "sequences": [{
+            "protein": {
+                "id": binder_chain,
+                "sequence": binder_seq,
+                "unpairedMsa": f">query\n{binder_seq}\n",
+                "pairedMsa": f">query\n{binder_seq}\n",
+                "templates": [],
+            }
+        }]
+    }
+    
+    json_path = os.path.join(output_dir, f"{apo_name}.json")
+    with open(json_path, "w") as f:
+        json.dump(af3_input, f, indent=2)
+    
+    return json_path
+
+
 def run_alphafold_step(
     yaml_dir,
     alphafold_dir,
