@@ -272,7 +272,10 @@ def score_interface(pdb_file, pdb_file_collapsed, binder_chain="B", target_chain
         (interface_delta_unsat_hbonds / interface_nres) * 100 if interface_nres != 0 else None
     )
 
-    # 6. Binder Energy and SASA
+    # 6. Total Score (full complex energy)
+    total_score = scorefxn(pose)
+
+    # 7. Binder Energy and SASA
     chain_design = ChainSelector(binder_chain)
     tem = pr.rosetta.core.simple_metrics.metrics.TotalEnergyMetric()
     tem.set_scorefunction(scorefxn)
@@ -287,7 +290,7 @@ def score_interface(pdb_file, pdb_file_collapsed, binder_chain="B", target_chain
         (interface_dSASA / binder_sasa) * 100 if binder_sasa > 0 else 0
     )
 
-    # 7. Surface Hydrophobicity (on the binder chain)
+    # 8. Surface Hydrophobicity (on the binder chain)
     try:
         binder_pose = {
             pose.pdb_info().chain(pose.conformation().chain_begin(i)): p
@@ -315,15 +318,17 @@ def score_interface(pdb_file, pdb_file_collapsed, binder_chain="B", target_chain
         print(f"Warning: Failed surface hydrophobicity calculation: {e}")
         surface_hydrophobicity = 0.0
 
-    # 8. Compile and Round Results
+    # 9. Compile and Round Results
     interface_scores = {
         "binder_score": binder_score,
+        "total_score": total_score,
         "surface_hydrophobicity": surface_hydrophobicity,
         "interface_sc": interface_sc,
         "interface_packstat": interface_packstat,
         "interface_dG": interface_dG,
         "interface_dSASA": interface_dSASA,
         "interface_dG_SASA_ratio": interface_dG_SASA_ratio,
+        "binder_sasa": binder_sasa,
         "interface_fraction": interface_binder_fraction,
         "interface_hydrophobicity": interface_hydrophobicity,
         "interface_nres": interface_nres,

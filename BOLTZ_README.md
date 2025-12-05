@@ -843,13 +843,91 @@ The `designs/` folder is populated in real-time as each cycle completes across a
 For testing the local pipeline code on Modal without streaming or parallelization:
 
 ```bash
+# Basic test (Boltz only) - uses PDL1 as default target
 modal run test_local_pipeline_modal.py --name my_test --num-designs 1 --num-cycles 2
+
+# With custom target sequence
+modal run test_local_pipeline_modal.py \
+    --name my_test \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-designs 3 \
+    --num-cycles 5
+
+# Full pipeline with AF3 + PyRosetta validation (protein targets)
+modal run test_local_pipeline_modal.py \
+    --name full_test \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-designs 3 \
+    --num-cycles 5 \
+    --alanine-bias \
+    --use-alphafold3-validation
+
+# With hotspots
+modal run test_local_pipeline_modal.py \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --contact-residues "54,56,66,115,121" \
+    --use-alphafold3-validation
 ```
 
 This runs `boltz_ph/pipeline.py` directly on a single Modal GPU, useful for:
 - Testing local pipeline changes before production runs
 - Debugging without the complexity of parallel execution
 - Quick validation with minimal cycles
+- Testing the full pipeline (Boltz → AF3 → PyRosetta) end-to-end
+
+**Test Harness CLI Arguments:**
+
+The test harness mirrors the main `boltz_ph/design.py` arguments for consistency:
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--name` | str | `"test_run"` | Job name |
+| `--gpu` | str | `"H100"` | Modal GPU type: L4, A10G, A100-40GB, A100-80GB, H100 |
+| `--num-designs` | int | `1` | Number of designs |
+| `--num-cycles` | int | `5` | Optimization cycles |
+| `--protein-seqs` | str | PDL1 seq | Target sequence |
+| `--ligand-ccd` | str | `""` | Ligand CCD code |
+| `--ligand-smiles` | str | `""` | Ligand SMILES |
+| `--template-path` | str | `""` | Template structure |
+| `--template-cif-chain-id` | str | `""` | Template chain ID |
+| `--msa-mode` | str | `"mmseqs"` | MSA mode |
+| `--seq` | str | `""` | Starting binder sequence |
+| `--min-protein-length` | int | `100` | Min binder length |
+| `--max-protein-length` | int | `150` | Max binder length |
+| `--percent-x` | int | `90` | % unknown in initial seq |
+| `--cyclic` | flag | `False` | Cyclic peptide |
+| `--contact-residues` | str | `""` | Hotspot residues |
+| `--contact-cutoff` | float | `15.0` | Contact distance (Å) |
+| `--temperature` | float | `0.1` | MPNN temperature |
+| `--omit-aa` | str | `"C"` | Excluded amino acids |
+| `--alanine-bias` | flag | `False` | Penalize alanine |
+| `--high-iptm-threshold` | float | `0.8` | Min ipTM |
+| `--high-plddt-threshold` | float | `0.8` | Min pLDDT |
+| `--diffuse-steps` | int | `200` | Diffusion steps |
+| `--recycling-steps` | int | `3` | Recycling passes |
+| `--use-alphafold3-validation` | flag | `False` | Enable AF3 + PyRosetta validation |
+
+**Note:** `--use-alphafold3-validation` triggers both AF3 validation AND PyRosetta scoring for protein targets (matching the main script behavior). For ligand or nucleic acid targets, only AF3 validation runs.
+
+**Test Harness Output Structure:**
+
+```
+results_{name}/
+├── designs/                    # All cycles (always created)
+│   ├── {name}_d0_c0.pdb
+│   ├── {name}_d0_c1.pdb
+│   └── design_stats.csv
+├── best_designs/               # Best per design (always created)
+│   ├── {name}_d0_c2.pdb
+│   └── best_designs.csv
+├── af3_validation/             # If --use-alphafold3-validation
+│   ├── {design_id}_holo.cif    # AF3 complex structure
+│   └── ...
+├── pyrosetta_scored/           # If protein target with validation
+│   ├── {design_id}_relaxed.pdb # Accepted relaxed structures
+│   └── ...
+└── validated_designs.csv       # Full results with all metrics
+```
 
 ---
 

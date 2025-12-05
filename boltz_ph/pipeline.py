@@ -752,8 +752,23 @@ class ProteinHunter_Boltz:
         print(f"\n✅ All run/cycle metrics saved to {summary_csv}")
 
     def _run_downstream_validation(self):
-        """Executes AlphaFold and Rosetta validation steps."""
-        # This ensures they are in scope when called later in this function
+        """
+        Executes AlphaFold and Rosetta validation steps, then reorganizes outputs
+        into the standardized folder structure:
+        
+        af3_validation/
+        ├── af3_results.csv
+        └── *_af3.cif
+        accepted_designs/
+        ├── accepted_stats.csv
+        └── *_relaxed.pdb
+        rejected/
+        ├── rejected_stats.csv
+        └── *_relaxed.pdb
+        """
+        import json
+        import glob
+        
         sys.path.append(os.path.join(os.path.dirname(__file__), "utils"))
         from utils.alphafold_utils import run_alphafold_step_from_csv
         from utils.pyrosetta_utils import run_rosetta_step
@@ -769,44 +784,280 @@ class ProteinHunter_Boltz:
         else:
             target_type = "protein"  # Default for unconditional mode
 
-        success_dir = f"{self.save_dir}/1_af3_rosetta_validation"
+        # Temporary working directory for AF3/Rosetta (will be cleaned up)
+        work_dir_validation = f"{self.save_dir}/_validation_work"
 
-        # Use best_designs.csv for downstream validation (replaces high_iptm_yaml/)
+        # Use best_designs.csv for downstream validation
         best_designs_csv = os.path.join(self.save_dir, "best_designs", "best_designs.csv")
-        best_designs_dir = os.path.join(self.save_dir, "best_designs")
 
-        if os.path.exists(best_designs_csv):
-            print("Starting downstream validation (AlphaFold3 and Rosetta)...")
-            print(f"Using designs from: {best_designs_csv}")
-
-            # --- AlphaFold Step ---
-            # Uses run_alphafold_step_from_csv which converts CSV -> YAML -> AF3 JSON
-            af_output_dir, af_output_apo_dir, af_pdb_dir, af_pdb_dir_apo = (
-                run_alphafold_step_from_csv(
-                    csv_path=best_designs_csv,
-                    alphafold_dir=os.path.expanduser(a.alphafold_dir),
-                    af3_docker_name=a.af3_docker_name,
-                    af3_database_settings=os.path.expanduser(a.af3_database_settings),
-                    hmmer_path=os.path.expanduser(a.hmmer_path),
-                    ligandmpnn_dir=success_dir,
-                    work_dir=os.path.expanduser(a.work_dir) or os.getcwd(),
-                    binder_id=self.binder_chain,
-                    gpu_id=a.gpu_id,
-                    high_iptm=True,
-                    use_msa_for_af3=a.use_msa_for_af3,
-                )
-            )
-            if af_pdb_dir and target_type == "protein":
-                # --- Rosetta Step ---
-                run_rosetta_step(
-                    success_dir,
-                    af_pdb_dir,
-                    af_pdb_dir_apo,
-                    binder_id=self.binder_chain,
-                    target_type=target_type,
-                )
-        else:
+        if not os.path.exists(best_designs_csv):
             print(f"No best_designs.csv found at {best_designs_csv}. Skipping downstream validation.")
+            return
+
+        print("Starting downstream validation (AlphaFold3 and Rosetta)...")
+        print(f"Using designs from: {best_designs_csv}")
+
+        # Load design metadata for later joining
+        best_designs_df = pd.read_csv(best_designs_csv)
+        design_metadata = {row["design_id"]: row.to_dict() for _, row in best_designs_df.iterrows()}
+
+        # --- AlphaFold Step ---
+        af_output_dir, af_output_apo_dir, af_pdb_dir, af_pdb_dir_apo = (
+            run_alphafold_step_from_csv(
+                csv_path=best_designs_csv,
+                alphafold_dir=os.path.expanduser(a.alphafold_dir),
+                af3_docker_name=a.af3_docker_name,
+                af3_database_settings=os.path.expanduser(a.af3_database_settings),
+                hmmer_path=os.path.expanduser(a.hmmer_path),
+                ligandmpnn_dir=work_dir_validation,
+                work_dir=os.path.expanduser(a.work_dir) or os.getcwd(),
+                binder_id=self.binder_chain,
+                gpu_id=a.gpu_id,
+                high_iptm=True,
+                use_msa_for_af3=a.use_msa_for_af3,
+            )
+        )
+
+        if not af_pdb_dir:
+            print("No AF3 results generated. Skipping output reorganization.")
+            return
+
+        # --- Rosetta Step (protein targets only) ---
+        if target_type == "protein":
+            run_rosetta_step(
+                work_dir_validation,
+                af_pdb_dir,
+                af_pdb_dir_apo,
+                binder_id=self.binder_chain,
+                target_type=target_type,
+            )
+
+        # ===================================================================
+        # REORGANIZE OUTPUTS TO NEW STRUCTURE
+        # ===================================================================
+        print("\nReorganizing outputs to standardized structure...")
+
+        # Create new output directories
+        af3_dir = os.path.join(self.save_dir, "af3_validation")
+        accepted_dir = os.path.join(self.save_dir, "accepted_designs")
+        rejected_dir = os.path.join(self.save_dir, "rejected")
+        os.makedirs(af3_dir, exist_ok=True)
+        os.makedirs(accepted_dir, exist_ok=True)
+        os.makedirs(rejected_dir, exist_ok=True)
+
+        # --- Step 1: Create af3_validation/ with CIFs and af3_results.csv ---
+        af3_results_rows = []
+        
+        # Find AF3 output CIFs
+        if af_output_dir and os.path.exists(af_output_dir):
+            for design_subdir in os.listdir(af_output_dir):
+                design_path = os.path.join(af_output_dir, design_subdir)
+                if not os.path.isdir(design_path):
+                    continue
+                
+                # Find CIF and confidence files
+                cif_files = glob.glob(os.path.join(design_path, "*_model.cif"))
+                summary_conf_files = glob.glob(os.path.join(design_path, "*_summary_confidences.json"))
+                conf_files = glob.glob(os.path.join(design_path, "*_confidences.json"))
+                
+                if cif_files:
+                    # Extract design_id from directory name
+                    design_id = design_subdir
+                    
+                    # Copy CIF with new naming
+                    src_cif = cif_files[0]
+                    dest_cif = os.path.join(af3_dir, f"{design_id}_af3.cif")
+                    shutil.copy(src_cif, dest_cif)
+                    
+                    # Extract AF3 metrics
+                    af3_iptm = 0.0
+                    af3_ptm = 0.0
+                    af3_plddt = 0.0
+                    
+                    if summary_conf_files:
+                        try:
+                            with open(summary_conf_files[0], 'r') as f:
+                                summary = json.load(f)
+                                af3_iptm = summary.get('iptm', 0.0)
+                                af3_ptm = summary.get('ptm', 0.0)
+                        except Exception as e:
+                            print(f"  Warning: Could not read summary confidence for {design_id}: {e}")
+                    
+                    if conf_files:
+                        try:
+                            with open(conf_files[0], 'r') as f:
+                                conf = json.load(f)
+                                atom_plddts = conf.get('atom_plddts', [])
+                                if atom_plddts:
+                                    af3_plddt = sum(atom_plddts) / len(atom_plddts)
+                        except Exception as e:
+                            print(f"  Warning: Could not read confidence for {design_id}: {e}")
+                    
+                    af3_results_rows.append({
+                        "design_id": design_id,
+                        "af3_iptm": round(af3_iptm, 4),
+                        "af3_ptm": round(af3_ptm, 4),
+                        "af3_plddt": round(af3_plddt, 2),
+                    })
+
+        # Save af3_results.csv
+        if af3_results_rows:
+            af3_results_df = pd.DataFrame(af3_results_rows)
+            af3_results_df.to_csv(os.path.join(af3_dir, "af3_results.csv"), index=False)
+            print(f"  ✓ Saved af3_validation/af3_results.csv ({len(af3_results_rows)} designs)")
+
+        # --- Step 2: Reorganize accepted/rejected from Rosetta results ---
+        rosetta_success_dir = os.path.join(work_dir_validation, "af_pdb_rosetta_success")
+        success_csv = os.path.join(rosetta_success_dir, "success_designs.csv")
+        failed_csv = os.path.join(rosetta_success_dir, "failed_designs.csv")
+
+        accepted_rows = []
+        rejected_rows = []
+
+        # Create af3_results lookup for joining
+        af3_lookup = {r["design_id"]: r for r in af3_results_rows}
+
+        # Process success designs
+        if os.path.exists(success_csv):
+            success_df = pd.read_csv(success_csv)
+            for _, row in success_df.iterrows():
+                # Extract design_id from Model name (e.g., "relax_design_id_model.pdb")
+                model_name = row.get("Model", "")
+                design_id = model_name.replace("relax_", "").replace("_model.pdb", "")
+                
+                # Get design metadata
+                metadata = design_metadata.get(design_id, {})
+                af3_data = af3_lookup.get(design_id, {})
+                
+                # Build full row
+                full_row = {
+                    "design_id": design_id,
+                    "design_num": metadata.get("design_num", 0),
+                    "cycle": metadata.get("cycle", 0),
+                    "binder_sequence": metadata.get("binder_sequence", row.get("aa_seq", "")),
+                    "binder_length": metadata.get("binder_length", len(row.get("aa_seq", ""))),
+                    "af3_iptm": af3_data.get("af3_iptm", row.get("iptm", 0)),
+                    "af3_ptm": af3_data.get("af3_ptm", 0),
+                    "af3_plddt": af3_data.get("af3_plddt", row.get("plddt", 0)),
+                    "accepted": True,
+                    "rejection_reason": "",
+                    # PyRosetta metrics
+                    "binder_score": row.get("binder_score", 0),
+                    "total_score": row.get("total_score", 0),
+                    "interface_sc": row.get("interface_sc", 0),
+                    "interface_packstat": row.get("interface_packstat", 0),
+                    "interface_dG": row.get("interface_dG", 0),
+                    "interface_dSASA": row.get("interface_dSASA", 0),
+                    "interface_dG_SASA_ratio": row.get("interface_dG_SASA_ratio", 0),
+                    "interface_nres": row.get("interface_nres", 0),
+                    "interface_interface_hbonds": row.get("interface_interface_hbonds", 0),
+                    "interface_hbond_percentage": row.get("interface_hbond_percentage", 0),
+                    "interface_delta_unsat_hbonds": row.get("interface_delta_unsat_hbonds", 0),
+                    "interface_delta_unsat_hbonds_percentage": row.get("interface_delta_unsat_hbonds_percentage", 0),
+                    "interface_hydrophobicity": row.get("interface_hydrophobicity", 0),
+                    "surface_hydrophobicity": row.get("surface_hydrophobicity", 0),
+                    "binder_sasa": row.get("binder_sasa", 0),
+                    "interface_fraction": row.get("interface_fraction", 0),
+                    # Secondary metrics
+                    "apo_holo_rmsd": row.get("apo_holo_rmsd"),
+                    "i_pae": row.get("i_pae"),
+                    "rg": row.get("rg"),
+                }
+                accepted_rows.append(full_row)
+                
+                # Copy relaxed PDB
+                src_pdb = os.path.join(row.get("PDB", ""), model_name) if row.get("PDB") else None
+                if src_pdb and os.path.exists(src_pdb):
+                    dest_pdb = os.path.join(accepted_dir, f"{design_id}_relaxed.pdb")
+                    shutil.copy(src_pdb, dest_pdb)
+
+        # Process failed designs
+        if os.path.exists(failed_csv):
+            failed_df = pd.read_csv(failed_csv)
+            for _, row in failed_df.iterrows():
+                model_name = row.get("Model", "")
+                design_id = model_name.replace("relax_", "").replace("_model.pdb", "")
+                
+                metadata = design_metadata.get(design_id, {})
+                af3_data = af3_lookup.get(design_id, {})
+                
+                full_row = {
+                    "design_id": design_id,
+                    "design_num": metadata.get("design_num", 0),
+                    "cycle": metadata.get("cycle", 0),
+                    "binder_sequence": metadata.get("binder_sequence", row.get("aa_seq", "")),
+                    "binder_length": metadata.get("binder_length", len(row.get("aa_seq", "")) if row.get("aa_seq") else 0),
+                    "af3_iptm": af3_data.get("af3_iptm", row.get("iptm", 0)),
+                    "af3_ptm": af3_data.get("af3_ptm", 0),
+                    "af3_plddt": af3_data.get("af3_plddt", row.get("plddt", 0)),
+                    "accepted": False,
+                    "rejection_reason": row.get("failure_reason", ""),
+                    # PyRosetta metrics
+                    "binder_score": row.get("binder_score", 0),
+                    "total_score": row.get("total_score", 0),
+                    "interface_sc": row.get("interface_sc", 0),
+                    "interface_packstat": row.get("interface_packstat", 0),
+                    "interface_dG": row.get("interface_dG", 0),
+                    "interface_dSASA": row.get("interface_dSASA", 0),
+                    "interface_dG_SASA_ratio": row.get("interface_dG_SASA_ratio", 0),
+                    "interface_nres": row.get("interface_nres", 0),
+                    "interface_interface_hbonds": row.get("interface_interface_hbonds", 0),
+                    "interface_hbond_percentage": row.get("interface_hbond_percentage", 0),
+                    "interface_delta_unsat_hbonds": row.get("interface_delta_unsat_hbonds", 0),
+                    "interface_delta_unsat_hbonds_percentage": row.get("interface_delta_unsat_hbonds_percentage", 0),
+                    "interface_hydrophobicity": row.get("interface_hydrophobicity", 0),
+                    "surface_hydrophobicity": row.get("surface_hydrophobicity", 0),
+                    "binder_sasa": row.get("binder_sasa", 0),
+                    "interface_fraction": row.get("interface_fraction", 0),
+                    # Secondary metrics
+                    "apo_holo_rmsd": row.get("apo_holo_rmsd"),
+                    "i_pae": row.get("i_pae"),
+                    "rg": row.get("rg"),
+                }
+                rejected_rows.append(full_row)
+                
+                # Copy relaxed PDB to rejected folder
+                src_pdb = os.path.join(row.get("PDB", ""), model_name) if row.get("PDB") else None
+                if src_pdb and os.path.exists(src_pdb):
+                    dest_pdb = os.path.join(rejected_dir, f"{design_id}_relaxed.pdb")
+                    shutil.copy(src_pdb, dest_pdb)
+
+        # Save accepted/rejected CSVs
+        if accepted_rows:
+            accepted_df = pd.DataFrame(accepted_rows)
+            accepted_df.to_csv(os.path.join(accepted_dir, "accepted_stats.csv"), index=False)
+            print(f"  ✓ Saved accepted_designs/accepted_stats.csv ({len(accepted_rows)} designs)")
+
+        if rejected_rows:
+            rejected_df = pd.DataFrame(rejected_rows)
+            rejected_df.to_csv(os.path.join(rejected_dir, "rejected_stats.csv"), index=False)
+            print(f"  ✓ Saved rejected/rejected_stats.csv ({len(rejected_rows)} designs)")
+
+        # --- Step 3: Clean up old validation work directory ---
+        try:
+            shutil.rmtree(work_dir_validation, ignore_errors=True)
+            print(f"  ✓ Cleaned up temporary validation directory")
+        except Exception as e:
+            print(f"  Warning: Could not clean up {work_dir_validation}: {e}")
+
+        # Print summary
+        print(f"\n{'='*60}")
+        print("DOWNSTREAM VALIDATION COMPLETE")
+        print(f"{'='*60}")
+        print(f"AF3 validated: {len(af3_results_rows)} designs")
+        print(f"Accepted: {len(accepted_rows)}")
+        print(f"Rejected: {len(rejected_rows)}")
+        print(f"\nOutput structure:")
+        print(f"  {self.save_dir}/")
+        print(f"  ├── af3_validation/       # AF3 structures + metrics")
+        print(f"  │   ├── af3_results.csv")
+        print(f"  │   └── *_af3.cif")
+        print(f"  ├── accepted_designs/     # Passed filters")
+        print(f"  │   ├── accepted_stats.csv")
+        print(f"  │   └── *_relaxed.pdb")
+        print(f"  └── rejected/             # Failed filters")
+        print(f"      ├── rejected_stats.csv")
+        print(f"      └── *_relaxed.pdb")
 
 
     def run_pipeline(self):
