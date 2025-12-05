@@ -885,10 +885,18 @@ def csv_row_to_yaml(row: Dict, binder_chain: str = "A") -> Dict:
         binder_entry["protein"]["cyclic"] = True
     sequences.append(binder_entry)
     
-    # 2. Add target sequences from JSON-encoded field
+    # 2. Add target sequences - handle both JSON-encoded and plain string formats
     target_seqs = row.get("target_seqs", "{}")
     if isinstance(target_seqs, str):
-        target_seqs = json.loads(target_seqs)
+        # Try JSON first, fall back to plain sequence string
+        try:
+            target_seqs = json.loads(target_seqs)
+        except json.JSONDecodeError:
+            # Plain sequence string - assume it's chain B target
+            if target_seqs:
+                target_seqs = {"B": target_seqs}
+            else:
+                target_seqs = {}
     
     for chain_id, seq in target_seqs.items():
         target_entry = {
@@ -937,10 +945,15 @@ def csv_row_to_yaml(row: Dict, binder_chain: str = "A") -> Dict:
     yaml_data = {"sequences": sequences}
     
     # 5. Add template info if present (for AF3)
-    if row.get("template_path"):
+    template_path = row.get("template_path")
+    if template_path and str(template_path) not in ('nan', ''):
+        template_mapping = row.get("template_mapping")
+        chain_id = None
+        if template_mapping and str(template_mapping) not in ('nan', ''):
+            chain_id = str(template_mapping).split(":")[0]
         yaml_data["templates"] = [{
-            "cif": row["template_path"],
-            "chain_id": row.get("template_mapping", "").split(":")[0] if row.get("template_mapping") else None
+            "cif": template_path,
+            "chain_id": chain_id
         }]
     
     return yaml_data

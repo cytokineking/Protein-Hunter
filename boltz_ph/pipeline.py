@@ -514,8 +514,8 @@ class ProteinHunter_Boltz:
             "ligand_ccd": a.ligand_ccd or "",
             "nucleic_seq": a.nucleic_seq or "",
             "nucleic_type": a.nucleic_type or "",
-            "template_path": a.template or "",
-            "template_mapping": a.template_mapping or "",
+            "template_path": a.template_path or "",
+            "template_mapping": a.template_cif_chain_id or "",
             "timestamp": dt.datetime.now().isoformat(),
         }
         append_to_csv_safe(Path(self.designs_dir) / "design_stats.csv", csv_row)
