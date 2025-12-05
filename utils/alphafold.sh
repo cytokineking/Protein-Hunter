@@ -51,7 +51,7 @@ for json_file in "$JSON_DIR"/*.json; do
     python /app/alphafold/run_alphafold.py \
     --json_path=/root/af_input/"$json_filename" \
     --model_dir=/root/models \
-    --output_dir=/root/af_output
+    --output_dir=/root/af_output --run_data_pipeline=false
 
   # Remove the lock file after processing
   rm -f "$lock_file"
