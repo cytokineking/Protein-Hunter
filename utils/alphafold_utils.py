@@ -13,7 +13,7 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 
-from Bio import pairwise2
+from Bio.Align import PairwiseAligner
 from Bio.Data import IUPACData
 from Bio.PDB import PDBParser, MMCIFParser
 
@@ -259,9 +259,21 @@ def get_cif_alignment_json(query_seq, cif_or_id, chain_id=None):
         for residue in chain.get_residues() if residue.id[0] == " "
     )
 
-    # Align
-    align = pairwise2.align.globalxx(query_seq, template_seq)[0]
-    q_aln, t_aln = align.seqA, align.seqB
+    # Align using PairwiseAligner (replaces deprecated pairwise2)
+    aligner = PairwiseAligner()
+    aligner.mode = 'global'
+    aligner.match_score = 1
+    aligner.mismatch_score = 0
+    aligner.open_gap_score = 0
+    aligner.extend_gap_score = 0
+    alignments = list(aligner.align(query_seq, template_seq))
+    if not alignments:
+        raise ValueError(f"Could not align query to template sequence")
+    alignment = alignments[0]
+    # Get aligned sequences as strings
+    aligned = alignment.format().split('\n')
+    q_aln = aligned[0]  # Query aligned
+    t_aln = aligned[2]  # Target aligned (skip middle line with symbols)
 
     # Extract index mappings
     query_indices, template_indices = [], []

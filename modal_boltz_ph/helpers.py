@@ -81,7 +81,7 @@ def get_cif_alignment_json(
     Raises:
         ValueError: If chain not found or alignment fails
     """
-    from Bio import pairwise2
+    from Bio.Align import PairwiseAligner
     from Bio.Data import IUPACData
     from Bio.PDB import MMCIFParser, PDBParser
     
@@ -108,13 +108,22 @@ def get_cif_alignment_json(
         for residue in chain.get_residues() if residue.id[0] == " "
     )
     
-    # Perform global sequence alignment
-    alignments = pairwise2.align.globalxx(query_seq, template_seq)
+    # Perform global sequence alignment using PairwiseAligner (replaces deprecated pairwise2)
+    aligner = PairwiseAligner()
+    aligner.mode = 'global'
+    aligner.match_score = 1
+    aligner.mismatch_score = 0
+    aligner.open_gap_score = 0
+    aligner.extend_gap_score = 0
+    alignments = list(aligner.align(query_seq, template_seq))
     if not alignments:
         raise ValueError(f"Could not align query sequence to template from {cif_path}")
     
-    align = alignments[0]
-    q_aln, t_aln = align.seqA, align.seqB
+    alignment = alignments[0]
+    # Get aligned sequences as strings
+    aligned = alignment.format().split('\n')
+    q_aln = aligned[0]  # Query aligned
+    t_aln = aligned[2]  # Target aligned (skip middle line with symbols)
     
     # Extract aligned index mappings
     query_indices = []
