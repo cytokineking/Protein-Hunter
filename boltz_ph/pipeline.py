@@ -821,26 +821,12 @@ class ProteinHunter_Boltz:
             )
         )
 
-        if not af_pdb_dir:
-            print("No AF3 results generated. Skipping output reorganization.")
-            return
-
-        # --- Rosetta Step (protein targets only) ---
-        if target_type == "protein":
-            run_rosetta_step(
-                work_dir_validation,
-                af_pdb_dir,
-                af_pdb_dir_apo,
-                binder_id=self.binder_chain,
-                target_type=target_type,
-            )
-
         # ===================================================================
-        # REORGANIZE OUTPUTS TO NEW STRUCTURE
+        # STEP 1: CREATE AF3_VALIDATION FOLDER (BEFORE PyRosetta)
+        # This ensures af3_validation/ is created even if PyRosetta fails
         # ===================================================================
-        print("\nReorganizing outputs to standardized structure...")
-
-        # Create new output directories
+        print("\nCreating af3_validation folder...")
+        
         af3_dir = os.path.join(self.save_dir, "af3_validation")
         accepted_dir = os.path.join(self.save_dir, "accepted_designs")
         rejected_dir = os.path.join(self.save_dir, "rejected")
@@ -848,23 +834,25 @@ class ProteinHunter_Boltz:
         os.makedirs(accepted_dir, exist_ok=True)
         os.makedirs(rejected_dir, exist_ok=True)
 
-        # --- Step 1: Create af3_validation/ with CIFs and af3_results.csv ---
         af3_results_rows = []
         
-        # Find AF3 output CIFs
+        # Find AF3 output CIFs and copy to af3_validation/
         if af_output_dir and os.path.exists(af_output_dir):
             for design_subdir in os.listdir(af_output_dir):
                 design_path = os.path.join(af_output_dir, design_subdir)
                 if not os.path.isdir(design_path):
                     continue
                 
-                # Find CIF and confidence files
-                cif_files = glob.glob(os.path.join(design_path, "*_model.cif"))
-                summary_conf_files = glob.glob(os.path.join(design_path, "*_summary_confidences.json"))
-                conf_files = glob.glob(os.path.join(design_path, "*_confidences.json"))
+                # Find only the ranked best CIF (not samples) and confidence files
+                # AF3 generates: design_id_model.cif (ranked best) + design_id_seed-X_sample-Y_model.cif
+                cif_files = [f for f in glob.glob(os.path.join(design_path, "*_model.cif"))
+                            if "_seed-" not in f and "_sample-" not in f]
+                summary_conf_files = [f for f in glob.glob(os.path.join(design_path, "*_summary_confidences.json"))
+                                     if "_seed-" not in f and "_sample-" not in f]
+                conf_files = [f for f in glob.glob(os.path.join(design_path, "*_confidences.json"))
+                             if "_seed-" not in f and "_sample-" not in f]
                 
                 if cif_files:
-                    # Extract design_id from directory name
                     design_id = design_subdir
                     
                     # Copy CIF with new naming
@@ -908,8 +896,35 @@ class ProteinHunter_Boltz:
             af3_results_df = pd.DataFrame(af3_results_rows)
             af3_results_df.to_csv(os.path.join(af3_dir, "af3_results.csv"), index=False)
             print(f"  ✓ Saved af3_validation/af3_results.csv ({len(af3_results_rows)} designs)")
+        else:
+            print("  Warning: No AF3 results found to save")
 
-        # --- Step 2: Reorganize accepted/rejected from Rosetta results ---
+        # Check if we have any PDB files to process
+        if not af_pdb_dir or not os.path.exists(af_pdb_dir) or not any(f.endswith(".pdb") for f in os.listdir(af_pdb_dir)):
+            print("No AF3 PDB conversions available. Skipping PyRosetta step.")
+            print(f"\nResults saved to: {self.save_dir}")
+            print(f"  - af3_validation/af3_results.csv: {len(af3_results_rows)} designs")
+            return
+
+        # ===================================================================
+        # STEP 2: PYROSETTA FILTERING
+        # ===================================================================
+        if target_type == "protein":
+            print("\nRunning PyRosetta filtering...")
+            run_rosetta_step(
+                work_dir_validation,
+                af_pdb_dir,
+                af_pdb_dir_apo,
+                binder_id=self.binder_chain,
+                target_type=target_type,
+            )
+
+        # ===================================================================
+        # STEP 3: REORGANIZE ACCEPTED/REJECTED FROM ROSETTA RESULTS
+        # ===================================================================
+        print("\nReorganizing outputs to standardized structure...")
+
+        # --- Reorganize accepted/rejected from Rosetta results ---
         rosetta_success_dir = os.path.join(work_dir_validation, "af_pdb_rosetta_success")
         success_csv = os.path.join(rosetta_success_dir, "success_designs.csv")
         failed_csv = os.path.join(rosetta_success_dir, "failed_designs.csv")

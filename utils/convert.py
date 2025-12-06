@@ -140,7 +140,9 @@ def convert_cif_files_to_pdb(
     cif_files = []
     for root, dirs, files in os.walk(results_dir):
         for file in files:
-            is_af_file = af_dir and file.endswith("_model.cif")
+            # For AF3: only process the ranked best model, not individual samples
+            # AF3 generates: design_id_model.cif (ranked best) + design_id_seed-1_sample-X_model.cif (samples)
+            is_af_file = af_dir and file.endswith("_model.cif") and "_seed-" not in file and "_sample-" not in file
             is_boltz_file = (not af_dir) and file.endswith(".cif")
             if is_af_file or is_boltz_file:
                 cif_files.append((root, file))
