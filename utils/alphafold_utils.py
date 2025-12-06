@@ -270,20 +270,17 @@ def get_cif_alignment_json(query_seq, cif_or_id, chain_id=None):
     if not alignments:
         raise ValueError(f"Could not align query to template sequence")
     alignment = alignments[0]
-    # Get aligned sequences as strings
-    aligned = alignment.format().split('\n')
-    q_aln = aligned[0]  # Query aligned
-    t_aln = aligned[2]  # Target aligned (skip middle line with symbols)
-
-    # Extract index mappings
+    
+    # Extract index mappings using alignment.indices
+    # indices[0] = query indices (-1 for gaps), indices[1] = target indices (-1 for gaps)
+    indices = alignment.indices
     query_indices, template_indices = [], []
-    q_pos = t_pos = 0
-    for q_char, t_char in zip(q_aln, t_aln):
-        if q_char != "-" and t_char != "-":
-            query_indices.append(q_pos)
-            template_indices.append(t_pos)
-        if q_char != "-": q_pos += 1
-        if t_char != "-": t_pos += 1
+    for col in range(indices.shape[1]):
+        q_idx = indices[0, col]
+        t_idx = indices[1, col]
+        if q_idx >= 0 and t_idx >= 0:
+            query_indices.append(int(q_idx))
+            template_indices.append(int(t_idx))
 
     # Filter mmCIF to only include the selected chain
     filtered_mmcif = filter_mmcif_by_chain(mmcif_text, selected_chain_id)
