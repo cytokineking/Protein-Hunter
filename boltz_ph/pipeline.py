@@ -935,9 +935,12 @@ class ProteinHunter_Boltz:
         # Create af3_results lookup for joining
         af3_lookup = {r["design_id"]: r for r in af3_results_rows}
 
-        # Process success designs
-        if os.path.exists(success_csv):
-            success_df = pd.read_csv(success_csv)
+        # Process success designs (check file exists AND has data)
+        if os.path.exists(success_csv) and os.path.getsize(success_csv) > 0:
+            try:
+                success_df = pd.read_csv(success_csv)
+            except pd.errors.EmptyDataError:
+                success_df = pd.DataFrame()  # Empty dataframe if file has no data
             for _, row in success_df.iterrows():
                 # Extract design_id from Model name (e.g., "relax_design_id_model.pdb")
                 model_name = row.get("Model", "")
@@ -989,9 +992,12 @@ class ProteinHunter_Boltz:
                     dest_pdb = os.path.join(accepted_dir, f"{design_id}_relaxed.pdb")
                     shutil.copy(src_pdb, dest_pdb)
 
-        # Process failed designs
-        if os.path.exists(failed_csv):
-            failed_df = pd.read_csv(failed_csv)
+        # Process failed designs (check file exists AND has data)
+        if os.path.exists(failed_csv) and os.path.getsize(failed_csv) > 0:
+            try:
+                failed_df = pd.read_csv(failed_csv)
+            except pd.errors.EmptyDataError:
+                failed_df = pd.DataFrame()  # Empty dataframe if file has no data
             for _, row in failed_df.iterrows():
                 model_name = row.get("Model", "")
                 design_id = model_name.replace("relax_", "").replace("_model.pdb", "")
