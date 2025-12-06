@@ -802,6 +802,9 @@ class ProteinHunter_Boltz:
         design_metadata = {row["design_id"]: row.to_dict() for _, row in best_designs_df.iterrows()}
 
         # --- AlphaFold Step ---
+        # Note: high_iptm=False to convert ALL CIFs without filtering.
+        # This aligns with the Modal pipeline where PyRosetta handles all filtering
+        # and records proper rejection reasons (including low AF3 ipTM).
         af_output_dir, af_output_apo_dir, af_pdb_dir, af_pdb_dir_apo = (
             run_alphafold_step_from_csv(
                 csv_path=best_designs_csv,
@@ -813,7 +816,7 @@ class ProteinHunter_Boltz:
                 work_dir=os.path.expanduser(a.work_dir) or os.getcwd(),
                 binder_id=self.binder_chain,
                 gpu_id=a.gpu_id,
-                high_iptm=True,
+                high_iptm=False,  # Don't filter at AF3 stage - let PyRosetta handle all filtering
                 use_msa_for_af3=a.use_msa_for_af3,
             )
         )

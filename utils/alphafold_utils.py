@@ -653,10 +653,11 @@ def run_alphafold_step(
         af_output_dir, af_pdb_dir, af_dir=True, high_iptm=high_iptm
     )
     
-    # Check if any PDBs were successfully converted
+    # Note: We no longer exit early here. Let PyRosetta handle filtering and rejection tracking.
+    # This aligns with the Modal pipeline behavior where ALL designs pass through to PyRosetta
+    # and rejections are recorded with proper reasons (including low AF3 ipTM).
     if not any(f.endswith(".pdb") for f in os.listdir(af_pdb_dir)):
-        print("No successful designs from AlphaFold (none passed i-pTM threshold or conversion failed)")
-        sys.exit(0) # Exit the script/pipeline if no successful designs
+        print("Warning: No designs passed AF3 i-pTM threshold. Continuing to record rejections...")
 
     convert_cif_files_to_pdb(af_output_apo_dir, af_pdb_dir_apo, af_dir=True)
     print("Convert CIF files to PDB completed.")
@@ -743,7 +744,8 @@ def process_yaml_files(
         ):
             if chain_id == binder_chain or (msa_path == "empty" and not use_msa_for_af3):
                 # For binder or explicitly empty MSA, use query sequence only
-                processed_msas.append(f">query\n{query_seq}")
+                # Note: Trailing \n is required for proper FASTA format (matches Modal pipeline)
+                processed_msas.append(f">query\n{query_seq}\n")
                 continue
 
             msa_file = None
@@ -771,11 +773,11 @@ def process_yaml_files(
                         processed_msas.append(protein_msa)
                     except Exception as e:
                         print(f"WARNING: Failed to get or make MSA for {chain_id}: {e}")
-                        processed_msas.append(f">query\n{query_seq}")
+                        processed_msas.append(f">query\n{query_seq}\n")
                 else:
-                    processed_msas.append(f">query\n{query_seq}")
+                    processed_msas.append(f">query\n{query_seq}\n")
             else:
-                processed_msas.append(f">query\n{query_seq}")
+                processed_msas.append(f">query\n{query_seq}\n")
                 
 
         # RNA MSA generation (needed only if there are RNA entries)
@@ -788,7 +790,7 @@ def process_yaml_files(
                     rna_processed_msas.append(rna_a3m)
                 except Exception as e:
                     print(f"WARNING: Failed to generate RNA MSA for {rna_entry['id'][0]}: {e}")
-                    rna_processed_msas.append(f">query\n{rna_seq}")
+                    rna_processed_msas.append(f">query\n{rna_seq}\n")
         
         # 4. Handle Templates
         all_protein_templates = []

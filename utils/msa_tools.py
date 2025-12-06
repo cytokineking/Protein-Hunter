@@ -346,11 +346,11 @@ class Nhmmer:
                 # Check for unexpected termination/failure
                 if process.returncode != 0 and not (os.path.exists(output_sto_path) and os.path.getsize(output_sto_path) > 0):
                     print(f"❌ Nhmmer failed with error: {stderr}")
-                    return f">query\n{target_sequence}"
+                    return f">query\n{target_sequence}\n"
 
             except Exception as e:
                 print(f"❌ Error running Nhmmer: {e}")
-                return f">query\n{target_sequence}"
+                return f">query\n{target_sequence}\n"
             
             # --- Result Processing ---
             if os.path.exists(output_sto_path) and os.path.getsize(output_sto_path) > 0:
@@ -376,7 +376,7 @@ class Nhmmer:
                 return "".join([target_sequence_fasta, aligned_a3m])
             
             # No hits - return only query sequence
-            return f">query\n{target_sequence}"
+            return f">query\n{target_sequence}\n"
 
 
 class Msa:
