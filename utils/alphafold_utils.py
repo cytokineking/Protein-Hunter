@@ -24,6 +24,21 @@ from utils.convert import convert_cif_files_to_pdb, download_with_progress, calc
 from utils.msa_tools import Nhmmer, Msa, parse_fasta
 from boltz_ph.model_utils import process_msa, get_cif # MMseqs2 wrapper and PDB fetcher
 from typing import Optional, Dict, List
+import math
+
+def _is_valid_value(val) -> bool:
+    """Check if a value is valid (not None, not NaN, not empty string).
+    
+    This handles pandas NaN values which are truthy in Python.
+    Follows the Modal pattern of strict validation before adding to JSON.
+    """
+    if val is None:
+        return False
+    if isinstance(val, float) and math.isnan(val):
+        return False
+    if isinstance(val, str) and val.strip() in ('', 'nan'):
+        return False
+    return True
 
 # Default settings for RNA MSA generation (from ColabNuFold/AlphaFold3 pipeline)
 RNA_DEFAULT_SETTINGS = {
@@ -807,17 +822,21 @@ def process_yaml_files(
                 ]
             json_result["sequences"].append(protein_entry)
             
-        # RNA/DNA
+        # RNA/DNA - only add if sequence is valid (Modal pattern)
         for i, rna in enumerate(rna_entries):
-             json_result["sequences"].append({"rna": {"id": rna["id"][0], "sequence": rna["sequence"], "unpairedMsa": rna_processed_msas[i]}})
+            if _is_valid_value(rna.get("sequence")):
+                json_result["sequences"].append({"rna": {"id": rna["id"][0], "sequence": rna["sequence"], "unpairedMsa": rna_processed_msas[i]}})
         for dna in dna_entries:
-             json_result["sequences"].append({"dna": {"id": dna["id"][0], "sequence": dna["sequence"]}})
+            if _is_valid_value(dna.get("sequence")):
+                json_result["sequences"].append({"dna": {"id": dna["id"][0], "sequence": dna["sequence"]}})
              
-        # Ligands
+        # Ligands - only add if smiles/ccd is valid (Modal pattern)
         for lig in ligand_entries:
-            json_result["sequences"].append({"ligand": {"id": lig["id"][0], "smiles": lig["smiles"]}})
+            if _is_valid_value(lig.get("smiles")):
+                json_result["sequences"].append({"ligand": {"id": lig["id"][0], "smiles": lig["smiles"]}})
         for metal in metal_entries:
-            json_result["sequences"].append({"ligand": {"id": metal["id"][0], "ccdCodes": [metal["ccd"]]}})
+            if _is_valid_value(metal.get("ccd")):
+                json_result["sequences"].append({"ligand": {"id": metal["id"][0], "ccdCodes": [metal["ccd"]]}})
 
 
         # 6. Build JSON (APO) - only the binder
@@ -908,37 +927,41 @@ def csv_row_to_yaml(row: Dict, binder_chain: str = "A") -> Dict:
         }
         sequences.append(target_entry)
     
-    # 3. Add ligand if present
-    if row.get("ligand_smiles"):
+    # 3. Add ligand if present (with proper NaN validation - Modal pattern)
+    ligand_smiles = row.get("ligand_smiles")
+    ligand_ccd = row.get("ligand_ccd")
+    if _is_valid_value(ligand_smiles):
         # Find next available chain letter
         used_chains = {binder_chain} | set(target_seqs.keys())
         ligand_chain = next(c for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_chains)
         sequences.append({
             "ligand": {
                 "id": [ligand_chain],
-                "smiles": row["ligand_smiles"]
+                "smiles": ligand_smiles
             }
         })
-    elif row.get("ligand_ccd"):
+    elif _is_valid_value(ligand_ccd):
         used_chains = {binder_chain} | set(target_seqs.keys())
         ligand_chain = next(c for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_chains)
         sequences.append({
             "ligand": {
                 "id": [ligand_chain],
-                "ccd": row["ligand_ccd"]
+                "ccd": ligand_ccd
             }
         })
     
-    # 4. Add nucleic acid if present
-    if row.get("nucleic_seq") and row.get("nucleic_type"):
+    # 4. Add nucleic acid if present (with proper NaN validation - Modal pattern)
+    nucleic_seq = row.get("nucleic_seq")
+    nucleic_type = row.get("nucleic_type")
+    if _is_valid_value(nucleic_seq) and _is_valid_value(nucleic_type):
         used_chains = {binder_chain} | set(target_seqs.keys())
-        if row.get("ligand_smiles") or row.get("ligand_ccd"):
+        if _is_valid_value(ligand_smiles) or _is_valid_value(ligand_ccd):
             used_chains.add(next(c for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_chains))
         nucleic_chain = next(c for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_chains)
         sequences.append({
-            row["nucleic_type"]: {
+            nucleic_type: {
                 "id": [nucleic_chain],
-                "sequence": row["nucleic_seq"]
+                "sequence": nucleic_seq
             }
         })
     
