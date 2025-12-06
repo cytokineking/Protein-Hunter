@@ -14,7 +14,7 @@ Usage:
     # Run design pipeline
     modal run modal_boltz_ph_cli.py::run_pipeline \\
         --name "PDL1_binder" \\
-        --target-seq "AFTVTVPK..." \\
+        --protein-seqs "AFTVTVPK..." \\
         --num-designs 5
     
     # List available GPUs
@@ -30,6 +30,19 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Optional
+
+
+def str2bool(v):
+    """Convert string to boolean, matching local pipeline behavior."""
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', '0'):
+        return False
+    else:
+        raise ValueError(f'Boolean value expected, got: {v}')
+
 
 # Import Modal app and shared resources
 from modal_boltz_ph.app import app, results_dict, GPU_TYPES, DEFAULT_GPU
@@ -119,34 +132,34 @@ def run_pipeline(
     # Job identity
     name: str = "protein_hunter_run",
     # Target specification
-    target_seq: Optional[str] = None,
+    protein_seqs: Optional[str] = None,
     ligand_ccd: Optional[str] = None,
     ligand_smiles: Optional[str] = None,
     nucleic_seq: Optional[str] = None,
     nucleic_type: str = "dna",
     # Template
     template_path: Optional[str] = None,
-    template_chain_id: Optional[str] = None,
+    template_cif_chain_id: Optional[str] = None,
     # Binder configuration
     seq: Optional[str] = None,
     min_protein_length: int = 100,
     max_protein_length: int = 150,
     percent_x: int = 90,
-    cyclic: bool = False,
-    exclude_p: bool = False,
+    cyclic: str = "false",
+    exclude_p: str = "false",
     # Design parameters
     num_designs: int = 50,
     num_cycles: int = 5,
     contact_residues: Optional[str] = None,
     temperature: float = 0.1,
     omit_aa: str = "C",
-    alanine_bias: bool = False,
+    alanine_bias: str = "true",
     alanine_bias_start: float = -0.5,
     alanine_bias_end: float = -0.1,
     high_iptm_threshold: float = 0.8,
     high_plddt_threshold: float = 0.8,
     # Contact filtering
-    no_contact_filter: bool = False,
+    no_contact_filter: str = "false",
     max_contact_filter_retries: int = 6,
     contact_cutoff: float = 15.0,
     # MSA options
@@ -154,48 +167,43 @@ def run_pipeline(
     # Model parameters
     diffuse_steps: int = 200,
     recycling_steps: int = 3,
-    randomly_kill_helix_feature: bool = False,
+    randomly_kill_helix_feature: str = "false",
     negative_helix_constant: float = 0.2,
-    grad_enabled: bool = False,
-    logmd: bool = False,
+    grad_enabled: str = "false",
+    logmd: str = "false",
     # Execution
     gpu: str = DEFAULT_GPU,
     max_concurrent: int = 0,  # 0 = unlimited
     output_dir: Optional[str] = None,
-    no_stream: bool = False,
+    no_stream: str = "false",
     sync_interval: float = 5.0,
     # AF3 Validation (optional)
-    enable_af3_validation: bool = False,
-    af3_msa_mode: str = "reuse",  # "none", "reuse", or "generate"
+    use_alphafold3_validation: str = "false",
+    use_msa_for_af3: str = "true",
     af3_gpu: str = "A100-80GB",
-    # PyRosetta Filtering (optional)
-    enable_pyrosetta: bool = False,
-    # Target type (affects filtering thresholds)
-    target_type: str = "protein",  # "protein", "peptide", "small_molecule", "nucleic"
 ):
     """
     Run the Protein Hunter design pipeline on Modal.
     
     Examples:
-        # Basic protein binder design
+        # Basic protein binder design (alanine_bias is ON by default)
         modal run modal_boltz_ph_cli.py::run_pipeline \\
             --name "PDL1_binder" \\
-            --target-seq "AFTVTVPK..." \\
+            --protein-seqs "AFTVTVPK..." \\
             --num-designs 5 \\
             --num-cycles 7
         
-        # With AF3 validation and PyRosetta filtering
+        # With AF3 validation (PyRosetta runs automatically for protein targets)
         modal run modal_boltz_ph_cli.py::run_pipeline \\
             --name "PDL1_validated" \\
-            --target-seq "AFTVTVPK..." \\
+            --protein-seqs "AFTVTVPK..." \\
             --num-designs 3 \\
-            --enable-af3-validation \\
-            --enable-pyrosetta
+            --use-alphafold3-validation
         
         # With hotspots
         modal run modal_boltz_ph_cli.py::run_pipeline \\
             --name "PDL1_hotspot" \\
-            --target-seq "AFTVTVPK..." \\
+            --protein-seqs "AFTVTVPK..." \\
             --contact-residues "54,56,115" \\
             --num-designs 3
         
@@ -204,33 +212,53 @@ def run_pipeline(
             --name "SAM_binder" \\
             --ligand-ccd "SAM" \\
             --num-designs 5
+        
+        # Disable alanine bias (rare)
+        modal run modal_boltz_ph_cli.py::run_pipeline \\
+            --name "test" \\
+            --protein-seqs "AFTVTVPK..." \\
+            --alanine-bias=false
     
     AF3 Validation:
         First upload weights: modal run modal_boltz_ph_cli.py::upload_af3_weights --weights-path ~/AF3/af3.bin.zst
-        Then use --enable-af3-validation flag
+        Then use --use-alphafold3-validation flag
         
-        MSA modes:
-            --af3-msa-mode=none     Query-only for all chains (fast, less accurate)
-            --af3-msa-mode=reuse    Reuse MSAs from design phase (recommended)
-            --af3-msa-mode=generate Generate fresh MSAs for targets (slow, most accurate)
-    
-    PyRosetta Filtering:
-        Use --enable-pyrosetta flag to run interface analysis on AF3 results.
+        MSA reuse (default: True):
+            --use-msa-for-af3=true   Reuse MSAs from design phase (recommended)
+            --use-msa-for-af3=false  Query-only for all chains (faster, less accurate)
         
-        Target type controls filtering thresholds:
-            --target-type=protein   Default: interface_nres > 7, BUNS < 4
-            --target-type=peptide   Stricter: interface_nres > 4, BUNS < 2
+        PyRosetta filtering runs automatically for protein targets when AF3 validation is enabled.
     """
     import base64
     import pandas as pd
+    
+    # Convert string boolean parameters to actual booleans
+    cyclic = str2bool(cyclic)
+    exclude_p = str2bool(exclude_p)
+    alanine_bias = str2bool(alanine_bias)
+    no_contact_filter = str2bool(no_contact_filter)
+    randomly_kill_helix_feature = str2bool(randomly_kill_helix_feature)
+    grad_enabled = str2bool(grad_enabled)
+    logmd = str2bool(logmd)
+    no_stream = str2bool(no_stream)
+    use_alphafold3_validation = str2bool(use_alphafold3_validation)
+    use_msa_for_af3 = str2bool(use_msa_for_af3)
     
     stream = not no_stream
     run_id = f"{name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     # Validate inputs
-    if not any([target_seq, ligand_ccd, ligand_smiles, nucleic_seq]):
-        print("Error: Must provide at least one target (--target-seq, --ligand-ccd, --ligand-smiles, or --nucleic-seq)")
+    if not any([protein_seqs, ligand_ccd, ligand_smiles, nucleic_seq]):
+        print("Error: Must provide at least one target (--protein-seqs, --ligand-ccd, --ligand-smiles, or --nucleic-seq)")
         return
+    
+    # Auto-derive target_type from inputs (replaces manual flag)
+    if nucleic_seq:
+        target_type = "nucleic"
+    elif ligand_ccd or ligand_smiles:
+        target_type = "small_molecule"
+    else:
+        target_type = "protein"
     
     # Read and encode template file if provided
     template_content = ""
@@ -251,7 +279,8 @@ def run_pipeline(
     print("PROTEIN HUNTER (Modal)")
     print(f"{'='*70}")
     print(f"Run ID: {run_id}")
-    print(f"Target: {target_seq[:50] + '...' if target_seq and len(target_seq) > 50 else target_seq or ligand_ccd or nucleic_seq}")
+    print(f"Target: {protein_seqs[:50] + '...' if protein_seqs and len(protein_seqs) > 50 else protein_seqs or ligand_ccd or nucleic_seq}")
+    print(f"Target type: {target_type}")
     print(f"Num designs: {num_designs}")
     print(f"Num cycles: {num_cycles}")
     print(f"GPU: {gpu}")
@@ -259,12 +288,11 @@ def run_pipeline(
     print(f"Output: {output_path}")
     if template_path:
         print(f"Template: {template_path}")
-        print(f"Template chains: {template_chain_id}")
+        print(f"Template chains: {template_cif_chain_id}")
     if contact_residues:
         print(f"Hotspots: {contact_residues}")
     print(f"MSA mode: {msa_mode}")
-    if enable_pyrosetta:
-        print(f"Target type: {target_type} (affects PyRosetta thresholds)")
+    print(f"Alanine bias: {alanine_bias}")
     print(f"{'='*70}\n")
     
     # Build tasks
@@ -276,13 +304,13 @@ def run_pipeline(
             "total_designs": num_designs,
             "stream_to_dict": stream,
             # Target
-            "protein_seqs": target_seq or "",
+            "protein_seqs": protein_seqs or "",
             "ligand_ccd": ligand_ccd or "",
             "ligand_smiles": ligand_smiles or "",
             "nucleic_seq": nucleic_seq or "",
             "nucleic_type": nucleic_type,
             "template_content": template_content,
-            "template_chain_ids": template_chain_id or "",
+            "template_chain_ids": template_cif_chain_id or "",
             "msa_mode": msa_mode,
             # Binder
             "seq": seq or "",
@@ -420,7 +448,7 @@ def run_pipeline(
                 "iplddt": best_cycle_data.get("iplddt", 0.0) if best_cycle_data else 0.0,
                 "alanine_count": alanine_count,
                 "alanine_pct": round(alanine_pct, 2),
-                "target_seqs": target_seq or "",
+                "target_seqs": protein_seqs or "",
                 "contact_residues": contact_residues or "",
                 "msa_mode": msa_mode,
                 "ligand_smiles": ligand_smiles or "",
@@ -428,7 +456,7 @@ def run_pipeline(
                 "nucleic_seq": nucleic_seq or "",
                 "nucleic_type": nucleic_type or "",
                 "template_path": template_path or "",
-                "template_mapping": template_chain_id or "",
+                "template_mapping": template_cif_chain_id or "",
                 # MSA content for AF3 validation (not saved to CSV)
                 "_target_msas": r.get("target_msas", {}),
             })
@@ -462,7 +490,7 @@ def run_pipeline(
     # ===========================================
     # OPTIONAL: AF3 VALIDATION
     # ===========================================
-    if enable_af3_validation and best_rows:
+    if use_alphafold3_validation and best_rows:
         print(f"\n{'='*70}")
         print("ALPHAFOLD3 VALIDATION (Parallel)")
         print(f"{'='*70}")
@@ -476,13 +504,13 @@ def run_pipeline(
             target_msas = row.get("_target_msas", {})
             target_msa = target_msas.get("B")
             
-            if target_msa and af3_msa_mode == "reuse":
+            if target_msa and use_msa_for_af3:
                 print(f"  {row['design_id']}: Using MSA ({len(target_msa)} chars)")
-            elif af3_msa_mode == "reuse":
+            elif use_msa_for_af3:
                 print(f"  {row['design_id']}: No MSA available, using query-only")
             
             row_template_path = row.get("template_path", "") or template_path or ""
-            row_template_chain = row.get("template_mapping", "") or template_chain_id or ""
+            row_template_chain = row.get("template_mapping", "") or template_cif_chain_id or ""
             
             af3_tasks.append({
                 "design_id": row["design_id"],
@@ -490,17 +518,17 @@ def run_pipeline(
                 "target_seq": row["target_seqs"],
                 "binder_chain": "A",
                 "target_chain": "B",
-                "target_msa": target_msa if af3_msa_mode == "reuse" else None,
-                "af3_msa_mode": af3_msa_mode,
+                "target_msa": target_msa if use_msa_for_af3 else None,
+                "af3_msa_mode": "reuse" if use_msa_for_af3 else "none",
                 "template_path": row_template_path if row_template_path else None,
                 "template_chain_id": row_template_chain if row_template_chain else None,
             })
         
         print(f"Submitting {len(af3_tasks)} designs for AF3 validation...")
         print(f"GPU: {af3_gpu_to_use}")
-        print(f"MSA mode: {af3_msa_mode}")
+        print(f"MSA reuse: {use_msa_for_af3}")
         if template_path:
-            print(f"Template: {template_path} (chain {template_chain_id})")
+            print(f"Template: {template_path} (chain {template_cif_chain_id})")
         
         try:
             af3_results_list = list(af3_fn.starmap([
@@ -537,10 +565,10 @@ def run_pipeline(
             print(f"  Results saved to: {af3_dir}/")
             
             # ===========================================
-            # AF3 APO PREDICTIONS (for RMSD)
+            # AF3 APO PREDICTIONS (for RMSD) - only for protein targets
             # ===========================================
             apo_results = {}
-            if enable_pyrosetta:
+            if target_type == "protein":
                 print(f"\n{'='*70}")
                 print("ALPHAFOLD3 APO PREDICTIONS")
                 print(f"{'='*70}")
@@ -572,9 +600,9 @@ def run_pipeline(
                     print(f"⚠ APO predictions error: {e}")
             
             # ===========================================
-            # PYROSETTA FILTERING
+            # PYROSETTA FILTERING - only for protein targets
             # ===========================================
-            if enable_pyrosetta:
+            if target_type == "protein":
                 print(f"\n{'='*70}")
                 print("PYROSETTA FILTERING (Parallel)")
                 print(f"{'='*70}")
@@ -703,7 +731,7 @@ def run_pipeline(
         except Exception as e:
             print(f"⚠ AF3 validation error: {e}")
     
-    elif enable_af3_validation:
+    elif use_alphafold3_validation:
         print("\n⚠ No best designs found for AF3 validation")
 
 

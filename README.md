@@ -1,238 +1,913 @@
-# Protein-Hunter 😈
+# Protein Hunter — Boltz Edition ⚡
 
-<p align="center">
-  <img src="./protein_hunter.png" alt="Protein Hunter" width="500"/>
-</p>
+> **Fork Notice**: This is a fork of [Protein Hunter](https://github.com/yehlincho/Protein-Hunter) 
+> that concentrates on the Boltz pathway with enhanced Modal cloud support and improved output organization.
+> For the original Chai+Boltz implementation, see [UPSTREAM_README.md](./UPSTREAM_README.md).
 
-<p align="center" style="font-size:90%">
-  <em>DAlphaBall.gcc
-    <strong>Note:</strong> Logo is a ChatGPT-modified version of the Netflix animation and is for illustration only.
-  </em>
-</p>
+A protein binder design pipeline using Boltz structure prediction and LigandMPNN sequence design.
 
-> 📄 **Paper**: [Protein Hunter: exploiting structure hallucination
-within diffusion for protein design](https://www.biorxiv.org/content/10.1101/2025.10.10.681530v2.full.pdf)
----
+## Why This Fork?
 
+1. **BindCraft-style Design Cycles** — Restructured workflow amenable to long-running jobs (checkpointing planned)
+2. **Serverless Compute Ready** — Full Modal cloud compatibility with massive parallelization and real-time streaming
+3. **Open-Source Future** — Working toward replacing AF3/PyRosetta with open-source alternatives
 
-## 📝 Colab Notebook
+## What's Different in This Fork
 
-[![Open Protein Hunter (Chai)](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yehlincho/Protein-Hunter/blob/main/protein_hunter_chai_colab.ipynb)
-[![Open Protein Hunter (Boltz)](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yehlincho/Protein-Hunter/blob/main/protein_hunter_boltz_colab.ipynb)
-
-
-## 🚀 Quick Start
-
-### Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yehlincho/Protein-Hunter.git
-   cd Protein-Hunter
-   ```
-
-2. **Run the automated setup**
-   ```bash
-   chmod +x setup.sh
-   ./setup.sh
-   ```
-
-> ⚠️ **Note**: AlphaFold3 setup is not included. Please install it separately by following the [official instructions](https://github.com/google-deepmind/alphafold3).
-
-The setup script will automatically:
-- ✅ Create a conda environment with Python 3.10
-- ✅ Install all required dependencies
-- ✅ Set up a Jupyter kernel for notebooks
-- ✅ Download Boltz and Chai weights
-- ✅ Configure LigandMPNN and ProteinMPNN
-- ✅ Optionally install PyRosetta
-- ❌ AF3 must be installed separately
+| Feature | Upstream | This Fork |
+|---------|----------|-----------|
+| **Boltz Support** | ✅ | ✅ (primary focus) |
+| **Chai Support** | ✅ | ❌ (legacy, not maintained in this fork) |
+| **Modal Cloud Pipeline** | ❌ | ✅ Parallelized design runs |
+| **ipSAE Scoring** | ❌ | ✅ Interface pSAE metric |
+| **Output Organization** | Complex folder structure | Streamlined: `designs/`, `best_designs/`, `accepted_designs/`, etc. |
+| **Checkpointable Runs** | ❌ | 🔜 Planned: Resume interrupted jobs |
 
 ---
 
-We have implemented two different AF3-style models in our Protein Hunter pipeline (more models will be added in the future):
-- Boltz1/2
-- Chai1
+## Table of Contents
 
-
-## Run Code End-to-End
-
-## 1️⃣ End-to-end structure and sequence generation  
-👉 See example usage in `run_protein_hunter.py` for reference. 🐍✨  
-This will take you from your initial input all the way to final designed protein structures and sequences, all in one pipeline!
-The design chain is "A" and other target chains are "B", "C", etc.
-
-
-
-> 💡 **Tips:** The original evaluation in the paper used an all-X sequence for initial design. However, to increase the diversity of generated folds, you can mix random amino acids with X residues by setting the `percent_X` parameter (e.g., `--percent_X 50` for 50% X and 50% random AAs). Adjusting this ratio helps explore a broader design space—but if you see too many floating or disconnected structures, try decreasing `percent_X` to encourage more structured designs.
-
-
-⚠️ **Warning**: To run the AlphaFold3 cross-validation pipeline, you need to specify your AlphaFold3 directory, Docker name, database settings, and conda environment in the configuration. These can be set using the following arguments:
-- `--alphafold_dir`: Path to your AlphaFold3 installation (default: ~/alphafold3)
-- `--af3_docker_name`: Name of your AlphaFold3 Docker container
-- `--af3_database_settings`: Path to AlphaFold3 database
-- `--af3_hmmer_path`: Path to HMMER
-- `--use_alphafold3_validation`: Add this flag to enable AlphaFold3-based validation. 
-
-## Protein Hunter (Boltz Edition ⚡) 
-To use AlphaFold3 validation, make sure your AlphaFold3 Docker is installed, specify the correct AlphaFold3 directory, and turn on `--use_alphafold3_validation`.
-
-
-- **Protein-protein design with all X sequence:**  
-  To design a protein-protein complex using an all-X sequence (i.e., X for every residue, encouraging de novo exploration), run:  
-  ```
-  python boltz_ph/design.py --num_designs 3 --num_cycles 7 --protein_seqs AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE --msa_mode "mmseqs" --gpu_id 0 --name PDL1_mix_aa_all_X --percent_X 100 --min_protein_length 90 --max_protein_length 150 --high_iptm_threshold 0.7 --use_msa_for_af3 --plot
-  ```
-  > 💡 **Tip:** The `--percent_X 100` flag ensures all positions use the X (unknown) amino acid code.
-
-- **Protein-protein design (mixed X and random amino acids):**  
-  To design a protein-protein complex using a mix of X and random amino acids for the designable chain, run:  
-  ```
-  python boltz_ph/design.py --num_designs 3 --num_cycles 7 --protein_seqs AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE --msa_mode "mmseqs" --gpu_id 0 --name PDL1_mix_aa --percent_X 50 --min_protein_length 90 --max_protein_length 150 --high_iptm_threshold 0.7 --use_msa_for_af3 --plot
-  ```
-
-  - **Protein-protein design (sample fewer alanine with alanine bias):**  
-  To design a protein-protein complex using a mix of X and random amino acids while discouraging alanine sampling during design, run:
-  ```
-  python boltz_ph/design.py --num_designs 3 --num_cycles 7 --protein_seqs AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE --msa_mode "mmseqs" --gpu_id 0 --name PDL1_mix_aa_alanine_bias --percent_X 50 --min_protein_length 90 --max_protein_length 150 --high_iptm_threshold 0.7 --alanine_bias --use_msa_for_af3 --plot
-  ```
-
-- **Protein-protein contact specification design:**  
-  By default, contact potentials are disabled. To enable contact-based potentials and specify interface residue positions (e.g., residue positions "2,3,10" in the target chain), add `--no_potentials False` and `--contact_residues 2,3,10` to your command. For example:
-  ```
-  python boltz_ph/design.py --num_designs 3 --num_cycles 7 --protein_seqs AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE --msa_mode "mmseqs" --gpu_id 0 --name PDL1_mix_aa --min_protein_length 90 --max_protein_length 150 --high_iptm_threshold 0.7 --use_msa_for_af3 --plot --no_potentials False --contact_residues 2,3,10
-  ```
-  
-- **Multimer binder design:**  
-  To design a binder for a multimeric protein (e.g., a dimer), separate chain sequences using `:`
-  ```
-  python boltz_ph/design.py --num_designs 3 --num_cycles 7 --protein_seqs AGIKVFGHPASIATRRVLIALHEKNLDFELVHVELKDGEHKKEPFLSRNPFGQVPAFEDGDLKLFESRAITQYIAHRYENQGTNLLQTDSKNISQYAIMAIGMQVEDHQFDPVASKLAFEQIFKSIYGLTTDEAVVAEEEAKLAKVLDVYEARLKEFKYLAGETFTLTDLHHIPAIQYLLGTPTKKLFTERPRVNEWVAEITKRPASEKVQ:AGIKVFGHPASIATRRVLIALHEKNLDFELVHVELKDGEHKKEPFLSRNPFGQVPAFEDGDLKLFESRAITQYIAHRYENQGTNLLQTDSKNISQYAIMAIGMQVEDHQFDPVASKLAFEQIFKSIYGLTTDEAVVAEEEAKLAKVLDVYEARLKEFKYLAGETFTLTDLHHIPAIQYLLGTPTKKLFTERPRVNEWVAEITKRPASEKVQ --msa_mode "mmseqs" --gpu_id 0 --name 1GNW_mix_aa --min_protein_length 90 --max_protein_length 150 --high_iptm_threshold 0.7 --use_msa_for_af3 --plot
-  ```
-
-
-- **Cyclic peptide binder design**
-  ```
-  python boltz_ph/design.py --num_designs 3 --num_cycles 7 --protein_seqs AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE --msa_mode "mmseqs" --gpu_id 0 --name PDL1_cyclic_peptide_binder --min_protein_length 10 --max_protein_length 20 --high_iptm_threshold 0.8 --percent_X 100 --use_msa_for_af3 --plot --cyclic
-  ```
-
-- **Small molecule binder design:**  
-  For designing a protein binder for a small molecule (e.g., SAM), use:  
-  ```
-  python boltz_ph/design.py --num_designs 5 --num_cycles 7 --ligand_ccd SAM --gpu_id 2 --name SAM_binder --min_protein_length 130 --max_protein_length 150 --high_iptm_threshold 0.7 --use_msa_for_af3 --plot
-  ```
-
-- **DNA/RNA PDB design:**  
-  To design a protein binder for a nucleic acid (e.g., an RNA sequence), run:
-  ```
-  python boltz_ph/design.py --num_designs 5 --num_cycles 7 --nucleic_seq AGAGAGAGA --nucleic_type rna --gpu_id 0 --name RNA_bind --min_protein_length 130 --max_protein_length 150 --high_iptm_threshold 0.7 --use_msa_for_af3 --plot
-  ```
-
-- **Designs with multiple/heterogeneous target types:**  
-  Want to target multiple types of molecules (e.g., a protein with a ligand and a template)? Run:
-  ```
-  python boltz_ph/design.py --num_designs 5 --num_cycles 7 --protein_seqs AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE --msa_mode "mmseqs" --ligand_ccd SAM --gpu_id 0 --name PDL1_SAM --min_protein_length 90 --max_protein_length 150 --high_iptm_threshold 0.8 --use_msa_for_af3 --plot
-  ```
-
-## Protein Hunter (Chai Edition ☕) 
-
-> ⚠️ **Caution:** The Chai version is under active development
-- [x] Support for multiple targets
-- [x] Full AlphaFold (AF3) validation
-
-- **Unconditional protein design:**  
-  Generate de novo proteins of a desired length:
-  ```
-  python chai_ph/design.py --jobname unconditional_design --min_protein_length 150 --max_protein_length 150 --percent_X 0 --seq "" --target_seq ACDEFGHIKLMNPQRSTVWY --n_trials 1 --n_cycles 5 --n_recycles 3 --n_diff_steps 200 --hysteresis_mode templates --repredict --omit_aa "" --temperature 0.1 --scale_temp_by_plddt --render_freq 100 --gpu_id 0 --plot
-
-- **Protein binder design:**  
-  To design a binder for a specific protein target (e.g., PDL1):
-  ```
-  python chai_ph/design.py --jobname PDL1_binder --min_protein_length 90 --max_protein_length 150 --percent_X 80 --seq "" --target_seq AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE --n_trials 1 --n_cycles 5 --n_recycles 3 --n_diff_steps 200 --hysteresis_mode templates --repredict --omit_aa "" --temperature 0.1 --scale_temp_by_plddt --render_freq 100 --gpu_id 0 --use_msa_for_af3 --plot
-  ```
-
-- **Cyclic peptide binder design:**  
-  Design a cyclic peptide binder for a specific protein target:
-  ```
-  python chai_ph/design.py --jobname PDL1_cyclic_binder --percent_X 80 --seq "" --min_protein_length 10 --max_protein_length 20 --cyclic --target_seq AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE --n_trials 1 --n_cycles 5 --n_recycles 3 --n_diff_steps 200 --hysteresis_mode templates --repredict --omit_aa "" --temperature 0.1 --scale_temp_by_plddt --render_freq 100 --gpu_id 0 --use_msa_for_af3 --plot
-  ```
-
-- **Small molecule (ligand) binder design:**  
-  To design a protein binder for a small molecule or ligand (SMILES string as target):
-  ```
-  python chai_ph/design.py --jobname ligand_binder  --percent_X 0 --seq "" --min_protein_length 130 --max_protein_length 150 --target_seq O=C(NCc1cocn1)c1cnn(C)c1C(=O)Nc1ccn2cc(nc2n1)c1ccccc1 --n_trials 1 --n_cycles 5 --n_recycles 3 --n_diff_steps 200 --hysteresis_mode esm --repredict --omit_aa "" --temperature 0.01 --scale_temp_by_plddt --render_freq 100 --gpu_id 2 --plot
-  ```
-
-## 2️⃣ Refine your own designs!
-🛠️ You can provide your initial designs as input and further improve their structures by iteratively redesigning and predicting them. Repeat as needed for optimal results!
-
-See the code in `refiner.ipynb` for example usage.
-
-For example, you can generate a design using Boltzgen, take the final output, and refine it further using the iterative pipeline. 
+- [Overview](#overview)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Design Modes](#design-modes)
+  - [1. De Novo Design](#1-de-novo-design)
+  - [2. Optimization (Refinement)](#2-optimization-refinement)
+- [Target Specification](#target-specification)
+  - [Sequence-Only Mode](#sequence-only-mode)
+  - [Template Structure Mode](#template-structure-mode)
+- [Hotspot Configuration](#hotspot-configuration)
+- [Command-Line Arguments Reference](#command-line-arguments-reference)
+- [Output Files](#output-files)
+- [Examples](#examples)
+- [Modal Cloud Deployment](#modal-cloud-deployment)
+  - [Modal Setup](#modal-setup)
+  - [Modal Quick Start](#modal-quick-start)
+  - [Modal CLI Arguments](#modal-cli-arguments)
+  - [Parallelization & Concurrency](#parallelization--concurrency)
+  - [Template Structures on Modal](#template-structures-on-modal)
+  - [Modal Examples](#modal-examples)
 
 ---
 
+## Overview
 
+Protein Hunter uses iterative **structure-sequence cycling** with **diffusion hallucination** to design protein binders. Based on the discovery that AF3-style diffusion models (Boltz, Chai, AF3) can hallucinate well-folded structures from out-of-distribution inputs like unknown "X" tokens, the method co-optimizes sequence and structure through repeated cycles.
 
-
-## 🎥 Trajectory Visualization
-We have implemented trajectory visualization using LogMD and py2Dmol (developed by Sergey Ovchinnikov).
-
-## ✅ Structure Validation
-
-### Primary Evaluation: AlphaFold3
-Final structures are validated using **AlphaFold3** for:
-- Structure quality assessment 
-- Confidence scoring
-- Cross-validation against design targets
-
-## 🎯 Successful Designs
-
-By default, the `high_iptm_yaml` folder contains only the designs with ipTM above your chosen threshold and alanine percentage below 20%. If you want to browse **all** generated designs, please check the metrics in `summary_all_runs.csv`.
-
-After running the pipeline with `run_protein_hunter.py`, high-confidence designs can be found in:
-
-- `your_output_folder/high_iptm_yaml`
-- `your_output_folder/high_iptm_cif`
-- Metrics summary: `your_output_folder/summary_high_iptm.csv`
-
-After running AlphaFold3, the validated (successfully predicted) structures are saved in:
-
-`your_output_folder/03_af_pdb_success`
-
-
-## 📝 To-Do List
-
-- [ ] Add cross-validation between Boltz and Chai (both directions) without using AlphaFold3 as an option
-- [ ] Implement multi-timer support for Protein Hunter Chai edition
-- [ ] Specify multiple contacts on multiple targets 
-- [ ] Explore other cool applications
-
-Collaboration is always welcome! Email me. Let's chat.
-
-## 📄 License & Citation
-
-**License**: MIT License - See LICENSE file for details  
-**Citation**: If you use Protein Hunter in your research, please cite:
 ```
+┌──────────────────────────────────────────────────────────────┐
+│  1. Initialize binder with all-X (unknown) tokens            │
+│                           ↓                                  │
+│  2. Diffusion hallucination: Boltz predicts a folded         │
+│     structure despite the undefined sequence                 │
+│                           ↓                                  │
+│  3. Sequence design: LigandMPNN designs a sequence           │
+│     compatible with the hallucinated backbone                │
+│                           ↓                                  │
+│  4. Structure refinement: Re-predict with designed sequence  │
+│                           ↓                                  │
+│  5. Repeat steps 3-4 for N cycles (structure improves,       │
+│     alanine bias decreases, foldability increases)           │
+│                           ↓                                  │
+│  6. Output: Co-optimized binder sequence + structure         │
+└──────────────────────────────────────────────────────────────┘
+```
+
+> **Key insight**: Unlike gradient-based methods (BindCraft, BoltzDesign) that can be slow and get stuck in local minima, or single-pass diffusion methods (RFdiffusion) where structure and sequence are optimized separately, Protein Hunter jointly refines both through zero-shot prediction cycles. This achieves high in silico success rates across diverse targets including proteins, cyclic peptides, small molecules, DNA, and RNA.
+
+**Reference**: [Protein Hunter: exploiting structure hallucination within diffusion for protein design](https://www.biorxiv.org/content/10.1101/2025.10.10.681530v2) (Cho et al., 2025)
+
+**Key terminology:**
+- **Binder (Chain A)**: The protein being designed (initialized with X tokens)
+- **Target (Chain B, C, ...)**: What you want to bind (protein, ligand, DNA/RNA)
+- **Design run**: One complete optimization trajectory from initialization to final output
+- **Cycle** (`--num_cycles`): One iteration of structure prediction → sequence design
+- **Recycle** (`--recycling_steps`): Internal refinement passes within Boltz's structure prediction
+- **Diffusion hallucination**: The model's ability to generate well-folded structures from undefined (X token) sequences
+
+**Cycles vs Recycles:**
+```
+Design Run (1 of num_designs)
+│
+├── Cycle 0: Diffusion hallucination (X tokens → initial structure)
+│   └── [recycle 1] → [recycle 2] → [recycle 3] → hallucinated structure
+│
+├── Cycle 1: Sequence design → structure refinement
+│   └── [recycle 1] → [recycle 2] → [recycle 3] → improved structure
+│
+├── Cycle 2: Sequence design → structure refinement
+│   └── ... (alanine content decreases, foldability improves)
+│
+└── ... (num_cycles iterations)
+```
+
+---
+
+## Installation
+
+```bash
+git clone https://github.com/cytokineking/Protein-Hunter
+cd Protein-Hunter
+chmod +x setup.sh
+./setup.sh
+```
+
+For detailed local setup including AF3 Docker configuration, see [LOCAL_SETUP_GUIDE.md](./LOCAL_SETUP_GUIDE.md).
+
+---
+
+## Quick Start
+
+Design a binder for a target protein:
+
+```bash
+python boltz_ph/design.py \
+    --name my_first_design \
+    --protein_seqs "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALEHHHHHH" \
+    --num_designs 3 \
+    --num_cycles 7 \
+    --min_protein_length 80 \
+    --max_protein_length 120 \
+    --msa_mode mmseqs \
+    --high_iptm_threshold 0.7 \
+    --gpu_id 0
+```
+
+> **Note**: `--alanine_bias` defaults to `True` in this fork. Use `--alanine_bias false` to disable.
+
+---
+
+## Design Modes
+
+### 1. De Novo Design
+
+**Purpose**: Design a completely new binder from scratch.
+
+The binder starts as a random sequence (with optional "X" unknown residues) and gets optimized through multiple cycles.
+
+```bash
+python boltz_ph/design.py \
+    --name de_novo_binder \
+    --protein_seqs "YOUR_TARGET_SEQUENCE" \
+    --num_designs 5 \
+    --num_cycles 7 \
+    --min_protein_length 90 \
+    --max_protein_length 150 \
+    --percent_X 50 \
+    --msa_mode mmseqs \
+    --high_iptm_threshold 0.7 \
+    --gpu_id 0
+```
+
+**Key parameters for de novo design:**
+
+| Parameter | Description | Recommended |
+|-----------|-------------|-------------|
+| `--percent_X` | % of "unknown" residues in initial sequence | 50-100 |
+| `--min_protein_length` | Minimum binder length | 60-80 |
+| `--max_protein_length` | Maximum binder length | 120-150 |
+| `--num_designs` | Independent design attempts | 100+ for a full run |
+| `--num_cycles` | Optimization iterations per design | 7 |
+
+---
+
+### 2. Optimization (Refinement)
+
+**Purpose**: Improve an existing binder sequence.
+
+Provide a starting sequence via `--seq` to refine it further.
+
+```bash
+python boltz_ph/design.py \
+    --name refine_my_binder \
+    --seq "GPDRERARELARILLKVIKLSDSPEARRQLLRNLEELAEKYKDPEVRRILEEAERYIK" \
+    --protein_seqs "YOUR_TARGET_SEQUENCE" \
+    --num_designs 3 \
+    --num_cycles 5 \
+    --msa_mode mmseqs \
+    --high_iptm_threshold 0.8 \
+    --gpu_id 0
+```
+
+**Key differences from de novo:**
+- `--seq` provides the starting binder sequence
+- `--min/max_protein_length` are ignored (length is fixed)
+- `--percent_X` is ignored (sequence is provided)
+- Typically use fewer cycles and higher quality thresholds
+
+---
+
+## Target Specification
+
+You must specify what you want to design a binder FOR. There are two paradigms:
+
+### Sequence-Only Mode
+
+**Use when**: You don't have an experimental structure of your target.
+
+Boltz will **predict the target structure** during design, using MSA information for accuracy.
+
+```bash
+python boltz_ph/design.py \
+    --protein_seqs "YOUR_TARGET_SEQUENCE" \
+    --msa_mode mmseqs \
+    ...
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `--protein_seqs` | Target protein sequence (required) |
+| `--msa_mode mmseqs` | Generate MSA for better structure prediction |
+
+**For multi-chain targets** (e.g., dimers), separate sequences with `:`:
+
+```bash
+--protein_seqs "CHAIN_B_SEQUENCE:CHAIN_C_SEQUENCE"
+```
+
+---
+
+### Template Structure Mode
+
+**Use when**: You have an experimental structure (PDB/CIF) of your target.
+
+The template provides **explicit coordinates** that anchor the target structure during design.
+
+```bash
+python boltz_ph/design.py \
+    --protein_seqs "YOUR_TARGET_SEQUENCE" \
+    --template_path "7KPL" \
+    --template_cif_chain_id "A" \
+    --msa_mode single \
+    ...
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `--protein_seqs` | Target sequence (must match template) |
+| `--template_path` | PDB code, file path, or AlphaFold ID |
+| `--template_cif_chain_id` | Which chain in template to use |
+| `--msa_mode single` | Often used with templates (MSA optional) |
+
+**Template path options:**
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| PDB code | `"7KPL"` | Auto-downloads from RCSB |
+| Local file | `"./structures/target.cif"` | Your own file (.pdb or .cif) |
+| AlphaFold ID | `"P12345"` | Auto-downloads from AlphaFold DB |
+
+**Multi-chain templates:**
+
+```bash
+--protein_seqs "SEQ_B:SEQ_C" \
+--template_path "7KPL:7KPL" \
+--template_cif_chain_id "A:B"
+```
+
+**Handling template gaps:**
+
+If your template has missing residues (unresolved loops), provide the **full sequence** in `--protein_seqs`. Boltz will:
+- Use template coordinates where available
+- Predict missing regions
+
+---
+
+## Hotspot Configuration
+
+**Hotspots** are target residues that the binder MUST contact.
+
+### Basic Usage
+
+```bash
+--contact_residues "54,56,66,115,121"
+```
+
+This forces the binder to contact residues 54, 56, 66, 115, and 121 on the target.
+
+### Multi-Chain Hotspots
+
+Use `|` to separate hotspots for different target chains:
+
+```bash
+--protein_seqs "SEQ_B:SEQ_C" \
+--contact_residues "10,20,30|5,15"
+```
+
+- Residues 10, 20, 30 on Chain B
+- Residues 5, 15 on Chain C
+
+### Hotspot Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--contact_residues` | `""` | Comma-separated residue positions |
+| `--contact_cutoff` | `15.0` | Distance threshold (Å) for contact |
+| `--max_contact_filter_retries` | `6` | Retries if contacts not satisfied |
+| `--no_contact_filter` | `False` | Disable contact checking |
+
+### How Contact Filtering Works
+
+1. **Cycle 0**: After initial prediction, check if binder contacts all hotspots
+2. **If failed**: Resample initial sequence, retry (up to `max_contact_filter_retries`)
+3. **High-ipTM saving**: Designs only saved if contacts are satisfied
+
+### Example with Hotspots
+
+```bash
+python boltz_ph/design.py \
+    --name hotspot_design \
+    --protein_seqs "TARGET_SEQUENCE" \
+    --contact_residues "29,54,56,115,116,117" \
+    --contact_cutoff 12.0 \
+    --max_contact_filter_retries 10 \
+    --num_designs 5 \
+    --num_cycles 7 \
+    --msa_mode mmseqs \
+    --gpu_id 0
+```
+
+---
+
+## Command-Line Arguments Reference
+
+### Core Settings
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--name` | str | required | Job name (used for output folder) |
+| `--gpu_id` | int | `0` | GPU device ID |
+| `--num_designs` | int | `50` | Number of independent design runs |
+| `--num_cycles` | int | `5` | Fold→design iterations per run |
+| `--mode` | str | `"binder"` | `"binder"` or `"unconditional"` |
+
+### Binder Sequence Settings
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--seq` | str | `""` | Starting binder sequence (empty = random) |
+| `--min_protein_length` | int | `100` | Minimum binder length (if random start) |
+| `--max_protein_length` | int | `150` | Maximum binder length (if random start) |
+| `--percent_X` | int | `90` | % of "X" (unknown) in initial sequence |
+| `--cyclic` | flag | `False` | Design cyclic peptide |
+
+### Target Specification
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--protein_seqs` | str | `""` | Target protein sequence(s), `:` separated |
+| `--ligand_smiles` | str | `""` | Target ligand as SMILES |
+| `--ligand_ccd` | str | `""` | Target ligand as CCD code (e.g., `"SAM"`) |
+| `--nucleic_seq` | str | `""` | Target DNA/RNA sequence |
+| `--nucleic_type` | str | `"dna"` | `"dna"` or `"rna"` |
+
+### Template Settings
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--template_path` | str | `""` | PDB code, file path, or AlphaFold ID |
+| `--template_cif_chain_id` | str | `""` | Chain ID(s) in template for alignment |
+| `--msa_mode` | str | `"mmseqs"` | `"mmseqs"` (generate MSA) or `"single"` (no MSA) |
+
+### Hotspot/Contact Settings
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--contact_residues` | str | `""` | Target residues to contact (e.g., `"10,20,30"`) |
+| `--contact_cutoff` | float | `15.0` | Contact distance threshold (Å) |
+| `--max_contact_filter_retries` | int | `6` | Retries if contacts unsatisfied |
+| `--no_contact_filter` | flag | `False` | Disable contact filtering |
+
+### Sequence Design (MPNN) Settings
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--temperature` | float | `0.1` | MPNN sampling temperature |
+| `--omit_AA` | str | `"C"` | Amino acids to exclude |
+| `--alanine_bias` | str | **`True`** | Penalize alanine (use `false` to disable) |
+| `--alanine_bias_start` | float | `-0.5` | Initial alanine penalty |
+| `--alanine_bias_end` | float | `-0.1` | Final alanine penalty |
+
+### Quality Thresholds
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--high_iptm_threshold` | float | `0.8` | Min ipTM to save design |
+| `--high_plddt_threshold` | float | `0.8` | Min pLDDT to save design |
+
+### Model Settings
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--boltz_model_version` | str | `"boltz2"` | `"boltz1"` or `"boltz2"` |
+| `--diffuse_steps` | int | `200` | Diffusion timesteps |
+| `--recycling_steps` | int | `3` | Model recycling passes per prediction |
+
+**Note on `--recycling_steps`:**
+This controls the number of internal refinement passes within each structure prediction. More recycles = more refined prediction per cycle, but slower. This is different from `--num_cycles` which controls the outer design loop (fold → redesign → fold → ...). Default of 3 is standard for AlphaFold-style models.
+
+### Output Settings
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--save_dir` | str | `""` | Custom output directory |
+| `--plot` | flag | `False` | Generate optimization plots |
+
+### AlphaFold3 Validation (Optional)
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--use_alphafold3_validation` | flag | `False` | Enable AF3 cross-validation |
+| `--alphafold_dir` | str | `"~/alphafold3"` | AF3 installation path |
+| `--use_msa_for_af3` | str | **`True`** | Reuse MSAs from design phase for AF3 validation |
+
+---
+
+## Output Files
+
+Results are saved to `./results_{name}/`:
+
+### Basic Output (Boltz Design Only)
+
+```
+results_my_design/
+├── designs/                         # ALL cycles from all design runs
+│   ├── my_design_d0_c0.pdb          # Design 0, Cycle 0
+│   ├── my_design_d0_c1.pdb          # Design 0, Cycle 1
+│   ├── my_design_d0_c2.pdb          # ...
+│   ├── my_design_d1_c0.pdb          # Design 1, Cycle 0
+│   ├── my_design_d1_c1.pdb          # ...
+│   └── design_stats.csv             # Full metrics for ALL cycles
+└── best_designs/                    # Best cycle per design run
+    ├── my_design_d0_c2.pdb          # Best cycle from design 0
+    ├── my_design_d1_c3.pdb          # Best cycle from design 1
+    └── best_designs.csv             # Summary of best designs only
+```
+
+### Full Output (With AF3 Validation)
+
+When using `--use_alphafold3_validation` (local) or `--use-alphafold3-validation` (Modal):
+
+```
+results_my_design/
+├── designs/                         # All design cycles
+│   ├── design_stats.csv
+│   └── {name}_d{X}_c{Y}.pdb
+├── best_designs/                    # Best cycle per design
+│   ├── best_designs.csv
+│   └── {name}_d{X}_c{Y}.pdb
+├── af3_validation/                  # AlphaFold3 predictions
+│   ├── af3_results.csv
+│   └── *_af3.cif
+├── accepted_designs/                # Passed all filters (protein targets)
+│   ├── accepted_stats.csv
+│   └── *_relaxed.pdb
+└── rejected/                        # Failed filters
+    ├── rejected_stats.csv
+    └── *_relaxed.pdb
+```
+
+> **Note**: PyRosetta scoring runs automatically for protein targets when AF3 validation is enabled.
+
+**File naming convention:** `{name}_d{design_num}_c{cycle}.pdb`
+
+**Key files:**
+
+| File | Description |
+|------|-------------|
+| `designs/design_stats.csv` | Complete metrics for every cycle of every design |
+| `designs/*.pdb` | All PDB structures from all cycles |
+| `best_designs/best_designs.csv` | Summary of best cycle per design (highest ipTM with ≤20% alanine) |
+| `best_designs/*.pdb` | Best structure from each design run |
+
+**CSV columns in `design_stats.csv`:**
+
+| Column | Description |
+|--------|-------------|
+| `design_id` | Unique identifier (`{name}_d{N}_c{M}`) |
+| `design_num` | Design run index |
+| `cycle` | Cycle number within design run |
+| `binder_sequence` | Designed binder sequence |
+| `binder_length` | Length of binder |
+| `cyclic` | Whether cyclic topology was used |
+| `iptm` | Interface pTM score |
+| `ipsae` | Interface pSAE score (0-1, higher is better) |
+| `plddt` | Complex pLDDT |
+| `iplddt` | Interface pLDDT |
+| `alanine_count` | Number of alanines |
+| `alanine_pct` | Percentage alanine |
+| `target_seqs` | Target sequence(s) used |
+| `contact_residues` | Hotspot residues (if specified) |
+| `msa_mode` | MSA mode used |
+| `timestamp` | When the cycle completed |
+
+---
+
+## Metrics Reference
+
+### ipTM (Interface pTM)
+
+Interface pTM measures the predicted accuracy of interface residue positioning. Range: 0-1 (higher is better). This is the primary metric for design quality.
+
+### ipSAE (Interface predicted Structural Alignment Error)
+
+ipSAE measures the confidence of interface residue positioning between binder and target. Based on [Dunbrack et al. (2025)](https://www.biorxiv.org/content/10.1101/2025.02.10.637595v1).
+
+**Key characteristics:**
+- **Range**: 0-1 (higher is better)
+- **Calculation**: Per-residue max of binder→target and target→binder PAE scores
+- **Multi-chain handling**: Only scores binder↔target interfaces, excludes target-target contacts
+- **Nucleic acid support**: Automatically adjusts d0 calculation for DNA/RNA targets
+
+**Implementation**: `utils/ipsae_utils.py`
+
+### pLDDT (predicted Local Distance Difference Test)
+
+Per-residue confidence score from Boltz. Range: 0-1 (higher is better). Values >0.7 indicate confident predictions.
+
+### PyRosetta Metrics (Validation Only)
+
+When AF3 validation is enabled for protein targets, PyRosetta calculates:
+
+| Metric | Description |
+|--------|-------------|
+| `interface_dG` | Binding energy (kcal/mol) - more negative is better |
+| `interface_sc` | Shape complementarity (0-1) - higher is better |
+| `interface_nres` | Number of interface residues |
+| `interface_delta_unsat_hbonds` | Buried unsatisfied H-bonds - lower is better |
+| `apo_holo_rmsd` | RMSD between bound and unbound binder |
+
+---
+
+## Examples
+
+### Example 1: Basic Protein Binder Design
+
+```bash
+python boltz_ph/design.py \
+    --name PDL1_binder \
+    --protein_seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --num_designs 5 \
+    --num_cycles 7 \
+    --min_protein_length 90 \
+    --max_protein_length 150 \
+    --percent_X 50 \
+    --msa_mode mmseqs \
+    --high_iptm_threshold 0.7 \
+    --plot \
+    --gpu_id 0
+```
+
+### Example 2: Design with Template Structure
+
+```bash
+python boltz_ph/design.py \
+    --name PDL1_template_design \
+    --protein_seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --template_path "7KPL" \
+    --template_cif_chain_id "B" \
+    --msa_mode single \
+    --num_designs 3 \
+    --num_cycles 7 \
+    --min_protein_length 90 \
+    --max_protein_length 150 \
+    --high_iptm_threshold 0.7 \
+    --gpu_id 0
+```
+
+### Example 3: Hotspot-Directed Design
+
+```bash
+python boltz_ph/design.py \
+    --name PDL1_hotspot_design \
+    --protein_seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --contact_residues "54,56,66,115,121" \
+    --contact_cutoff 12.0 \
+    --num_designs 5 \
+    --num_cycles 7 \
+    --msa_mode mmseqs \
+    --high_iptm_threshold 0.7 \
+    --gpu_id 0
+```
+
+### Example 4: Refine Existing Binder
+
+```bash
+python boltz_ph/design.py \
+    --name refine_binder \
+    --seq "MKAELRQRVQELAEQARQKLEEAEQKRVQELAEQARQKLEE" \
+    --protein_seqs "TARGET_SEQUENCE" \
+    --num_designs 3 \
+    --num_cycles 5 \
+    --msa_mode mmseqs \
+    --high_iptm_threshold 0.85 \
+    --gpu_id 0
+```
+
+### Example 5: Small Molecule Binder
+
+```bash
+python boltz_ph/design.py \
+    --name SAM_binder \
+    --ligand_ccd SAM \
+    --num_designs 5 \
+    --num_cycles 7 \
+    --min_protein_length 130 \
+    --max_protein_length 150 \
+    --high_iptm_threshold 0.7 \
+    --gpu_id 0
+```
+
+### Example 6: Cyclic Peptide Binder
+
+```bash
+python boltz_ph/design.py \
+    --name cyclic_peptide \
+    --protein_seqs "TARGET_SEQUENCE" \
+    --cyclic \
+    --num_designs 5 \
+    --num_cycles 7 \
+    --min_protein_length 10 \
+    --max_protein_length 20 \
+    --percent_X 100 \
+    --msa_mode mmseqs \
+    --high_iptm_threshold 0.8 \
+    --gpu_id 0
+```
+
+### Example 7: Multimer Target (Homodimer)
+
+```bash
+python boltz_ph/design.py \
+    --name dimer_binder \
+    --protein_seqs "CHAIN_B_SEQ:CHAIN_B_SEQ" \
+    --num_designs 3 \
+    --num_cycles 7 \
+    --min_protein_length 90 \
+    --max_protein_length 150 \
+    --msa_mode mmseqs \
+    --high_iptm_threshold 0.7 \
+    --gpu_id 0
+```
+
+---
+
+## Tips & Best Practices
+
+1. **Start with lower thresholds** (`--high_iptm_threshold 0.6-0.7`) for initial exploration, then increase for production runs.
+
+2. **Alanine bias is ON by default** to avoid poly-alanine sequences. Use `--alanine_bias false` only if you specifically want to allow high alanine content.
+
+3. **More designs > more cycles**: Running 10 designs × 5 cycles often gives better diversity than 3 designs × 15 cycles.
+
+4. **For difficult targets**, increase `--max_contact_filter_retries` and use hotspots to guide the design.
+
+5. **Template mode** is recommended when you have high-confidence structures; sequence-only mode is better for exploring conformational flexibility.
+
+---
+
+## Modal Cloud Deployment
+
+Run Protein Hunter on cloud GPUs using [Modal](https://modal.com). This enables:
+
+- **Serverless execution** — No GPU setup, pay only for what you use
+- **Parallel designs** — Run multiple designs simultaneously across GPUs
+- **Template structures** — Full support for PDB template conditioning
+- **Real-time streaming** — Results sync to local filesystem as they complete
+
+### Modal Setup
+
+1. **Install Modal CLI:**
+
+```bash
+pip install modal
+modal setup  # Authenticate with Modal
+```
+
+2. **Initialize the cache** (run once, ~15 minutes):
+
+```bash
+modal run modal_boltz_ph_cli.py::init_cache
+```
+
+This downloads Boltz2 weights, CCD data, and LigandMPNN models to a persistent Modal volume.
+
+### Modal Quick Start
+
+```bash
+# Basic design run (alanine_bias is ON by default)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "my_design" \
+    --protein-seqs "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALEHHHHHH" \
+    --gpu H100
+
+# Quick test run (fewer designs)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "quick_test" \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-designs 5 \
+    --num-cycles 5 \
+    --gpu H100
+
+# Disable alanine bias (rare)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "test" \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --alanine-bias=false \
+    --gpu H100
+
+# List available GPUs
+modal run modal_boltz_ph_cli.py::list_gpus
+```
+
+### Modal CLI Arguments
+
+The Modal CLI uses the same arguments as the local pipeline with these differences:
+
+**Syntax:** Use kebab-case (`--protein-seqs`) instead of underscores (`--protein_seqs`)
+
+**Boolean flags:** Use `--flag=true` or `--flag=false` syntax (e.g., `--alanine-bias=false`)
+
+#### Modal-Specific Arguments
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--gpu` | str | `"H100"` | GPU type (see below) |
+| `--max-concurrent` | int | `0` | Max parallel GPUs (0 = unlimited) |
+| `--no-stream` | str | `"false"` | Disable real-time result streaming |
+| `--sync-interval` | float | `5.0` | Sync polling interval (seconds) |
+| `--output-dir` | str | `"./results_{name}"` | Local output directory |
+
+#### Available GPU Types
+
+| GPU | VRAM | Cost/hour |
+|-----|------|-----------|
+| `T4` | 16GB | $0.59 |
+| `L4` | 24GB | $0.80 |
+| `A10G` | 24GB | $1.10 |
+| `L40S` | 48GB | $1.95 |
+| `A100-40GB` | 40GB | $2.10 |
+| `A100-80GB` | 80GB | $2.50 |
+| `H100` | 80GB | $3.95 |
+
+### Parallelization & Concurrency
+
+Modal automatically parallelizes design runs across multiple GPUs:
+
+```bash
+# Run 16 designs in parallel (uses all available GPUs)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --num-designs 16 \
+    --gpu H100
+
+# Limit to 8 concurrent GPUs (runs in 2 batches)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --num-designs 16 \
+    --max-concurrent 8 \
+    --gpu H100
+```
+
+**How it works:**
+- Each design run executes as an independent Modal container
+- `--max-concurrent 0` (default): All designs run simultaneously
+- `--max-concurrent N`: Designs run in batches of N
+
+### Template Structures on Modal
+
+Provide a local PDB file as a template structure. The file is automatically uploaded to Modal containers:
+
+```bash
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "pMHC_binder" \
+    --protein-seqs "MHC_SEQ:BETA2M_SEQ:PEPTIDE_SEQ" \
+    --template-path "/path/to/structure.pdb" \
+    --template-cif-chain-id "A,B,C" \
+    --contact-residues "||1,2,3,4,5,6,7,8,9" \
+    --num-designs 10 \
+    --gpu H100
+```
+
+**Template chain mapping:**
+- `--template-cif-chain-id "A,B,C"` maps:
+  - Template chain A → Target chain B (first sequence)
+  - Template chain B → Target chain C (second sequence)
+  - Template chain C → Target chain D (third sequence)
+
+### Modal Examples
+
+#### Example 1: Basic Protein Binder
+
+```bash
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "PDL1_binder" \
+    --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --num-designs 10 \
+    --num-cycles 5 \
+    --min-protein-length 90 \
+    --max-protein-length 150 \
+    --high-iptm-threshold 0.7 \
+    --gpu H100 \
+    --output-dir ./PDL1_results
+```
+
+#### Example 2: Hotspot-Directed Design
+
+```bash
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "PDL1_hotspot" \
+    --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --contact-residues "54,56,66,115,121" \
+    --num-designs 10 \
+    --num-cycles 5 \
+    --high-iptm-threshold 0.7 \
+    --gpu H100
+```
+
+#### Example 3: pMHC Binder with Template
+
+```bash
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "pMHC_TCRm" \
+    --protein-seqs "MHC_ALPHA_SEQ:BETA2M_SEQ:PEPTIDE_SEQ" \
+    --template-path "./my_pmhc_structure.pdb" \
+    --template-cif-chain-id "A,B,C" \
+    --contact-residues "||1,2,3,4,5,6,7,8,9" \
+    --num-designs 16 \
+    --num-cycles 5 \
+    --max-concurrent 8 \
+    --min-protein-length 60 \
+    --max-protein-length 120 \
+    --high-iptm-threshold 0.8 \
+    --gpu H100 \
+    --output-dir ./pMHC_results
+```
+
+#### Example 4: Small Molecule Binder
+
+```bash
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "SAM_binder" \
+    --ligand-ccd "SAM" \
+    --num-designs 5 \
+    --num-cycles 5 \
+    --min-protein-length 130 \
+    --max-protein-length 150 \
+    --high-iptm-threshold 0.7 \
+    --gpu H100
+```
+
+
+### Modal Output Files
+
+Results are streamed to your local filesystem in real-time in the same structure as the local pipeline above. The folders are populated as each cycle completes across all parallel GPU workers. The .csv files are thread-safe and can be monitored during execution.
+
+### Running Without Streaming (Test Mode)
+
+For testing the local pipeline code on Modal without streaming or parallelization:
+
+```bash
+# Basic test (Boltz only) - uses PDL1 as default target
+modal run test_local_pipeline_modal.py --name my_test --num-designs 1 --num-cycles 2
+
+# Full pipeline with AF3 + PyRosetta validation (protein targets)
+modal run test_local_pipeline_modal.py \
+    --name full_test \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-designs 3 \
+    --num-cycles 5 \
+    --use-alphafold3-validation
+```
+
+This runs `boltz_ph/pipeline.py` directly on a single Modal GPU, useful for:
+- Testing local pipeline changes
+- Debugging without the complexity of parallel execution
+- Quick validation with minimal cycles
+- Testing the full pipeline (Boltz → AF3 → PyRosetta) end-to-end
+
+---
+
+## Legacy Code
+
+This fork contains code from the upstream repository that is **not actively maintained**:
+
+### `legacy_notebooks/`
+
+Colab notebooks from the upstream repository. These are preserved for reference but are **likely incompatible** with this fork due to CLI changes and new defaults. Use the examples in this README instead.
+
+### `chai_ph/`
+
+The Chai pathway from upstream. This fork focuses exclusively on Boltz with Modal cloud support. The Chai code has not been adapted for our changes. If you need Chai support, refer to the [upstream repository](https://github.com/yehlincho/Protein-Hunter).
+
+---
+
+## Citation
+
+```bibtex
 @article{cho2025protein,
   title={Protein Hunter: exploiting structure hallucination within diffusion for protein design},
   author={Cho, Yehlin and Rangel, Griffin and Bhardwaj, Gaurav and Ovchinnikov, Sergey},
   journal={bioRxiv},
-  pages={2025--10},
-  year={2025},
-  publisher={Cold Spring Harbor Laboratory}
+  year={2025}
 }
 ```
----
-
-## 📧 Contact & Support
-
-**Questions or Collaboration**: yehlin@mit.edu  
-**Issues**: Please report bugs and feature requests via GitHub Issues
-
----
-
-## ⚠️ Important Disclaimer
-
-> **EXPERIMENTAL SOFTWARE**: This pipeline is under active development and has **NOT been experimentally validated** in laboratory settings. We release this code to enable community contributions and collaborative development. Use at your own discretion and validate results independently.
 

@@ -101,14 +101,16 @@ def parse_args():
         type=str,
     )
     parser.add_argument("--use_alphafold3_validation", action="store_true", default=False)
-    parser.add_argument("--use_msa_for_af3", action="store_true")
+    parser.add_argument("--use_msa_for_af3", default=True, type=str2bool,
+        help="Reuse MSAs from design phase for AF3 validation (default: True)")
     parser.add_argument("--work_dir", default="", type=str)
 
     # temp and bias params
     parser.add_argument("--temperature", default=0.1, type=float)
     parser.add_argument("--alanine_bias_start", default=-0.5, type=float)
     parser.add_argument("--alanine_bias_end", default=-0.1, type=float)
-    parser.add_argument("--alanine_bias", action="store_true")
+    parser.add_argument("--alanine_bias", default=True, type=str2bool,
+        help="Apply alanine bias penalty during MPNN design (default: True)")
     parser.add_argument("--high_iptm_threshold", default=0.8, type=float)
     parser.add_argument("--high_plddt_threshold", default=0.8, type=float)
     # --- End Existing Arguments ---

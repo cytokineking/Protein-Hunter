@@ -31,6 +31,18 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+
+def str2bool(v):
+    """Convert string to boolean, matching local pipeline behavior."""
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', '0'):
+        return False
+    else:
+        raise ValueError(f'Boolean value expected, got: {v}')
+
 # =============================================================================
 # APP AND VOLUMES
 # =============================================================================
@@ -914,17 +926,17 @@ def main(
     min_protein_length: int = 100,
     max_protein_length: int = 150,
     percent_x: int = 90,
-    cyclic: bool = False,
-    exclude_p: bool = False,
+    cyclic: str = "false",
+    exclude_p: str = "false",
     # Hotspot/contact settings
     contact_residues: str = "",
     contact_cutoff: float = 15.0,
     max_contact_filter_retries: int = 6,
-    no_contact_filter: bool = False,
+    no_contact_filter: str = "false",
     # Sequence design (MPNN) settings
     temperature: float = 0.1,
     omit_aa: str = "C",
-    alanine_bias: bool = False,
+    alanine_bias: str = "true",
     alanine_bias_start: float = -0.5,
     alanine_bias_end: float = -0.1,
     # Quality thresholds
@@ -934,7 +946,8 @@ def main(
     diffuse_steps: int = 200,
     recycling_steps: int = 3,
     # Validation (matches main script)
-    use_alphafold3_validation: bool = False,
+    use_alphafold3_validation: str = "false",
+    use_msa_for_af3: str = "true",
 ):
     """
     Test the local Boltz pipeline on Modal with optional AF3/PyRosetta validation.
@@ -942,8 +955,10 @@ def main(
     Arguments mirror the main boltz_ph/design.py script for consistency.
     Use --use-alphafold3-validation to enable downstream validation (AF3 + PyRosetta for protein targets).
     
+    Note: alanine_bias is ON by default. Use --alanine-bias=false to disable.
+    
     Examples:
-        # Basic test with PDL1 target
+        # Basic test with PDL1 target (alanine_bias is ON by default)
         modal run test_local_pipeline_modal.py --protein-seqs "AFTVTVPK..."
         
         # Full pipeline with AF3 + PyRosetta validation
@@ -952,7 +967,6 @@ def main(
             --protein-seqs "TARGET_SEQ" \\
             --num-designs 3 \\
             --num-cycles 5 \\
-            --alanine-bias \\
             --use-alphafold3-validation
         
         # With hotspots
@@ -960,9 +974,22 @@ def main(
             --protein-seqs "TARGET_SEQ" \\
             --contact-residues "54,56,66" \\
             --use-alphafold3-validation
+        
+        # Disable alanine bias (rare)
+        modal run test_local_pipeline_modal.py \\
+            --protein-seqs "TARGET_SEQ" \\
+            --alanine-bias=false
     """
     import csv
     from io import StringIO
+    
+    # Convert string boolean parameters to actual booleans
+    cyclic = str2bool(cyclic)
+    exclude_p = str2bool(exclude_p)
+    alanine_bias = str2bool(alanine_bias)
+    no_contact_filter = str2bool(no_contact_filter)
+    use_alphafold3_validation = str2bool(use_alphafold3_validation)
+    use_msa_for_af3 = str2bool(use_msa_for_af3)
     
     # Validate GPU type
     valid_gpus = ["L4", "A10G", "A100-40GB", "A100-80GB", "H100"]
