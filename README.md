@@ -1,4 +1,4 @@
-# Protein Hunter — Boltz Edition ⚡
+# Protein Hunter (Cloud Edition)
 
 > **Fork Notice**: This is a fork of [Protein Hunter](https://github.com/yehlincho/Protein-Hunter) 
 > that concentrates on the Boltz pathway with enhanced Modal cloud support and improved output organization.
@@ -415,11 +415,90 @@ This controls the number of internal refinement passes within each structure pre
 
 ### AlphaFold3 Validation (Optional)
 
+AF3 validation provides orthogonal structure prediction to verify Boltz designs hold up when re-predicted by a different model. This is crucial because self-consistency (Boltz predicting its own designs) can be optimistically biased.
+
+#### What It Does
+
+When enabled, the pipeline:
+
+1. **HOLO prediction**: Re-predicts the binder+target complex using AlphaFold3
+2. **APO prediction** (protein targets): Predicts the binder *alone* to verify it folds independently
+3. **PyRosetta scoring** (protein targets): Calculates interface properties and filters designs
+
+#### Why Use It
+
+- **Cross-validation**: Different model architecture reduces overfitting to Boltz's biases
+- **Confidence calibration**: AF3's confidence metrics (ipTM, pLDDT) are well-validated experimentally
+- **Physics-based filtering**: PyRosetta catches designs with suboptimal binding energetics, shape complementarity, hydrogen-bonding networks, and/or surface hydrophobicity 
+
+#### CLI Arguments
+
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--use_alphafold3_validation` | flag | `False` | Enable AF3 cross-validation |
-| `--alphafold_dir` | str | `"~/alphafold3"` | AF3 installation path |
-| `--use_msa_for_af3` | str | **`True`** | Reuse MSAs from design phase for AF3 validation |
+| `--use_alphafold3_validation` | flag | `False` | Enable AF3 cross-validation pipeline |
+| `--alphafold_dir` | str | `"~/alphafold3"` | AF3 installation path (local only) |
+| `--use_msa_for_af3` | bool | **`True`** | Reuse MSAs from design phase for AF3 |
+
+#### APO Stability Check
+
+For protein targets, the pipeline predicts the binder structure *without* the target present. This checks:
+
+1. **Expression viability** — Unfolded binders are difficult to express and purify
+2. **Binding thermodynamics** — Large conformational changes upon binding incur an **entropy penalty** (ΔS < 0), making binding less thermodynamically favorable. Designs with low `apo_holo_rmsd` bind via "lock-and-key" rather than "induced fit"
+
+#### PyRosetta Metrics
+
+PyRosetta runs automatically for protein targets when AF3 validation is enabled:
+
+| Metric | Good Value | Description |
+|--------|-----------|-------------|
+| `surface_hydrophobicity` | < 0.30 | Surface hydrophobic fraction. Lower = better expressibility, less non-specific "stickiness" |
+| `interface_sc` | > 0.65 | Shape complementarity (0-1). Higher = tighter geometric fit at interface |
+| `interface_dG` | < -15 kcal/mol | Binding free energy. More negative = stronger binding |
+| `interface_nres` | > 12 | Number of interface residues. More contacts = larger binding surface |
+| `interface_delta_unsat_hbonds` | < 2 | Buried unsatisfied H-bonds (BUNS). Lower = better H-bond network |
+| `apo_holo_rmsd` | < 2.0 Å | RMSD between bound and unbound binder. Lower = pre-organized for binding (no entropy penalty) |
+
+#### Acceptance Criteria
+
+Designs are accepted if they pass ALL of the following (protein targets):
+
+**AF3 confidence:**
+- `af3_iptm >= 0.7` (interface confidence)
+- `af3_plddt >= 80` (structure confidence)
+
+**PyRosetta filters:**
+- `surface_hydrophobicity < 0.35` (expressibility, reduces non-specific binding)
+- `interface_sc > 0.55` (shape complementarity — tight geometric fit)
+- `interface_dG < 0` (favorable binding energy)
+- `interface_nres > 7` (sufficient interface contacts)
+- `interface_delta_unsat_hbonds < 4` (good H-bond satisfaction)
+- `apo_holo_rmsd < 3.5` (maintains fold without target, minimal entropy penalty)
+
+#### Setup Requirements
+
+**Local pipeline**: Requires local AF3 and PyRosetta installations. See [LOCAL_SETUP_GUIDE.md](LOCAL_SETUP_GUIDE.md) for details.
+
+**Modal pipeline**: Uses containerized AF3 (`docker.io/aaronr24/alphafold3-modal:latest`) and PyRosetta — no local installation needed.
+
+#### Example: Full Validation Pipeline
+
+```bash
+# Local
+python boltz_ph/design.py \
+    --name PDL1_validated \
+    --protein_seqs "AFTVTVPK..." \
+    --num_designs 5 \
+    --use_alphafold3_validation \
+    --alphafold_dir ~/alphafold3
+
+# Modal (PyRosetta runs automatically for protein targets)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name PDL1_validated \
+    --protein-seqs "AFTVTVPK..." \
+    --num-designs 5 \
+    --use-alphafold3-validation
+```
 
 ---
 
@@ -527,15 +606,16 @@ Per-residue confidence score from Boltz. Range: 0-1 (higher is better). Values >
 
 ### PyRosetta Metrics (Validation Only)
 
-When AF3 validation is enabled for protein targets, PyRosetta calculates:
+When AF3 validation is enabled for protein targets, PyRosetta calculates interface energetics. See the [AlphaFold3 Validation](#alphafold3-validation-optional) section for full details.
 
-| Metric | Description |
-|--------|-------------|
-| `interface_dG` | Binding energy (kcal/mol) - more negative is better |
-| `interface_sc` | Shape complementarity (0-1) - higher is better |
-| `interface_nres` | Number of interface residues |
-| `interface_delta_unsat_hbonds` | Buried unsatisfied H-bonds - lower is better |
-| `apo_holo_rmsd` | RMSD between bound and unbound binder |
+| Metric | Good Value | Description |
+|--------|-----------|-------------|
+| `surface_hydrophobicity` | < 0.30 | Hydrophobic surface fraction — lower = better expressibility |
+| `interface_sc` | > 0.65 | Shape complementarity — higher = tighter geometric fit |
+| `interface_dG` | < -15 kcal/mol | Binding free energy — more negative = stronger binding |
+| `interface_nres` | > 12 | Interface residue count — more = larger binding surface |
+| `interface_delta_unsat_hbonds` | < 2 | Buried unsatisfied H-bonds — lower = better H-bond network |
+| `apo_holo_rmsd` | < 2.0 Å | Bound vs unbound RMSD — lower = pre-organized (no entropy penalty) |
 
 ---
 
