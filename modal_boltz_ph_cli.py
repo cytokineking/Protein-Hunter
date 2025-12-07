@@ -25,9 +25,9 @@ Usage:
 """
 
 import datetime
-import shutil
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -45,7 +45,7 @@ def str2bool(v):
 
 
 # Import Modal app and shared resources
-from modal_boltz_ph.app import app, results_dict, GPU_TYPES, DEFAULT_GPU
+from modal_boltz_ph.app import app, GPU_TYPES, DEFAULT_GPU
 
 # Import functions from modules
 from modal_boltz_ph.design import GPU_FUNCTIONS
@@ -57,8 +57,44 @@ from modal_boltz_ph.validation_af3 import (
 )
 from modal_boltz_ph.scoring_pyrosetta import run_pyrosetta_single
 from modal_boltz_ph.cache import initialize_cache, _upload_af3_weights_impl
-from modal_boltz_ph.sync import _sync_worker
+from modal_boltz_ph.sync import (
+    _sync_worker,
+    _stream_best_design,
+    _stream_af3_result,
+    _stream_final_result,
+)
 from modal_boltz_ph.tests import test_af3_image, _test_gpu
+
+
+# =============================================================================
+# CSV COLUMN DEFINITIONS
+# =============================================================================
+
+# Fields to exclude from CSV outputs (large data or internal fields)
+CSV_EXCLUDE = {
+    "relaxed_pdb", "_target_msas", "af3_confidence_json", "af3_structure",
+    "apo_structure", "best_pdb", "cycles", "target_msas"
+}
+
+# Unified column schema for best_designs, accepted_stats, and rejected_stats CSVs
+# These three CSVs use identical columns for consistency
+UNIFIED_DESIGN_COLUMNS = [
+    # Identity
+    "design_id", "design_num", "cycle",
+    # Binder info
+    "binder_sequence", "binder_length", "cyclic", "alanine_count", "alanine_pct",
+    # Boltz design metrics (prefixed for clarity)
+    "boltz_iptm", "boltz_ipsae", "boltz_plddt", "boltz_iplddt",
+    # AF3 validation metrics
+    "af3_iptm", "af3_ipsae", "af3_ptm", "af3_plddt",
+    # PyRosetta interface metrics
+    "interface_dG", "interface_sc", "interface_nres", "interface_dSASA",
+    "interface_packstat", "interface_hbonds", "interface_delta_unsat_hbonds",
+    # Secondary quality metrics
+    "apo_holo_rmsd", "i_pae", "rg",
+    # Acceptance status
+    "accepted", "rejection_reason",
+]
 
 
 # =============================================================================
@@ -364,38 +400,237 @@ def run_pipeline(
         sync_thread.start()
         print(f"Background sync started (polling every {sync_interval}s)\n")
     
-    # Execute tasks in parallel
-    if max_concurrent > 0:
-        print(f"Submitting {len(tasks)} design task(s) to Modal (max {max_concurrent} concurrent GPUs)...")
-    else:
-        print(f"Submitting {len(tasks)} design task(s) to Modal (unlimited concurrency)...")
+    # ==========================================================================
+    # END-TO-END PER-DESIGN ORCHESTRATION
+    # Each design completes: Boltz → AF3 → APO → PyRosetta before next slot freed
+    # ==========================================================================
     
-    all_results = []
-    completed = 0
+    # Select AF3 functions (if needed)
+    af3_gpu_to_use = gpu if gpu in AF3_GPU_FUNCTIONS else "A100-80GB"
+    af3_fn = AF3_GPU_FUNCTIONS.get(af3_gpu_to_use, run_af3_single_A100_80GB)
+    af3_apo_fn = AF3_APO_GPU_FUNCTIONS.get(af3_gpu_to_use, run_af3_apo_A100_80GB)
     
-    if max_concurrent > 0 and max_concurrent < len(tasks):
-        # Batched execution
-        def batch_tasks(task_list, batch_size):
-            for i in range(0, len(task_list), batch_size):
-                yield task_list[i:i + batch_size]
+    def _run_full_pipeline_for_design(task_input: dict) -> dict:
+        """
+        Run complete pipeline for one design: Boltz → AF3 → APO → PyRosetta.
         
-        for batch_idx, batch in enumerate(batch_tasks(tasks, max_concurrent)):
-            batch_start = batch_idx * max_concurrent
-            print(f"\n--- Batch {batch_idx + 1}: designs {batch_start}-{batch_start + len(batch) - 1} ---")
+        All stages run sequentially for this design before the thread is freed.
+        """
+        design_idx = task_input.get("design_idx", 0)
+        
+        # ========== STAGE 1: BOLTZ DESIGN ==========
+        try:
+            design_result = gpu_fn.remote(task_input)
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": f"Design failed: {e}",
+                "design_idx": design_idx,
+                "stage_failed": "design",
+                "best_iptm": 0,
+            }
+        
+        if design_result.get("status") != "success":
+            return {**design_result, "stage_failed": "design"}
+        
+        # Stream best design result
+        best_cycle = design_result.get("best_cycle", 0)
+        design_id = f"{name}_d{design_idx}_c{best_cycle}"
+        best_seq = design_result.get("best_seq", "")
+        best_pdb = design_result.get("best_pdb", "")
+        
+        # Get metrics from best cycle
+        best_cycle_data = None
+        for cycle_data in design_result.get("cycles", []):
+            if cycle_data.get("cycle") == best_cycle:
+                best_cycle_data = cycle_data
+                break
+        
+        if stream and best_seq:
+            _stream_best_design(
+                run_id=run_id,
+                design_idx=design_idx,
+                design_id=design_id,
+                best_cycle=best_cycle,
+                best_seq=best_seq,
+                best_pdb=best_pdb,
+                metrics={
+                    "iptm": design_result.get("best_iptm", 0.0),
+                    "ipsae": best_cycle_data.get("ipsae", 0.0) if best_cycle_data else 0.0,
+                    "plddt": best_cycle_data.get("plddt", 0.0) if best_cycle_data else 0.0,
+                    "iplddt": best_cycle_data.get("iplddt", 0.0) if best_cycle_data else 0.0,
+                    "alanine_count": best_cycle_data.get("alanine_count", 0) if best_cycle_data else 0,
+                    "cyclic": task_input.get("cyclic", False),
+                },
+            )
+        
+        # If no AF3 validation requested, return design result only
+        if not use_alphafold3_validation:
+            return design_result
+        
+        # ========== STAGE 2: AF3 VALIDATION ==========
+        binder_seq = best_seq
+        target_seq = task_input.get("protein_seqs", "")
+        target_msas = design_result.get("target_msas", {})
+        target_msa = target_msas.get("B") if use_msa_for_af3 else None
+        
+        print(f"  [{design_id}] Starting AF3 validation...")
+        
+        try:
+            af3_result = af3_fn.remote(
+                design_id, binder_seq, target_seq,
+                "A", "B",  # binder_chain, target_chain
+                target_msa,
+                "reuse" if use_msa_for_af3 else "none",
+                None, None  # template_path, template_chain_id
+            )
+        except Exception as e:
+            print(f"  [{design_id}] AF3 failed: {e}")
+            return {**design_result, "design_id": design_id, "af3_error": str(e), "stage_failed": "af3"}
+        
+        if not af3_result.get("af3_structure"):
+            return {**design_result, "design_id": design_id, **af3_result, "stage_failed": "af3"}
+        
+        print(f"  [{design_id}] AF3 complete: ipTM={af3_result.get('af3_iptm', 0):.3f}, ipSAE={af3_result.get('af3_ipsae', 0):.3f}")
+        
+        # Stream AF3 result
+        if stream:
+            _stream_af3_result(
+                run_id=run_id,
+                design_idx=design_idx,
+                design_id=design_id,
+                af3_iptm=af3_result.get("af3_iptm", 0.0),
+                af3_ipsae=af3_result.get("af3_ipsae", 0.0),
+                af3_ptm=af3_result.get("af3_ptm", 0.0),
+                af3_plddt=af3_result.get("af3_plddt", 0.0),
+                af3_structure=af3_result.get("af3_structure", ""),
+            )
+        
+        # ========== STAGE 3: APO PREDICTION (protein targets only) ==========
+        apo_structure = None
+        if target_type == "protein":
+            try:
+                apo_result = af3_apo_fn.remote(design_id, binder_seq, "A")
+                apo_structure = apo_result.get("apo_structure")
+                if apo_structure:
+                    print(f"  [{design_id}] APO structure generated")
+            except Exception as e:
+                # APO failure is non-fatal, continue without RMSD
+                print(f"  [{design_id}] APO prediction failed (non-fatal): {e}")
+        
+        # ========== STAGE 4: PYROSETTA SCORING (protein targets only) ==========
+        pr_result = {"accepted": True}  # Default for non-protein targets
+        if target_type == "protein":
+            print(f"  [{design_id}] Running PyRosetta scoring...")
+            try:
+                pr_result = run_pyrosetta_single.remote(
+                    design_id,
+                    af3_result.get("af3_structure"),
+                    af3_result.get("af3_iptm", 0),
+                    af3_result.get("af3_ptm", 0),
+                    af3_result.get("af3_plddt", 0),
+                    "A", "B",  # binder_chain, target_chain
+                    apo_structure,
+                    af3_result.get("af3_confidence_json"),
+                    target_type,
+                )
+                status_str = "ACCEPTED" if pr_result.get("accepted") else f"REJECTED ({pr_result.get('rejection_reason', 'unknown')})"
+                print(f"  [{design_id}] PyRosetta: dG={pr_result.get('interface_dG', 0):.1f}, SC={pr_result.get('interface_sc', 0):.2f} → {status_str}")
+            except Exception as e:
+                print(f"  [{design_id}] PyRosetta failed: {e}")
+                pr_result = {"error": str(e), "accepted": False, "rejection_reason": f"PyRosetta error: {e}"}
+        
+        # Stream final result (after PyRosetta scoring)
+        if stream and target_type == "protein":
+            _stream_final_result(
+                run_id=run_id,
+                design_idx=design_idx,
+                design_id=design_id,
+                accepted=pr_result.get("accepted", False),
+                rejection_reason=pr_result.get("rejection_reason", ""),
+                metrics={
+                    "interface_dG": pr_result.get("interface_dG", 0.0),
+                    "interface_sc": pr_result.get("interface_sc", 0.0),
+                    "interface_nres": pr_result.get("interface_nres", 0),
+                    "interface_dSASA": pr_result.get("interface_dSASA", 0.0),
+                    "interface_packstat": pr_result.get("interface_packstat", 0.0),
+                    "interface_dG_SASA_ratio": pr_result.get("interface_dG_SASA_ratio", 0.0),
+                    "interface_interface_hbonds": pr_result.get("interface_interface_hbonds", 0),
+                    "interface_delta_unsat_hbonds": pr_result.get("interface_delta_unsat_hbonds", 0),
+                    "interface_hydrophobicity": pr_result.get("interface_hydrophobicity", 0.0),
+                    "surface_hydrophobicity": pr_result.get("surface_hydrophobicity", 0.0),
+                    "binder_sasa": pr_result.get("binder_sasa", 0.0),
+                    "interface_fraction": pr_result.get("interface_fraction", 0.0),
+                    "interface_hbond_percentage": pr_result.get("interface_hbond_percentage", 0.0),
+                    "interface_delta_unsat_hbonds_percentage": pr_result.get("interface_delta_unsat_hbonds_percentage", 0.0),
+                    "apo_holo_rmsd": pr_result.get("apo_holo_rmsd"),
+                    "i_pae": pr_result.get("i_pae"),
+                    "rg": pr_result.get("rg"),
+                },
+                relaxed_pdb=pr_result.get("relaxed_pdb", ""),
+            )
+        
+        # ========== COMBINE ALL RESULTS ==========
+        
+        return {
+            # Design results
+            **design_result,
+            # Identity
+            "design_id": design_id,
+            "design_num": design_idx,
+            "cycle": best_cycle,
+            # AF3 results
+            "af3_iptm": af3_result.get("af3_iptm", 0),
+            "af3_ipsae": af3_result.get("af3_ipsae", 0),
+            "af3_ptm": af3_result.get("af3_ptm", 0),
+            "af3_plddt": af3_result.get("af3_plddt", 0),
+            "af3_structure": af3_result.get("af3_structure"),
+            "af3_confidence_json": af3_result.get("af3_confidence_json"),
+            # APO results
+            "apo_structure": apo_structure,
+            # PyRosetta results (merge all keys except design_id)
+            **{k: v for k, v in pr_result.items() if k != "design_id"},
+            # Binder metadata
+            "binder_sequence": binder_seq,
+            "binder_length": len(binder_seq) if binder_seq else 0,
+            "ipsae": best_cycle_data.get("ipsae", 0.0) if best_cycle_data else 0.0,
+            "plddt": best_cycle_data.get("plddt", 0.0) if best_cycle_data else 0.0,
+            "iplddt": best_cycle_data.get("iplddt", 0.0) if best_cycle_data else 0.0,
+        }
+    
+    # Execute with concurrency limit
+    all_results = []
+    pipeline_mode = "full pipeline (Boltz→AF3→PyRosetta)" if use_alphafold3_validation else "design only"
+    
+    if max_concurrent > 0:
+        print(f"Executing {len(tasks)} tasks [{pipeline_mode}] (concurrency: {max_concurrent} GPUs)...\n")
+        
+        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            futures = {executor.submit(_run_full_pipeline_for_design, t): t for t in tasks}
             
-            for result in gpu_fn.map(batch):
+            for i, future in enumerate(as_completed(futures)):
+                result = future.result()
                 all_results.append(result)
-                completed += 1
+                
+                # Print completion status
                 status = "✓" if result.get("status") == "success" else "✗"
-                iptm = result.get("best_iptm", 0)
-                print(f"[{completed}/{len(tasks)}] {status} Design {result.get('design_idx')}: best ipTM={iptm:.3f}")
+                design_idx = result.get("design_idx", "?")
+                
+                if use_alphafold3_validation and result.get("af3_iptm") is not None:
+                    accepted = "✓ ACCEPTED" if result.get("accepted") else "✗ REJECTED"
+                    print(f"\n[{i+1}/{len(tasks)}] {status} Design {design_idx} COMPLETE: "
+                          f"Boltz={result.get('best_iptm', 0):.3f}, AF3={result.get('af3_iptm', 0):.3f}, "
+                          f"dG={result.get('interface_dG', 0):.1f} → {accepted}\n")
+                else:
+                    print(f"[{i+1}/{len(tasks)}] {status} Design {design_idx}: ipTM={result.get('best_iptm', 0):.3f}")
     else:
-        # Unlimited concurrency
+        # Unlimited concurrency (design only mode)
+        print(f"Executing {len(tasks)} tasks [{pipeline_mode}] (unlimited concurrency)...")
         for i, result in enumerate(gpu_fn.map(tasks)):
             all_results.append(result)
             status = "✓" if result.get("status") == "success" else "✗"
             iptm = result.get("best_iptm", 0)
-            print(f"[{i+1}/{len(tasks)}] {status} Design {result.get('design_idx')}: best ipTM={iptm:.3f}")
+            print(f"[{i+1}/{len(tasks)}] {status} Design {result.get('design_idx')}: ipTM={iptm:.3f}")
     
     # Stop sync thread
     if sync_thread:
@@ -403,336 +638,203 @@ def run_pipeline(
         stop_sync.set()
         sync_thread.join(timeout=30)
     
-    # Save results
+    # ==========================================================================
+    # UNIFIED RESULT SAVING
+    # Handles both design-only and full pipeline (AF3+PyRosetta) results
+    # ==========================================================================
     print(f"\nSaving results to {output_path}...")
-
+    
+    # Create all directories
     designs_dir = output_path / "designs"
-    designs_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save best designs
     best_dir = output_path / "best_designs"
+    af3_dir = output_path / "af3_validation"
+    accepted_dir = output_path / "accepted_designs"
+    rejected_dir = output_path / "rejected"
+    
+    designs_dir.mkdir(parents=True, exist_ok=True)
     best_dir.mkdir(exist_ok=True)
+    
+    if use_alphafold3_validation:
+        af3_dir.mkdir(exist_ok=True)
+        accepted_dir.mkdir(exist_ok=True)
+        rejected_dir.mkdir(exist_ok=True)
+    
+    # Process results
     best_rows = []
-
+    accepted = []
+    rejected = []
+    
     for r in all_results:
-        if r.get("best_pdb") and r.get("best_seq"):
-            design_idx = r.get("design_idx", 0)
-            best_cycle = r.get("best_cycle", 0)
-            design_id = f"{name}_d{design_idx}_c{best_cycle}"
-
-            pdb_file = best_dir / f"{design_id}.pdb"
-            pdb_file.write_text(r["best_pdb"])
-
-            # Find best cycle metrics
-            best_cycle_data = None
-            for cycle_data in r.get("cycles", []):
-                if cycle_data.get("cycle") == best_cycle:
-                    best_cycle_data = cycle_data
-                    break
-
-            seq = r.get("best_seq", "")
-            binder_length = len(seq) if seq else 0
-            alanine_count = best_cycle_data.get("alanine_count", 0) if best_cycle_data else 0
-            alanine_pct = (alanine_count / binder_length * 100) if binder_length > 0 else 0.0
-
-            best_rows.append({
-                "design_id": design_id,
-                "design_num": design_idx,
-                "cycle": best_cycle,
-                "binder_sequence": seq,
-                "binder_length": binder_length,
-                "cyclic": cyclic,
-                "iptm": r.get("best_iptm", 0.0),
-                "ipsae": best_cycle_data.get("ipsae", 0.0) if best_cycle_data else 0.0,
-                "plddt": best_cycle_data.get("plddt", 0.0) if best_cycle_data else 0.0,
-                "iplddt": best_cycle_data.get("iplddt", 0.0) if best_cycle_data else 0.0,
-                "alanine_count": alanine_count,
-                "alanine_pct": round(alanine_pct, 2),
-                "target_seqs": protein_seqs or "",
-                "contact_residues": contact_residues or "",
-                "msa_mode": msa_mode,
-                "ligand_smiles": ligand_smiles or "",
-                "ligand_ccd": ligand_ccd or "",
-                "nucleic_seq": nucleic_seq or "",
-                "nucleic_type": nucleic_type or "",
-                "template_path": template_path or "",
-                "template_mapping": template_cif_chain_id or "",
-                # MSA content for AF3 validation (not saved to CSV)
-                "_target_msas": r.get("target_msas", {}),
-            })
-
+        if r.get("status") != "success":
+            continue
+        
+        design_idx = r.get("design_idx", 0)
+        best_cycle = r.get("best_cycle", 0)
+        design_id = r.get("design_id", f"{name}_d{design_idx}_c{best_cycle}")
+        
+        # Save best design PDB (from Boltz)
+        if r.get("best_pdb"):
+            (best_dir / f"{design_id}.pdb").write_text(r["best_pdb"])
+        
+        # Save AF3 structure (if available)
+        if r.get("af3_structure"):
+            (af3_dir / f"{design_id}_af3.cif").write_text(r["af3_structure"])
+        
+        # Save relaxed PDB to accepted/rejected (if PyRosetta ran)
+        if use_alphafold3_validation and r.get("relaxed_pdb"):
+            if r.get("accepted"):
+                (accepted_dir / f"{design_id}_relaxed.pdb").write_text(r["relaxed_pdb"])
+                accepted.append(r)
+            else:
+                (rejected_dir / f"{design_id}_relaxed.pdb").write_text(r["relaxed_pdb"])
+                rejected.append(r)
+        elif use_alphafold3_validation and r.get("af3_structure"):
+            # No relaxed PDB but have AF3 structure - still classify
+            if r.get("accepted"):
+                accepted.append(r)
+            else:
+                rejected.append(r)
+        
+        # Get cycle data for metrics
+        best_cycle_data = None
+        for cycle_data in r.get("cycles", []):
+            if cycle_data.get("cycle") == best_cycle:
+                best_cycle_data = cycle_data
+                break
+        
+        seq = r.get("best_seq", "")
+        binder_length = len(seq) if seq else 0
+        alanine_count = best_cycle_data.get("alanine_count", 0) if best_cycle_data else 0
+        alanine_pct = (alanine_count / binder_length * 100) if binder_length > 0 else 0.0
+        
+        # Build unified row with boltz_ prefix for design-stage metrics
+        best_rows.append({
+            # Identity
+            "design_id": design_id,
+            "design_num": design_idx,
+            "cycle": best_cycle,
+            # Binder info
+            "binder_sequence": seq,
+            "binder_length": binder_length,
+            "cyclic": cyclic,
+            "alanine_count": alanine_count,
+            "alanine_pct": round(alanine_pct, 2),
+            # Boltz design metrics (prefixed)
+            "boltz_iptm": r.get("best_iptm", 0.0),
+            "boltz_ipsae": r.get("ipsae", best_cycle_data.get("ipsae", 0.0) if best_cycle_data else 0.0),
+            "boltz_plddt": r.get("plddt", best_cycle_data.get("plddt", 0.0) if best_cycle_data else 0.0),
+            "boltz_iplddt": r.get("iplddt", best_cycle_data.get("iplddt", 0.0) if best_cycle_data else 0.0),
+            # AF3 validation metrics
+            "af3_iptm": r.get("af3_iptm"),
+            "af3_ipsae": r.get("af3_ipsae"),
+            "af3_ptm": r.get("af3_ptm"),
+            "af3_plddt": r.get("af3_plddt"),
+            # PyRosetta interface metrics
+            "interface_dG": r.get("interface_dG"),
+            "interface_sc": r.get("interface_sc"),
+            "interface_nres": r.get("interface_nres"),
+            "interface_dSASA": r.get("interface_dSASA"),
+            "interface_packstat": r.get("interface_packstat"),
+            "interface_hbonds": r.get("interface_interface_hbonds"),
+            "interface_delta_unsat_hbonds": r.get("interface_delta_unsat_hbonds"),
+            # Secondary quality metrics
+            "apo_holo_rmsd": r.get("apo_holo_rmsd"),
+            "i_pae": r.get("i_pae"),
+            "rg": r.get("rg"),
+            # Acceptance status
+            "accepted": r.get("accepted"),
+            "rejection_reason": r.get("rejection_reason"),
+        })
+    
+    # Helper function to reorder columns using unified schema
+    def reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Reorder DataFrame columns to match UNIFIED_DESIGN_COLUMNS."""
+        ordered_cols = [c for c in UNIFIED_DESIGN_COLUMNS if c in df.columns]
+        extra_cols = [c for c in df.columns if c not in UNIFIED_DESIGN_COLUMNS]
+        return df[ordered_cols + extra_cols]
+    
+    # Save best_designs CSV with consistent column ordering
     if best_rows:
         best_df = pd.DataFrame(best_rows)
-        csv_columns = [c for c in best_df.columns if not c.startswith("_")]
-        best_df[csv_columns].to_csv(best_dir / "best_designs.csv", index=False)
+        best_df = reorder_columns(best_df)
+        # Remove None columns for cleaner CSV
+        best_df = best_df.dropna(axis=1, how='all')
+        best_df.to_csv(best_dir / "best_designs.csv", index=False)
         print(f"  ✓ best_designs/ ({len(best_rows)} PDBs + best_designs.csv)")
-
+    
     design_pdbs = list(designs_dir.glob("*.pdb"))
-    print("  ✓ designs/ ({} PDBs + design_stats.csv)".format(len(design_pdbs)))
-
-    # Print summary
+    print(f"  ✓ designs/ ({len(design_pdbs)} PDBs)")
+    
+    # Save AF3 results CSV (if AF3 ran) - includes af3_ipsae
+    if use_alphafold3_validation:
+        af3_rows = [{"design_id": r.get("design_id"), "af3_iptm": r.get("af3_iptm"),
+                     "af3_ipsae": r.get("af3_ipsae"), "af3_ptm": r.get("af3_ptm"),
+                     "af3_plddt": r.get("af3_plddt")}
+                    for r in all_results if r.get("af3_iptm") is not None]
+        if af3_rows:
+            pd.DataFrame(af3_rows).to_csv(af3_dir / "af3_results.csv", index=False)
+            print(f"  ✓ af3_validation/ ({len(af3_rows)} structures)")
+        
+        # Save accepted/rejected CSVs using unified schema (filtered from best_rows)
+        # This ensures identical columns across best_designs, accepted_stats, rejected_stats
+        accepted_rows = [row for row in best_rows if row.get("accepted") is True]
+        rejected_rows = [row for row in best_rows if row.get("accepted") is False]
+        
+        if accepted_rows:
+            accepted_df = pd.DataFrame(accepted_rows)
+            accepted_df = reorder_columns(accepted_df)
+            accepted_df = accepted_df.dropna(axis=1, how='all')
+            accepted_df.to_csv(accepted_dir / "accepted_stats.csv", index=False)
+            print(f"  ✓ accepted_designs/ ({len(accepted_rows)} designs)")
+        
+        if rejected_rows:
+            rejected_df = pd.DataFrame(rejected_rows)
+            rejected_df = reorder_columns(rejected_df)
+            rejected_df = rejected_df.dropna(axis=1, how='all')
+            rejected_df.to_csv(rejected_dir / "rejected_stats.csv", index=False)
+            print(f"  ✓ rejected/ ({len(rejected_rows)} designs)")
+    
+    # ==========================================================================
+    # PRINT SUMMARY
+    # ==========================================================================
     print(f"\n{'='*70}")
     print("SUMMARY")
     print(f"{'='*70}")
+    
     successful = [r for r in all_results if r.get("status") == "success"]
-    print(f"Successful: {len(successful)}/{len(all_results)}")
+    print(f"Successful designs: {len(successful)}/{len(all_results)}")
+    
     if successful:
         best_overall = max(successful, key=lambda r: r.get("best_iptm", 0))
-        print(f"Best overall: {name}_d{best_overall['design_idx']} with ipTM={best_overall['best_iptm']:.3f}")
-    print(f"Total cycles saved: {len(design_pdbs)}")
-    print(f"Best designs: {len(best_rows)}")
-    print("\nOutput structure:")
-    print(f"  {output_path}/")
-    print("  ├── designs/           # ALL cycles (PDBs + design_stats.csv)")
-    print("  └── best_designs/      # Best cycle per design run")
-    print(f"\nResults saved to: {output_path}")
+        print(f"Best Boltz ipTM: {name}_d{best_overall['design_idx']} = {best_overall['best_iptm']:.3f}")
     
-    # ===========================================
-    # OPTIONAL: AF3 VALIDATION
-    # ===========================================
-    if use_alphafold3_validation and best_rows:
-        print(f"\n{'='*70}")
-        print("ALPHAFOLD3 VALIDATION (Parallel)")
-        print(f"{'='*70}")
+    if use_alphafold3_validation:
+        af3_results = [r for r in successful if r.get("af3_iptm") is not None]
+        if af3_results:
+            best_af3 = max(af3_results, key=lambda r: r.get("af3_iptm", 0))
+            print(f"Best AF3 ipTM: {best_af3.get('design_id')} = {best_af3.get('af3_iptm', 0):.3f}")
         
-        af3_gpu_to_use = gpu if gpu in AF3_GPU_FUNCTIONS else "A100-80GB"
-        af3_fn = AF3_GPU_FUNCTIONS.get(af3_gpu_to_use, run_af3_single_A100_80GB)
+        print("\nPyRosetta Filtering:")
+        print(f"  Accepted: {len(accepted)}")
+        print(f"  Rejected: {len(rejected)}")
         
-        # Build AF3 tasks
-        af3_tasks = []
-        for row in best_rows:
-            target_msas = row.get("_target_msas", {})
-            target_msa = target_msas.get("B")
-            
-            if target_msa and use_msa_for_af3:
-                print(f"  {row['design_id']}: Using MSA ({len(target_msa)} chars)")
-            elif use_msa_for_af3:
-                print(f"  {row['design_id']}: No MSA available, using query-only")
-            
-            row_template_path = row.get("template_path", "") or template_path or ""
-            row_template_chain = row.get("template_mapping", "") or template_cif_chain_id or ""
-            
-            af3_tasks.append({
-                "design_id": row["design_id"],
-                "binder_seq": row["binder_sequence"],
-                "target_seq": row["target_seqs"],
-                "binder_chain": "A",
-                "target_chain": "B",
-                "target_msa": target_msa if use_msa_for_af3 else None,
-                "af3_msa_mode": "reuse" if use_msa_for_af3 else "none",
-                "template_path": row_template_path if row_template_path else None,
-                "template_chain_id": row_template_chain if row_template_chain else None,
-            })
-        
-        print(f"Submitting {len(af3_tasks)} designs for AF3 validation...")
-        print(f"GPU: {af3_gpu_to_use}")
-        print(f"MSA reuse: {use_msa_for_af3}")
-        if template_path:
-            print(f"Template: {template_path} (chain {template_cif_chain_id})")
-        
-        try:
-            af3_results_list = list(af3_fn.starmap([
-                (t["design_id"], t["binder_seq"], t["target_seq"], t["binder_chain"], t["target_chain"], 
-                 t["target_msa"], t["af3_msa_mode"], t["template_path"], t["template_chain_id"])
-                for t in af3_tasks
-            ]))
-            
-            af3_results = {r["design_id"]: r for r in af3_results_list}
-            
-            # Save AF3 results
-            af3_dir = output_path / "af3_validation"
-            af3_dir.mkdir(exist_ok=True)
-            
-            for design_id, result in af3_results.items():
-                if result.get("af3_structure"):
-                    cif_file = af3_dir / f"{design_id}_af3.cif"
-                    cif_file.write_text(result["af3_structure"])
-            
-            af3_rows = []
-            for design_id, result in af3_results.items():
-                af3_rows.append({
-                    "design_id": design_id,
-                    "af3_iptm": result.get("af3_iptm", 0),
-                    "af3_ptm": result.get("af3_ptm", 0),
-                    "af3_plddt": result.get("af3_plddt", 0),
-                })
-            
-            if af3_rows:
-                af3_df = pd.DataFrame(af3_rows)
-                af3_df.to_csv(af3_dir / "af3_results.csv", index=False)
-            
-            print(f"\n✓ AF3 validation complete: {len(af3_results)} structures")
-            print(f"  Results saved to: {af3_dir}/")
-            
-            # ===========================================
-            # AF3 APO PREDICTIONS (for RMSD) - only for protein targets
-            # ===========================================
-            apo_results = {}
-            if target_type == "protein":
-                print(f"\n{'='*70}")
-                print("ALPHAFOLD3 APO PREDICTIONS")
-                print(f"{'='*70}")
-                
-                af3_apo_fn = AF3_APO_GPU_FUNCTIONS.get(af3_gpu_to_use, run_af3_apo_A100_80GB)
-                
-                apo_tasks = []
-                for row in best_rows:
-                    design_id = row["design_id"]
-                    if design_id in af3_results and af3_results[design_id].get("af3_structure"):
-                        apo_tasks.append({
-                            "design_id": design_id,
-                            "binder_seq": row["binder_sequence"],
-                            "binder_chain": "A",
-                        })
-                
-                print(f"Submitting {len(apo_tasks)} APO predictions...")
-                
-                try:
-                    apo_results_list = list(af3_apo_fn.starmap([
-                        (t["design_id"], t["binder_seq"], t["binder_chain"])
-                        for t in apo_tasks
-                    ]))
-                    apo_results = {r["design_id"]: r for r in apo_results_list}
-                    
-                    apo_success = sum(1 for r in apo_results.values() if r.get("apo_structure"))
-                    print(f"\n✓ APO predictions complete: {apo_success}/{len(apo_tasks)} structures")
-                except Exception as e:
-                    print(f"⚠ APO predictions error: {e}")
-            
-            # ===========================================
-            # PYROSETTA FILTERING - only for protein targets
-            # ===========================================
-            if target_type == "protein":
-                print(f"\n{'='*70}")
-                print("PYROSETTA FILTERING (Parallel)")
-                print(f"{'='*70}")
-                
-                pr_tasks = []
-                for design_id, result in af3_results.items():
-                    if result.get("af3_structure"):
-                        pr_tasks.append({
-                            "design_id": design_id,
-                            "af3_structure": result["af3_structure"],
-                            "af3_iptm": result.get("af3_iptm", 0),
-                            "af3_ptm": result.get("af3_ptm", 0),
-                            "af3_plddt": result.get("af3_plddt", 0),
-                            "binder_chain": "A",
-                            "target_chain": "B",
-                            "apo_structure": apo_results.get(design_id, {}).get("apo_structure"),
-                            "af3_confidence_json": result.get("af3_confidence_json"),
-                            "target_type": target_type,
-                        })
-                
-                print(f"Submitting {len(pr_tasks)} structures for PyRosetta analysis...")
-                print("  - FastRelax + InterfaceAnalyzer + APO-HOLO RMSD")
-                
-                try:
-                    pr_results_list = list(run_pyrosetta_single.starmap([
-                        (t["design_id"], t["af3_structure"], t["af3_iptm"], t["af3_ptm"], t["af3_plddt"], 
-                         t["binder_chain"], t["target_chain"], t["apo_structure"], t["af3_confidence_json"],
-                         t["target_type"])
-                        for t in pr_tasks
-                    ]))
-                    
-                    # Add design metadata from best_rows to PyRosetta results
-                    best_rows_by_id = {r["design_id"]: r for r in best_rows}
-                    for pr_result in pr_results_list:
-                        design_id = pr_result["design_id"]
-                        if design_id in best_rows_by_id:
-                            best_row = best_rows_by_id[design_id]
-                            pr_result["design_num"] = best_row.get("design_num", 0)
-                            pr_result["cycle"] = best_row.get("cycle", 0)
-                            pr_result["binder_sequence"] = best_row.get("binder_sequence", "")
-                            pr_result["binder_length"] = best_row.get("binder_length", 0)
-                    
-                    accepted = [r for r in pr_results_list if r.get("accepted")]
-                    rejected = [r for r in pr_results_list if not r.get("accepted")]
-                    
-                    for r in pr_results_list:
-                        status = "✓" if r.get("accepted") else "✗"
-                        reason = f" ({r.get('rejection_reason')})" if r.get("rejection_reason") else ""
-                        rmsd_str = f", RMSD={r.get('apo_holo_rmsd', 'N/A')}" if r.get('apo_holo_rmsd') is not None else ""
-                        rg_str = f", rg={r.get('rg', 'N/A')}" if r.get('rg') is not None else ""
-                        ipae_str = f", iPAE={r.get('i_pae', 'N/A')}" if r.get('i_pae') is not None else ""
-                        metrics = f"dG={r.get('interface_dG', 0):.1f}, SC={r.get('interface_sc', 0):.2f}, nres={r.get('interface_nres', 0)}{rmsd_str}{rg_str}{ipae_str}"
-                        print(f"  {status} {r['design_id']}: {metrics}{reason}")
-                    
-                    # Save results
-                    accepted_dir = output_path / "accepted_designs"
-                    rejected_dir = output_path / "rejected"
-                    accepted_dir.mkdir(exist_ok=True)
-                    rejected_dir.mkdir(exist_ok=True)
-                    
-                    csv_exclude = {"relaxed_pdb", "_target_msas", "af3_confidence_json"}
-                    
-                    if accepted:
-                        accepted_csv_data = [
-                            {k: v for k, v in r.items() if k not in csv_exclude}
-                            for r in accepted
-                        ]
-                        accepted_df = pd.DataFrame(accepted_csv_data)
-                        accepted_df.to_csv(accepted_dir / "accepted_stats.csv", index=False)
-                        
-                        for entry in accepted:
-                            design_id = entry["design_id"]
-                            relaxed_pdb = entry.get("relaxed_pdb")
-                            if relaxed_pdb:
-                                pdb_path = accepted_dir / f"{design_id}_relaxed.pdb"
-                                pdb_path.write_text(relaxed_pdb)
-                            else:
-                                src_cif = af3_dir / f"{design_id}_af3.cif"
-                                if src_cif.exists():
-                                    shutil.copy(src_cif, accepted_dir / f"{design_id}_af3.cif")
-                        
-                        print(f"  ✓ Saved {len(accepted)} relaxed PDBs to accepted_designs/")
-                    
-                    if rejected:
-                        rejected_csv_data = [
-                            {k: v for k, v in r.items() if k not in csv_exclude}
-                            for r in rejected
-                        ]
-                        rejected_df = pd.DataFrame(rejected_csv_data)
-                        rejected_df.to_csv(rejected_dir / "rejected_stats.csv", index=False)
-                        
-                        for entry in rejected:
-                            design_id = entry["design_id"]
-                            relaxed_pdb = entry.get("relaxed_pdb")
-                            if relaxed_pdb:
-                                pdb_path = rejected_dir / f"{design_id}_relaxed.pdb"
-                                pdb_path.write_text(relaxed_pdb)
-                        
-                        print(f"  ✓ Saved {len(rejected)} relaxed PDBs to rejected/")
-                    
-                    print("\n✓ PyRosetta filtering complete")
-                    print(f"  Accepted: {len(accepted)}")
-                    print(f"  Rejected: {len(rejected)}")
-                    
-                    if accepted:
-                        print("\n  Interface Metrics (accepted):")
-                        for r in accepted:
-                            print(f"    {r['design_id']}:")
-                            print(f"      interface_dG: {r.get('interface_dG', 0):.2f}")
-                            print(f"      interface_sc: {r.get('interface_sc', 0):.3f}")
-                            print(f"      interface_dSASA: {r.get('interface_dSASA', 0):.2f}")
-                            print(f"      interface_nres: {r.get('interface_nres', 0)}")
-                            print(f"      binder_sasa: {r.get('binder_sasa', 0):.2f}")
-                            print(f"      interface_fraction: {r.get('interface_fraction', 0):.2f}%")
-                            print(f"      interface_hbond_pct: {r.get('interface_hbond_percentage', 0):.2f}%")
-                            if r.get('apo_holo_rmsd') is not None:
-                                print(f"      apo_holo_rmsd: {r.get('apo_holo_rmsd'):.2f}")
-                            if r.get('rg') is not None:
-                                print(f"      rg: {r.get('rg'):.2f}")
-                            if r.get('i_pae') is not None:
-                                print(f"      i_pae: {r.get('i_pae'):.2f}")
-                
-                except Exception as e:
-                    print(f"⚠ PyRosetta error: {e}")
-        
-        except Exception as e:
-            print(f"⚠ AF3 validation error: {e}")
+        if accepted:
+            print("\n  Accepted designs:")
+            for r in accepted:
+                print(f"    {r.get('design_id')}: dG={r.get('interface_dG', 0):.1f}, "
+                      f"SC={r.get('interface_sc', 0):.2f}, "
+                      f"RMSD={r.get('apo_holo_rmsd', 'N/A')}")
     
-    elif use_alphafold3_validation:
-        print("\n⚠ No best designs found for AF3 validation")
+    print(f"\nOutput: {output_path}/")
+    if use_alphafold3_validation:
+        print("  ├── designs/           # All cycles from Boltz")
+        print("  ├── best_designs/      # Best cycle per design (Boltz PDBs)")
+        print("  ├── af3_validation/    # AF3 predicted structures")
+        print("  ├── accepted_designs/  # Passed PyRosetta filters (relaxed PDBs)")
+        print("  └── rejected/          # Failed PyRosetta filters")
+    else:
+        print("  ├── designs/           # All cycles")
+        print("  └── best_designs/      # Best cycle per design")
 
 
 @app.local_entrypoint()

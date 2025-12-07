@@ -58,6 +58,96 @@ def append_to_csv_safe(csv_path: Path, row: Dict[str, Any], timeout: float = 30.
             time.sleep(0.05)  # Wait 50ms and retry
 
 
+def update_csv_row(
+    csv_path: Path,
+    key_col: str,
+    key_val: str,
+    update_data: Dict[str, Any],
+    timeout: float = 30.0
+) -> bool:
+    """
+    Update an existing row in a CSV file by key column.
+    
+    If the row doesn't exist, creates a new row with the update data.
+    Thread-safe with file locking.
+    
+    Args:
+        csv_path: Path to the CSV file
+        key_col: Column name to use as the key (e.g., "design_id")
+        key_val: Value to match in the key column
+        update_data: Dictionary of column -> value to update
+        timeout: Maximum seconds to wait for lock (default 30s)
+    
+    Returns:
+        True if row was updated, False if row was created (didn't exist)
+    
+    Raises:
+        RuntimeError: If lock cannot be acquired within timeout
+    """
+    import pandas as pd
+    
+    csv_path = Path(csv_path)
+    lock_path = csv_path.with_suffix('.csv.lock')
+    
+    start_time = time.time()
+    while True:
+        try:
+            # Try to create lock file exclusively (atomic operation)
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                updated = False
+                
+                if csv_path.exists() and csv_path.stat().st_size > 0:
+                    # Read existing CSV
+                    df = pd.read_csv(csv_path)
+                    
+                    # Find matching row
+                    if key_col in df.columns:
+                        mask = df[key_col] == key_val
+                        if mask.any():
+                            # Update existing row
+                            for col, val in update_data.items():
+                                if col not in df.columns:
+                                    df[col] = None  # Add new column
+                                # Convert to object dtype to avoid FutureWarning with mixed types
+                                if val is not None and df[col].dtype != object:
+                                    df[col] = df[col].astype(object)
+                                df.loc[mask, col] = val
+                            updated = True
+                        else:
+                            # Row doesn't exist - append new row
+                            new_row = {key_col: key_val, **update_data}
+                            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                    else:
+                        # Key column doesn't exist - append new row
+                        new_row = {key_col: key_val, **update_data}
+                        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                    
+                    df.to_csv(csv_path, index=False)
+                else:
+                    # CSV doesn't exist - create with this row
+                    new_row = {key_col: key_val, **update_data}
+                    pd.DataFrame([new_row]).to_csv(csv_path, index=False)
+                
+                return updated
+                
+            finally:
+                os.close(fd)
+                try:
+                    os.unlink(lock_path)  # Remove lock file
+                except OSError:
+                    pass  # Ignore if already removed
+        
+        except FileExistsError:
+            # Lock held by another process
+            if time.time() - start_time > timeout:
+                raise RuntimeError(
+                    f"Could not acquire lock for {csv_path} after {timeout}s. "
+                    f"Delete {lock_path} if stale."
+                )
+            time.sleep(0.05)  # Wait 50ms and retry
+
+
 def format_contact_residues(contact_residues: str) -> str:
     """
     Convert contact residues to compact notation.

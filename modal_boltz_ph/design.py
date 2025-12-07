@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict
 
@@ -158,6 +159,13 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
         
         # Load Boltz model
         print("Loading Boltz model...")
+        # Suppress Lightning checkpoint version warning (benign minor version mismatch)
+        warnings.filterwarnings(
+            "ignore",
+            message="The loaded checkpoint was produced with Lightning",
+            category=UserWarning,
+            module="pytorch_lightning"
+        )
         predict_args = {
             "recycling_steps": recycling_steps,
             "sampling_steps": diffuse_steps,

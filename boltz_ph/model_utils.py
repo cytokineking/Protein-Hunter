@@ -236,6 +236,13 @@ def get_boltz_model(
     msa_args.activation_checkpointing = True
 
     # Load model from checkpoint
+    # Suppress Lightning checkpoint version warning (benign minor version mismatch)
+    warnings.filterwarnings(
+        "ignore",
+        message="The loaded checkpoint was produced with Lightning",
+        category=UserWarning,
+        module="pytorch_lightning"
+    )
     model_class = Boltz2 if model_version == "boltz2" else Boltz1
     
     if model_version == "boltz2":

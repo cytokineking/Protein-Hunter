@@ -454,7 +454,7 @@ def run_pyrosetta_single(
                     binder_pose = pose.split_by_chain()[i]
                     break
             
-            if binder_pose:
+            if binder_pose is not None:
                 layer_sel = pr.rosetta.core.select.residue_selector.LayerSelector()
                 layer_sel.set_layers(pick_core=False, pick_boundary=False, pick_surface=True)
                 surface_res = layer_sel.apply(binder_pose)
@@ -477,7 +477,7 @@ def run_pyrosetta_single(
         # RADIUS OF GYRATION
         # ========================================
         try:
-            if binder_pose:
+            if binder_pose is not None:
                 ca_coords = []
                 for i in range(1, binder_pose.total_residue() + 1):
                     if binder_pose.residue(i).has("CA"):
