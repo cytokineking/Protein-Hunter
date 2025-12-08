@@ -758,11 +758,41 @@ class ProteinHunter_Boltz:
         df.to_csv(summary_csv, index=False)
         print(f"\n✅ All run/cycle metrics saved to {summary_csv}")
 
-    def _run_downstream_validation(self):
+    def _run_batch_validation_on_existing_designs(self):
         """
-        Executes AlphaFold and Rosetta validation steps, then reorganizes outputs
-        into the standardized folder structure:
+        Batch-validate ALL designs in best_designs/ folder using AF3 + PyRosetta.
         
+        NOTE: This method is NOT called automatically during normal pipeline execution.
+        The pipeline now uses design-by-design validation via _run_single_design_validation().
+        
+        This method is preserved for standalone/post-hoc validation use cases:
+        
+        USE CASES:
+        ----------
+        1. Re-validate designs generated without --use_alphafold3_validation
+        2. Re-run validation with updated filter thresholds
+        3. Validate designs from external sources (e.g., other design tools)
+        4. Batch processing when design-by-design overhead is not desired
+        
+        FUTURE CLI INTEGRATION:
+        -----------------------
+        This could be exposed via a CLI flag like:
+        
+            python boltz_ph/design.py --validate-existing results_my_design/
+        
+        Or as a standalone script:
+        
+            python boltz_ph/validate_designs.py --results-dir results_my_design/
+        
+        REQUIREMENTS:
+        -------------
+        - best_designs/best_designs.csv must exist with design metadata
+        - best_designs/*.pdb files should exist (used for AF3 input reconstruction)
+        - AF3 Docker image must be available
+        - PyRosetta must be installed (for protein targets)
+        
+        OUTPUT STRUCTURE:
+        -----------------
         af3_validation/
         ├── af3_results.csv
         └── *_af3.cif
@@ -772,6 +802,23 @@ class ProteinHunter_Boltz:
         rejected/
         ├── rejected_stats.csv
         └── *_relaxed.pdb
+        
+        EXAMPLE PROGRAMMATIC USAGE:
+        ---------------------------
+        >>> # Create a minimal args object with required fields
+        >>> args = argparse.Namespace(
+        ...     alphafold_dir="~/alphafold3",
+        ...     af3_docker_name="alphafold3",
+        ...     af3_database_settings="~/alphafold3/alphafold3_data_save",
+        ...     hmmer_path="~/.conda/envs/alphafold3_venv",
+        ...     work_dir="",
+        ...     gpu_id=0,
+        ...     use_msa_for_af3=True,
+        ...     ligand_smiles="", ligand_ccd="", nucleic_seq="", nucleic_type="dna",
+        ... )
+        >>> hunter = ProteinHunter_Boltz(args)
+        >>> hunter.save_dir = "results_my_prior_run"
+        >>> hunter._run_batch_validation_on_existing_designs()
         """
         import json
         import glob

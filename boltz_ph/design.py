@@ -102,7 +102,8 @@ def parse_args():
     parser.add_argument(
         "--alphafold_dir", default=os.path.expanduser("~/alphafold3"), type=str
     )
-    parser.add_argument("--af3_docker_name", default="alphafold3_yc", type=str)
+    parser.add_argument("--af3_docker_name", default="alphafold3", type=str,
+        help="Docker image name for AlphaFold3 (default: alphafold3)")
     parser.add_argument(
         "--af3_database_settings", default="~/alphafold3/alphafold3_data_save", type=str
     )

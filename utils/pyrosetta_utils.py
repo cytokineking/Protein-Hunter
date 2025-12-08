@@ -332,7 +332,7 @@ def score_interface(pdb_file, pdb_file_collapsed, binder_chain="B", target_chain
         "interface_fraction": interface_binder_fraction,
         "interface_hydrophobicity": interface_hydrophobicity,
         "interface_nres": interface_nres,
-        "interface_interface_hbonds": interface_interface_hbonds,
+        "interface_hbonds": interface_interface_hbonds,  # Renamed from interface_interface_hbonds
         "interface_hbond_percentage": interface_hbond_percentage,
         "interface_delta_unsat_hbonds": interface_delta_unsat_hbonds,
         "interface_delta_unsat_hbonds_percentage": interface_bunsch_percentage,
@@ -576,8 +576,8 @@ def measure_rosetta_energy(
                 reasons.append("interface_dG_SASA_ratio >= 0")
             if not row.get("interface_nres", float('-inf')) > 4:
                 reasons.append("interface_nres <= 4")
-            if not row.get("interface_interface_hbonds", float('-inf')) > 3:
-                reasons.append("interface_interface_hbonds <= 3")
+            if not row.get("interface_hbonds", float('-inf')) > 3:
+                reasons.append("interface_hbonds <= 3")
             if not row.get("interface_hbond_percentage", float('-inf')) > 0:
                 reasons.append("interface_hbond_percentage <= 0")
             if not row.get("interface_delta_unsat_hbonds", float('inf')) < 2:
@@ -599,8 +599,8 @@ def measure_rosetta_energy(
                 reasons.append("interface_dG_SASA_ratio >= 0")
             if not row.get("interface_nres", float('-inf')) > 7:
                 reasons.append("interface_nres <= 7")
-            if not row.get("interface_interface_hbonds", float('-inf')) > 3:
-                reasons.append("interface_interface_hbonds <= 3")
+            if not row.get("interface_hbonds", float('-inf')) > 3:
+                reasons.append("interface_hbonds <= 3")
             if not row.get("interface_hbond_percentage", float('-inf')) > 0:
                 reasons.append("interface_hbond_percentage <= 0")
             if not row.get("interface_delta_unsat_hbonds", float('inf')) < 4:
@@ -617,7 +617,7 @@ def measure_rosetta_energy(
             & (df["interface_dSASA"] > 1)
             & (df["interface_dG_SASA_ratio"] < 0)
             & (df["interface_nres"] > 4)
-            & (df["interface_interface_hbonds"] > 3)
+            & (df["interface_hbonds"] > 3)
             & (df["interface_hbond_percentage"] > 0)
             & (df["interface_delta_unsat_hbonds"] < 2)
         )
@@ -631,7 +631,7 @@ def measure_rosetta_energy(
             & (df["interface_dSASA"] > 1)
             & (df["interface_dG_SASA_ratio"] < 0)
             & (df["interface_nres"] > 7)
-            & (df["interface_interface_hbonds"] > 3)
+            & (df["interface_hbonds"] > 3)
             & (df["interface_hbond_percentage"] > 0)
             & (df["interface_delta_unsat_hbonds"] < 4)
         )
