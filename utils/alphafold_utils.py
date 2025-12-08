@@ -26,6 +26,55 @@ from boltz_ph.model_utils import process_msa, get_cif # MMseqs2 wrapper and PDB 
 from typing import Optional, Dict, List
 import math
 
+# ============================================================================
+# AF3 OUTPUT FILTERING
+# ============================================================================
+# Patterns to suppress from AF3 Docker output (log spam and disclaimers)
+_AF3_SUPPRESSED_PATTERNS = [
+    # Terms of use disclaimer (users already agreed to get the weights)
+    "Running AlphaFold 3. Please note",
+    "only available under terms of use",
+    "If you do not agree to these terms",
+    "cancel execution of AlphaFold 3",
+    "use the model parameters.",
+    # JAX backend probing (not relevant for CUDA users)
+    "Unable to initialize backend 'rocm'",
+    "Unable to initialize backend 'tpu'",
+    # Verbose bucket size logging
+    "Calculating bucket size for input",
+    "Got bucket size",
+    "resulting in",
+    "padded tokens",
+]
+
+def _run_af3_subprocess(cmd: list, check: bool = True) -> subprocess.CompletedProcess:
+    """
+    Run an AF3 subprocess with output filtering to suppress log spam.
+    
+    Captures stdout/stderr, filters out noisy messages, and prints the rest.
+    """
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+    )
+    
+    # Filter and print stdout
+    for line in proc.stdout.splitlines():
+        if not any(pattern in line for pattern in _AF3_SUPPRESSED_PATTERNS):
+            print(line)
+    
+    # Filter and print stderr (AF3 logs go here)
+    for line in proc.stderr.splitlines():
+        if not any(pattern in line for pattern in _AF3_SUPPRESSED_PATTERNS):
+            print(line, file=sys.stderr)
+    
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+    
+    return proc
+
+
 def _is_valid_value(val) -> bool:
     """Check if a value is valid (not None, not NaN, not empty string).
     
@@ -732,34 +781,28 @@ def run_alphafold_step(
     # 2. Run AlphaFold on holo state
     print("Running AlphaFold on HOLO state...")
     try:
-        subprocess.run(
-            [
-                f"{work_dir}/utils/alphafold.sh",
-                af_input_dir,
-                af_output_dir,
-                str(gpu_id),
-                alphafold_dir,
-                af3_docker_name,
-            ],
-            check=True,
-        )
+        _run_af3_subprocess([
+            f"{work_dir}/utils/alphafold.sh",
+            af_input_dir,
+            af_output_dir,
+            str(gpu_id),
+            alphafold_dir,
+            af3_docker_name,
+        ])
     except subprocess.CalledProcessError as e:
         print(f"ERROR: AlphaFold HOLO run failed: {e}")
 
     # 3. Run AlphaFold on apo state
     print("Running AlphaFold on APO state...")
     try:
-        subprocess.run(
-            [
-                f"{work_dir}/utils/alphafold.sh",
-                af_input_apo_dir,
-                af_output_apo_dir,
-                str(gpu_id),
-                alphafold_dir,
-                af3_docker_name,
-            ],
-            check=True,
-        )
+        _run_af3_subprocess([
+            f"{work_dir}/utils/alphafold.sh",
+            af_input_apo_dir,
+            af_output_apo_dir,
+            str(gpu_id),
+            alphafold_dir,
+            af3_docker_name,
+        ])
     except subprocess.CalledProcessError as e:
         print(f"ERROR: AlphaFold APO run failed: {e}")
 

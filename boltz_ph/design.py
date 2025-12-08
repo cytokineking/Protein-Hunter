@@ -1,5 +1,22 @@
 import argparse
 import os
+import warnings
+
+# ============================================================================
+# LOG SUPPRESSION - Must be set before any JAX/TensorFlow imports
+# ============================================================================
+# Suppress JAX backend probing spam (rocm, tpu warnings)
+os.environ["JAX_PLATFORMS"] = "cuda,cpu"
+
+# Suppress TensorFlow/JAX INFO logs (AF3 bucket size messages)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"  # 0=all, 1=no INFO, 2=no WARNING
+
+# Suppress absl INFO logging (used by AF3)
+import logging
+logging.getLogger("absl").setLevel(logging.WARNING)
+
+# Suppress PyTorch warning about numpy array conversion
+warnings.filterwarnings("ignore", message=".*Creating a tensor from a list of numpy.ndarrays.*")
 
 from pipeline import ProteinHunter_Boltz
 

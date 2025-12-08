@@ -113,7 +113,7 @@ def radius_of_gyration(path, chain_id="B"):
     if not ca_coords:
         raise ValueError(f"No C-alpha atoms found in chain {chain_id} of {path}")
         
-    ca_coords_tensor = torch.tensor(ca_coords)
+    ca_coords_tensor = torch.tensor(np.array(ca_coords))
     
     # Rg calculation
     rg = torch.sqrt(torch.square(ca_coords_tensor - ca_coords_tensor.mean(0)).sum(-1).mean() + 1e-8)
