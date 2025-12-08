@@ -25,7 +25,18 @@ def parse_args():
     parser.add_argument(
         "--mode", default="binder", choices=["binder", "unconditional"], type=str
     )
-    parser.add_argument("--num_designs", default=50, type=int)
+    parser.add_argument(
+        "--num_designs", 
+        default=None, 
+        type=int,
+        help="Number of designs to generate. At least one of --num-designs or --num-accepted required."
+    )
+    parser.add_argument(
+        "--num_accepted",
+        default=None,
+        type=int,
+        help="Stop after this many designs pass all filters. Requires --use-alphafold3-validation."
+    )
     parser.add_argument("--num_cycles", default=5, type=int)
     parser.add_argument("--cyclic", action="store_true", default=False, help="Enable cyclic peptide design.")
     parser.add_argument("--min_protein_length", default=100, type=int)
@@ -124,8 +135,30 @@ def print_args(args):
         print(f"{k:30}: {v}")
     print("="*40)
 
+def validate_args(args):
+    """Validate command-line arguments for stopping conditions."""
+    import sys
+    
+    # Validate stopping conditions
+    if args.num_designs is None and args.num_accepted is None:
+        print("ERROR: Must specify at least one: --num-designs or --num-accepted")
+        sys.exit(1)
+    
+    if args.num_accepted is not None and not args.use_alphafold3_validation:
+        print("ERROR: --num-accepted requires --use-alphafold3-validation")
+        sys.exit(1)
+    
+    if args.num_accepted is not None and args.num_designs is None:
+        print("⚠ WARNING: --num-accepted without --num-designs has no upper limit.")
+        print("  Consider adding --num-designs as a safety limit.\n")
+
+
 def main():
     args = parse_args()
+    
+    # Validate stopping condition arguments
+    validate_args(args)
+    
     # Pretty print each argument in a row for better visualization
     print_args(args)
     protein_hunter = ProteinHunter_Boltz(args)

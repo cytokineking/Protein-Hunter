@@ -13,7 +13,7 @@ import yaml
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from LigandMPNN.wrapper import LigandMPNNWrapper
 
-from boltz_ph.constants import CHAIN_TO_NUMBER
+from boltz_ph.constants import CHAIN_TO_NUMBER, UNIFIED_DESIGN_COLUMNS
 from utils.metrics import get_CA_and_sequence # Used implicitly in design.py
 from utils.convert import calculate_holo_apo_rmsd, convert_cif_files_to_pdb
 from utils.ipsae_utils import calculate_ipsae_from_boltz_output
@@ -36,6 +36,13 @@ from boltz_ph.model_utils import (
     shallow_copy_tensor_dict,
     smart_split,
 )
+
+
+def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Reorder DataFrame columns to match UNIFIED_DESIGN_COLUMNS (Modal alignment)."""
+    ordered = [c for c in UNIFIED_DESIGN_COLUMNS if c in df.columns]
+    extra = [c for c in df.columns if c not in UNIFIED_DESIGN_COLUMNS]
+    return df[ordered + extra]
 
 class InputDataBuilder:
     """Handles parsing command-line arguments and constructing the base Boltz input data dictionary."""
@@ -770,7 +777,7 @@ class ProteinHunter_Boltz:
         import glob
         
         sys.path.append(os.path.join(os.path.dirname(__file__), "utils"))
-        from utils.alphafold_utils import run_alphafold_step_from_csv
+        from utils.alphafold_utils import run_alphafold_step_from_csv, calculate_af3_ipsae
         from utils.pyrosetta_utils import run_rosetta_step
 
         a = self.args
@@ -864,6 +871,7 @@ class ProteinHunter_Boltz:
                     af3_iptm = 0.0
                     af3_ptm = 0.0
                     af3_plddt = 0.0
+                    af3_ipsae = 0.0
                     
                     if summary_conf_files:
                         try:
@@ -877,16 +885,32 @@ class ProteinHunter_Boltz:
                     if conf_files:
                         try:
                             with open(conf_files[0], 'r') as f:
-                                conf = json.load(f)
-                                atom_plddts = conf.get('atom_plddts', [])
-                                if atom_plddts:
-                                    af3_plddt = sum(atom_plddts) / len(atom_plddts)
+                                conf_json_text = f.read()
+                            conf = json.loads(conf_json_text)
+                            atom_plddts = conf.get('atom_plddts', [])
+                            if atom_plddts:
+                                af3_plddt = sum(atom_plddts) / len(atom_plddts)
+                            
+                            # Calculate AF3 ipSAE from PAE matrix
+                            metadata = design_metadata.get(design_id, {})
+                            binder_seq = metadata.get("binder_sequence", "")
+                            target_seqs = metadata.get("target_seqs", "")
+                            binder_length = len(binder_seq) if binder_seq else 0
+                            # Handle target_seqs: could be colon-separated for multiple chains
+                            target_length = len(target_seqs.split(":")[0]) if target_seqs else 0
+                            
+                            if binder_length > 0 and target_length > 0:
+                                ipsae_result = calculate_af3_ipsae(
+                                    conf_json_text, binder_length, target_length
+                                )
+                                af3_ipsae = ipsae_result.get("af3_ipsae", 0.0)
                         except Exception as e:
                             print(f"  Warning: Could not read confidence for {design_id}: {e}")
                     
                     af3_results_rows.append({
                         "design_id": design_id,
                         "af3_iptm": round(af3_iptm, 4),
+                        "af3_ipsae": round(af3_ipsae, 4),
                         "af3_ptm": round(af3_ptm, 4),
                         "af3_plddt": round(af3_plddt, 2),
                     })
@@ -957,7 +981,17 @@ class ProteinHunter_Boltz:
                     "cycle": metadata.get("cycle", 0),
                     "binder_sequence": metadata.get("binder_sequence", row.get("aa_seq", "")),
                     "binder_length": metadata.get("binder_length", len(row.get("aa_seq", ""))),
+                    "cyclic": metadata.get("cyclic", False),
+                    "alanine_count": metadata.get("alanine_count", 0),
+                    "alanine_pct": metadata.get("alanine_pct", 0.0),
+                    # Boltz design metrics (from best_designs.csv)
+                    "boltz_iptm": metadata.get("boltz_iptm", 0.0),
+                    "boltz_ipsae": metadata.get("boltz_ipsae", 0.0),
+                    "boltz_plddt": metadata.get("boltz_plddt", 0.0),
+                    "boltz_iplddt": metadata.get("boltz_iplddt", 0.0),
+                    # AF3 validation metrics
                     "af3_iptm": af3_data.get("af3_iptm", row.get("iptm", 0)),
+                    "af3_ipsae": af3_data.get("af3_ipsae", 0.0),
                     "af3_ptm": af3_data.get("af3_ptm", 0),
                     "af3_plddt": af3_data.get("af3_plddt", row.get("plddt", 0)),
                     "accepted": True,
@@ -971,7 +1005,7 @@ class ProteinHunter_Boltz:
                     "interface_dSASA": row.get("interface_dSASA", 0),
                     "interface_dG_SASA_ratio": row.get("interface_dG_SASA_ratio", 0),
                     "interface_nres": row.get("interface_nres", 0),
-                    "interface_interface_hbonds": row.get("interface_interface_hbonds", 0),
+                    "interface_hbonds": row.get("interface_interface_hbonds", 0),  # Renamed from interface_interface_hbonds
                     "interface_hbond_percentage": row.get("interface_hbond_percentage", 0),
                     "interface_delta_unsat_hbonds": row.get("interface_delta_unsat_hbonds", 0),
                     "interface_delta_unsat_hbonds_percentage": row.get("interface_delta_unsat_hbonds_percentage", 0),
@@ -1011,7 +1045,17 @@ class ProteinHunter_Boltz:
                     "cycle": metadata.get("cycle", 0),
                     "binder_sequence": metadata.get("binder_sequence", row.get("aa_seq", "")),
                     "binder_length": metadata.get("binder_length", len(row.get("aa_seq", "")) if row.get("aa_seq") else 0),
+                    "cyclic": metadata.get("cyclic", False),
+                    "alanine_count": metadata.get("alanine_count", 0),
+                    "alanine_pct": metadata.get("alanine_pct", 0.0),
+                    # Boltz design metrics (from best_designs.csv)
+                    "boltz_iptm": metadata.get("boltz_iptm", 0.0),
+                    "boltz_ipsae": metadata.get("boltz_ipsae", 0.0),
+                    "boltz_plddt": metadata.get("boltz_plddt", 0.0),
+                    "boltz_iplddt": metadata.get("boltz_iplddt", 0.0),
+                    # AF3 validation metrics
                     "af3_iptm": af3_data.get("af3_iptm", row.get("iptm", 0)),
+                    "af3_ipsae": af3_data.get("af3_ipsae", 0.0),
                     "af3_ptm": af3_data.get("af3_ptm", 0),
                     "af3_plddt": af3_data.get("af3_plddt", row.get("plddt", 0)),
                     "accepted": False,
@@ -1025,7 +1069,7 @@ class ProteinHunter_Boltz:
                     "interface_dSASA": row.get("interface_dSASA", 0),
                     "interface_dG_SASA_ratio": row.get("interface_dG_SASA_ratio", 0),
                     "interface_nres": row.get("interface_nres", 0),
-                    "interface_interface_hbonds": row.get("interface_interface_hbonds", 0),
+                    "interface_hbonds": row.get("interface_interface_hbonds", 0),  # Renamed from interface_interface_hbonds
                     "interface_hbond_percentage": row.get("interface_hbond_percentage", 0),
                     "interface_delta_unsat_hbonds": row.get("interface_delta_unsat_hbonds", 0),
                     "interface_delta_unsat_hbonds_percentage": row.get("interface_delta_unsat_hbonds_percentage", 0),
@@ -1049,11 +1093,13 @@ class ProteinHunter_Boltz:
         # Save accepted/rejected CSVs
         if accepted_rows:
             accepted_df = pd.DataFrame(accepted_rows)
+            accepted_df = _reorder_columns(accepted_df)
             accepted_df.to_csv(os.path.join(accepted_dir, "accepted_stats.csv"), index=False)
             print(f"  ✓ Saved accepted_designs/accepted_stats.csv ({len(accepted_rows)} designs)")
 
         if rejected_rows:
             rejected_df = pd.DataFrame(rejected_rows)
+            rejected_df = _reorder_columns(rejected_df)
             rejected_df.to_csv(os.path.join(rejected_dir, "rejected_stats.csv"), index=False)
             print(f"  ✓ Saved rejected/rejected_stats.csv ({len(rejected_rows)} designs)")
 
@@ -1084,33 +1130,578 @@ class ProteinHunter_Boltz:
         print(f"      └── *_relaxed.pdb")
 
 
+    def _run_single_design_validation(self, design_metrics: dict) -> dict:
+        """
+        Run AF3 + PyRosetta validation for a SINGLE design.
+        
+        This implements the design-by-design execution model where each design
+        is fully validated before proceeding to the next. This enables:
+        - Resumable execution at the validation level
+        - Early stopping when num_accepted target is reached
+        - Real-time progress tracking
+        
+        Args:
+            design_metrics: Output from _run_design_cycle() for one design
+        
+        Returns:
+            dict with design_metrics + af3 results + pyrosetta results + acceptance status
+        """
+        import json
+        import glob
+        
+        from utils.alphafold_utils import run_alphafold_step_from_csv, calculate_af3_ipsae
+        from utils.pyrosetta_utils import run_rosetta_step
+        
+        a = self.args
+        design_idx = int(design_metrics.get("run_id", 0))
+        best_cycle = design_metrics.get("best_cycle", 0)
+        design_id = f"{a.name}_d{design_idx}_c{best_cycle}"
+        
+        # Initialize result with design metrics
+        result = {
+            "design_id": design_id,
+            "design_num": design_idx,
+            "cycle": best_cycle,
+            "binder_sequence": design_metrics.get("best_seq", ""),
+            "binder_length": len(design_metrics.get("best_seq", "")),
+            "cyclic": a.cyclic,
+            "alanine_count": design_metrics.get("best_alanine_count", 0),
+            "alanine_pct": 0.0,
+            "boltz_iptm": design_metrics.get("best_iptm", 0.0),
+            "boltz_ipsae": design_metrics.get("best_ipsae", 0.0),
+            "boltz_plddt": design_metrics.get("best_plddt", 0.0),
+            "boltz_iplddt": design_metrics.get("best_iplddt", 0.0),
+            # AF3 metrics (initialized)
+            "af3_iptm": 0.0,
+            "af3_ipsae": 0.0,
+            "af3_ptm": 0.0,
+            "af3_plddt": 0.0,
+            # Acceptance status
+            "accepted": False,
+            "rejection_reason": "validation_not_run",
+        }
+        
+        # Calculate alanine percentage
+        binder_length = result["binder_length"]
+        if binder_length > 0:
+            result["alanine_pct"] = round(result["alanine_count"] / binder_length * 100, 2)
+        
+        # Check if we have a valid design to validate
+        best_pdb = design_metrics.get("best_pdb_filename")
+        if not best_pdb or not os.path.exists(best_pdb):
+            result["rejection_reason"] = "no_valid_design"
+            return result
+        
+        print(f"  Running AF3 + PyRosetta validation for {design_id}...")
+        
+        # Create temporary working directory for this design's validation
+        work_dir_validation = os.path.join(self.save_dir, "_validation_work", design_id)
+        os.makedirs(work_dir_validation, exist_ok=True)
+        
+        try:
+            # ===================================================================
+            # STEP 1: CREATE SINGLE-DESIGN CSV FOR AF3
+            # ===================================================================
+            temp_csv_dir = os.path.join(work_dir_validation, "temp_csv")
+            os.makedirs(temp_csv_dir, exist_ok=True)
+            temp_csv_path = os.path.join(temp_csv_dir, "single_design.csv")
+            
+            # Build row matching best_designs.csv format
+            csv_row = {
+                "design_id": design_id,
+                "design_num": design_idx,
+                "cycle": best_cycle,
+                "binder_sequence": design_metrics.get("best_seq", ""),
+                "binder_length": binder_length,
+                "cyclic": a.cyclic,
+                "boltz_iptm": design_metrics.get("best_iptm", 0.0),
+                "boltz_ipsae": design_metrics.get("best_ipsae", 0.0),
+                "boltz_plddt": design_metrics.get("best_plddt", 0.0),
+                "boltz_iplddt": design_metrics.get("best_iplddt", 0.0),
+                "target_seqs": a.protein_seqs or "",
+                "contact_residues": a.contact_residues or "",
+                "msa_mode": a.msa_mode,
+                "ligand_smiles": a.ligand_smiles or "",
+                "ligand_ccd": a.ligand_ccd or "",
+                "nucleic_seq": a.nucleic_seq or "",
+                "nucleic_type": a.nucleic_type or "",
+                "template_path": a.template_path or "",
+                "template_mapping": a.template_cif_chain_id or "",
+            }
+            pd.DataFrame([csv_row]).to_csv(temp_csv_path, index=False)
+            
+            # ===================================================================
+            # STEP 2: RUN AF3 FOR THIS SINGLE DESIGN
+            # ===================================================================
+            af_output_dir, af_output_apo_dir, af_pdb_dir, af_pdb_dir_apo = (
+                run_alphafold_step_from_csv(
+                    csv_path=temp_csv_path,
+                    alphafold_dir=os.path.expanduser(a.alphafold_dir),
+                    af3_docker_name=a.af3_docker_name,
+                    af3_database_settings=os.path.expanduser(a.af3_database_settings),
+                    hmmer_path=os.path.expanduser(a.hmmer_path),
+                    ligandmpnn_dir=work_dir_validation,
+                    work_dir=os.path.expanduser(a.work_dir) or os.getcwd(),
+                    binder_id=self.binder_chain,
+                    gpu_id=a.gpu_id,
+                    high_iptm=False,
+                    use_msa_for_af3=a.use_msa_for_af3,
+                )
+            )
+            
+            # ===================================================================
+            # STEP 3: PARSE AF3 OUTPUT
+            # ===================================================================
+            af3_cif_path = None
+            
+            if af_output_dir and os.path.exists(af_output_dir):
+                for design_subdir in os.listdir(af_output_dir):
+                    design_path = os.path.join(af_output_dir, design_subdir)
+                    if not os.path.isdir(design_path):
+                        continue
+                    
+                    # Find ranked best CIF
+                    cif_files = [f for f in glob.glob(os.path.join(design_path, "*_model.cif"))
+                                if "_seed-" not in f and "_sample-" not in f]
+                    summary_conf_files = [f for f in glob.glob(os.path.join(design_path, "*_summary_confidences.json"))
+                                         if "_seed-" not in f and "_sample-" not in f]
+                    conf_files = [f for f in glob.glob(os.path.join(design_path, "*_confidences.json"))
+                                 if "_seed-" not in f and "_sample-" not in f]
+                    
+                    if cif_files:
+                        af3_cif_path = cif_files[0]
+                        
+                        # Parse summary confidences
+                        if summary_conf_files:
+                            try:
+                                with open(summary_conf_files[0], 'r') as f:
+                                    summary = json.load(f)
+                                    result["af3_iptm"] = round(summary.get('iptm', 0.0), 4)
+                                    result["af3_ptm"] = round(summary.get('ptm', 0.0), 4)
+                            except Exception as e:
+                                print(f"    Warning: Could not read summary confidence: {e}")
+                        
+                        # Parse full confidences for pLDDT and ipSAE
+                        if conf_files:
+                            try:
+                                with open(conf_files[0], 'r') as f:
+                                    conf_json_text = f.read()
+                                conf = json.loads(conf_json_text)
+                                
+                                # Calculate pLDDT
+                                atom_plddts = conf.get('atom_plddts', [])
+                                if atom_plddts:
+                                    result["af3_plddt"] = round(sum(atom_plddts) / len(atom_plddts), 2)
+                                
+                                # Calculate AF3 ipSAE
+                                binder_seq = design_metrics.get("best_seq", "")
+                                target_seqs = a.protein_seqs or ""
+                                target_length = len(target_seqs.split(":")[0]) if target_seqs else 0
+                                
+                                if binder_length > 0 and target_length > 0:
+                                    ipsae_result = calculate_af3_ipsae(
+                                        conf_json_text, binder_length, target_length
+                                    )
+                                    result["af3_ipsae"] = ipsae_result.get("af3_ipsae", 0.0)
+                            except Exception as e:
+                                print(f"    Warning: Could not read confidence: {e}")
+                        
+                        break  # Found our design
+            
+            # ===================================================================
+            # STEP 4: COPY AF3 CIF TO af3_validation/
+            # ===================================================================
+            af3_dir = os.path.join(self.save_dir, "af3_validation")
+            os.makedirs(af3_dir, exist_ok=True)
+            
+            if af3_cif_path and os.path.exists(af3_cif_path):
+                dest_cif = os.path.join(af3_dir, f"{design_id}_af3.cif")
+                shutil.copy(af3_cif_path, dest_cif)
+            
+            # ===================================================================
+            # STEP 5: RUN PYROSETTA (if we have PDBs and target is protein)
+            # ===================================================================
+            any_ligand_or_nucleic = a.ligand_smiles or a.ligand_ccd or a.nucleic_seq
+            if a.nucleic_type.strip() and a.nucleic_seq.strip():
+                target_type = "nucleic"
+            elif any_ligand_or_nucleic:
+                target_type = "small_molecule"
+            else:
+                target_type = "protein"
+            
+            pyrosetta_result = None
+            
+            if af_pdb_dir and os.path.exists(af_pdb_dir) and target_type == "protein":
+                pdb_files = [f for f in os.listdir(af_pdb_dir) if f.endswith(".pdb")]
+                if pdb_files:
+                    # Run PyRosetta
+                    run_rosetta_step(
+                        work_dir_validation,
+                        af_pdb_dir,
+                        af_pdb_dir_apo,
+                        binder_id=self.binder_chain,
+                        target_type=target_type,
+                    )
+                    
+                    # Parse PyRosetta results
+                    rosetta_success_dir = os.path.join(work_dir_validation, "af_pdb_rosetta_success")
+                    success_csv = os.path.join(rosetta_success_dir, "success_designs.csv")
+                    failed_csv = os.path.join(rosetta_success_dir, "failed_designs.csv")
+                    
+                    # Check success
+                    if os.path.exists(success_csv) and os.path.getsize(success_csv) > 0:
+                        try:
+                            success_df = pd.read_csv(success_csv)
+                            if len(success_df) > 0:
+                                row = success_df.iloc[0]
+                                pyrosetta_result = {
+                                    "accepted": True,
+                                    "rejection_reason": "",
+                                    "pdb_path": row.get("PDB", ""),
+                                    "model_name": row.get("Model", ""),
+                                    "binder_score": row.get("binder_score", 0),
+                                    "total_score": row.get("total_score", 0),
+                                    "interface_sc": row.get("interface_sc", 0),
+                                    "interface_packstat": row.get("interface_packstat", 0),
+                                    "interface_dG": row.get("interface_dG", 0),
+                                    "interface_dSASA": row.get("interface_dSASA", 0),
+                                    "interface_dG_SASA_ratio": row.get("interface_dG_SASA_ratio", 0),
+                                    "interface_nres": row.get("interface_nres", 0),
+                                    "interface_hbonds": row.get("interface_interface_hbonds", 0),
+                                    "interface_hbond_percentage": row.get("interface_hbond_percentage", 0),
+                                    "interface_delta_unsat_hbonds": row.get("interface_delta_unsat_hbonds", 0),
+                                    "interface_delta_unsat_hbonds_percentage": row.get("interface_delta_unsat_hbonds_percentage", 0),
+                                    "interface_hydrophobicity": row.get("interface_hydrophobicity", 0),
+                                    "surface_hydrophobicity": row.get("surface_hydrophobicity", 0),
+                                    "binder_sasa": row.get("binder_sasa", 0),
+                                    "interface_fraction": row.get("interface_fraction", 0),
+                                    "apo_holo_rmsd": row.get("apo_holo_rmsd"),
+                                    "i_pae": row.get("i_pae"),
+                                    "rg": row.get("rg"),
+                                }
+                        except pd.errors.EmptyDataError:
+                            pass
+                    
+                    # Check failed
+                    if pyrosetta_result is None and os.path.exists(failed_csv) and os.path.getsize(failed_csv) > 0:
+                        try:
+                            failed_df = pd.read_csv(failed_csv)
+                            if len(failed_df) > 0:
+                                row = failed_df.iloc[0]
+                                pyrosetta_result = {
+                                    "accepted": False,
+                                    "rejection_reason": row.get("failure_reason", "pyrosetta_filter_failed"),
+                                    "pdb_path": row.get("PDB", ""),
+                                    "model_name": row.get("Model", ""),
+                                    "binder_score": row.get("binder_score", 0),
+                                    "total_score": row.get("total_score", 0),
+                                    "interface_sc": row.get("interface_sc", 0),
+                                    "interface_packstat": row.get("interface_packstat", 0),
+                                    "interface_dG": row.get("interface_dG", 0),
+                                    "interface_dSASA": row.get("interface_dSASA", 0),
+                                    "interface_dG_SASA_ratio": row.get("interface_dG_SASA_ratio", 0),
+                                    "interface_nres": row.get("interface_nres", 0),
+                                    "interface_hbonds": row.get("interface_interface_hbonds", 0),
+                                    "interface_hbond_percentage": row.get("interface_hbond_percentage", 0),
+                                    "interface_delta_unsat_hbonds": row.get("interface_delta_unsat_hbonds", 0),
+                                    "interface_delta_unsat_hbonds_percentage": row.get("interface_delta_unsat_hbonds_percentage", 0),
+                                    "interface_hydrophobicity": row.get("interface_hydrophobicity", 0),
+                                    "surface_hydrophobicity": row.get("surface_hydrophobicity", 0),
+                                    "binder_sasa": row.get("binder_sasa", 0),
+                                    "interface_fraction": row.get("interface_fraction", 0),
+                                    "apo_holo_rmsd": row.get("apo_holo_rmsd"),
+                                    "i_pae": row.get("i_pae"),
+                                    "rg": row.get("rg"),
+                                }
+                        except pd.errors.EmptyDataError:
+                            pass
+            elif target_type != "protein":
+                # Non-protein targets: accept without PyRosetta filtering
+                pyrosetta_result = {
+                    "accepted": True,
+                    "rejection_reason": "",
+                }
+            
+            # ===================================================================
+            # STEP 6: MERGE PYROSETTA RESULTS INTO RESULT
+            # ===================================================================
+            if pyrosetta_result:
+                result["accepted"] = pyrosetta_result.get("accepted", False)
+                result["rejection_reason"] = pyrosetta_result.get("rejection_reason", "")
+                
+                # Copy all PyRosetta metrics
+                for key in ["binder_score", "total_score", "interface_sc", "interface_packstat",
+                           "interface_dG", "interface_dSASA", "interface_dG_SASA_ratio",
+                           "interface_nres", "interface_hbonds", "interface_hbond_percentage",
+                           "interface_delta_unsat_hbonds", "interface_delta_unsat_hbonds_percentage",
+                           "interface_hydrophobicity", "surface_hydrophobicity", "binder_sasa",
+                           "interface_fraction", "apo_holo_rmsd", "i_pae", "rg"]:
+                    if key in pyrosetta_result:
+                        result[key] = pyrosetta_result[key]
+                
+                # Copy relaxed PDB to appropriate folder
+                if pyrosetta_result.get("pdb_path") and pyrosetta_result.get("model_name"):
+                    src_pdb = os.path.join(pyrosetta_result["pdb_path"], pyrosetta_result["model_name"])
+                    if os.path.exists(src_pdb):
+                        if result["accepted"]:
+                            dest_dir = os.path.join(self.save_dir, "accepted_designs")
+                        else:
+                            dest_dir = os.path.join(self.save_dir, "rejected")
+                        os.makedirs(dest_dir, exist_ok=True)
+                        dest_pdb = os.path.join(dest_dir, f"{design_id}_relaxed.pdb")
+                        shutil.copy(src_pdb, dest_pdb)
+            else:
+                result["rejection_reason"] = "validation_failed"
+            
+        except Exception as e:
+            print(f"    Error during validation: {e}")
+            result["rejection_reason"] = f"validation_error: {str(e)}"
+        
+        finally:
+            # Clean up temporary validation directory
+            try:
+                shutil.rmtree(work_dir_validation, ignore_errors=True)
+            except Exception:
+                pass
+        
+        return result
+
+    def _save_design_result(self, result: dict) -> None:
+        """
+        Save a single design's validation results to all relevant CSVs.
+        
+        This enables incremental saving for the design-by-design execution model.
+        Results are appended to:
+        - af3_validation/af3_results.csv
+        - accepted_designs/accepted_stats.csv (if accepted)
+        - rejected/rejected_stats.csv (if rejected)
+        
+        Args:
+            result: Full result dict from _run_single_design_validation()
+        """
+        # Save AF3 results
+        af3_dir = os.path.join(self.save_dir, "af3_validation")
+        os.makedirs(af3_dir, exist_ok=True)
+        
+        af3_row = {
+            "design_id": result.get("design_id"),
+            "af3_iptm": result.get("af3_iptm", 0.0),
+            "af3_ipsae": result.get("af3_ipsae", 0.0),
+            "af3_ptm": result.get("af3_ptm", 0.0),
+            "af3_plddt": result.get("af3_plddt", 0.0),
+        }
+        append_to_csv_safe(Path(af3_dir) / "af3_results.csv", af3_row)
+        
+        # Build full stats row
+        stats_row = _reorder_columns(pd.DataFrame([result])).iloc[0].to_dict()
+        
+        # Save to accepted or rejected
+        if result.get("accepted", False):
+            accepted_dir = os.path.join(self.save_dir, "accepted_designs")
+            os.makedirs(accepted_dir, exist_ok=True)
+            append_to_csv_safe(Path(accepted_dir) / "accepted_stats.csv", stats_row)
+        else:
+            rejected_dir = os.path.join(self.save_dir, "rejected")
+            os.makedirs(rejected_dir, exist_ok=True)
+            append_to_csv_safe(Path(rejected_dir) / "rejected_stats.csv", stats_row)
+
+    def _count_completed_designs(self) -> int:
+        """Count completed designs by checking best_designs/ folder."""
+        best_dir = Path(self.save_dir) / "best_designs"
+        if not best_dir.exists():
+            return 0
+        return len(list(best_dir.glob("*.pdb")))
+
+    def _count_accepted_designs(self) -> int:
+        """Count accepted designs by checking accepted_designs/ folder."""
+        accepted_dir = Path(self.save_dir) / "accepted_designs"
+        if not accepted_dir.exists():
+            return 0
+        return len(list(accepted_dir.glob("*_relaxed.pdb")))
+
+    def _get_next_design_index(self) -> int:
+        """Determine next design index based on existing artifacts."""
+        return self._count_completed_designs()
+
+    def _should_continue(self) -> bool:
+        """
+        Check if pipeline should continue based on stopping conditions.
+        
+        Stopping conditions (OR logic):
+        - num_designs: Stop after N total designs generated
+        - num_accepted: Stop after N designs pass all filters
+        
+        Returns:
+            True if should continue, False if target reached
+        """
+        total = self._count_completed_designs()
+        accepted = self._count_accepted_designs()
+        
+        if self.args.num_designs is not None and total >= self.args.num_designs:
+            print(f"✓ Target reached: {total}/{self.args.num_designs} designs generated")
+            return False
+        
+        if hasattr(self.args, 'num_accepted') and self.args.num_accepted is not None and accepted >= self.args.num_accepted:
+            print(f"✓ Target reached: {accepted}/{self.args.num_accepted} accepted designs")
+            return False
+        
+        return True
+
     def run_pipeline(self):
         """Orchestrates the entire protein design and validation pipeline."""
         # 1. Prepare Base Data (using the new InputDataBuilder)
         base_data, pocket_conditioning = self.data_builder.build()
 
-        # 2. Run Design Cycles
+        # 2. Check for existing progress (resumable execution)
+        start_design_idx = self._get_next_design_index()
+        if start_design_idx > 0:
+            print(f"\n{'='*60}")
+            print(f"📁 Found {start_design_idx} existing designs. Resuming from design {start_design_idx}...")
+            print(f"{'='*60}")
+
+        # 3. Run Design Cycles with resumable while loop
         all_run_metrics = []
-        for design_id in range(self.args.num_designs):
-            run_id = str(design_id)
-            print("\n=======================================================")
-            print(f"=== Starting Design Run {run_id}/{self.args.num_designs - 1} ===")
-            print("=======================================================")
+        while self._should_continue():
+            design_idx = self._get_next_design_index()
+            
+            # Build progress display
+            total = self._count_completed_designs()
+            accepted = self._count_accepted_designs()
+            progress_parts = []
+            if self.args.num_designs is not None:
+                progress_parts.append(f"{total}/{self.args.num_designs} designs")
+            else:
+                progress_parts.append(f"{total} designs")
+            if hasattr(self.args, 'num_accepted') and self.args.num_accepted is not None:
+                progress_parts.append(f"{accepted}/{self.args.num_accepted} accepted")
+            
+            print(f"\n{'='*60}")
+            print(f"Starting Design {design_idx} | Progress: {', '.join(progress_parts)}")
+            print(f"{'='*60}")
 
             data_cp = copy.deepcopy(base_data)
+            run_id = str(design_idx)
 
             run_metrics = self._run_design_cycle(data_cp, run_id, pocket_conditioning)
             all_run_metrics.append(run_metrics)
+            
+            # 4. Save best design incrementally
+            saved = self._save_single_best_design(run_metrics)
+            if saved:
+                print(f"  ✓ Saved best design {design_idx} to best_designs/")
+            
+            # 5. Run validation for THIS design (design-by-design execution)
+            if self.args.use_alphafold3_validation and saved:
+                validation_result = self._run_single_design_validation(run_metrics)
+                self._save_design_result(validation_result)
+                
+                # Print validation summary for this design
+                if validation_result.get("accepted"):
+                    print(f"  ✓ ACCEPTED: af3_iptm={validation_result.get('af3_iptm', 0):.3f}, "
+                          f"af3_ipsae={validation_result.get('af3_ipsae', 0):.3f}, "
+                          f"dG={validation_result.get('interface_dG', 0):.1f}")
+                else:
+                    reason = validation_result.get("rejection_reason", "unknown")
+                    print(f"  ✗ REJECTED: {reason}")
+                
+                # Check if we should stop early (num_accepted target reached)
+                if not self._should_continue():
+                    break
 
-        # 3. Save best_designs/ folder (copy best cycle per design)
-        self._save_best_designs(all_run_metrics)
-
-        # 4. Print summary
+        # 6. Print summary
         self._print_summary(all_run_metrics)
-
-        # 5. Run Downstream Validation
+        
+        # 7. Print final validation summary
         if self.args.use_alphafold3_validation:
-            self._run_downstream_validation()
+            total = self._count_completed_designs()
+            accepted = self._count_accepted_designs()
+            rejected = total - accepted if total > accepted else 0
+            
+            print(f"\n{'='*60}")
+            print("PIPELINE COMPLETE")
+            print(f"{'='*60}")
+            print(f"Total designs generated: {total}")
+            print(f"Accepted: {accepted}")
+            print(f"Rejected: {rejected}")
+            if self.args.num_accepted:
+                print(f"Target accepted: {self.args.num_accepted}")
+            print(f"\nOutput structure:")
+            print(f"  {self.save_dir}/")
+            print(f"  ├── designs/              # All cycle PDBs + design_stats.csv")
+            print(f"  ├── best_designs/         # Best per design + best_designs.csv")
+            print(f"  ├── af3_validation/       # AF3 structures + metrics")
+            print(f"  │   ├── af3_results.csv")
+            print(f"  │   └── *_af3.cif")
+            print(f"  ├── accepted_designs/     # Passed filters")
+            print(f"  │   ├── accepted_stats.csv")
+            print(f"  │   └── *_relaxed.pdb")
+            print(f"  └── rejected/             # Failed filters")
+            print(f"      ├── rejected_stats.csv")
+            print(f"      └── *_relaxed.pdb")
+
+    def _save_single_best_design(self, metrics: dict) -> bool:
+        """
+        Save a single design's best cycle to best_designs/ folder incrementally.
+        
+        This enables resumable execution by saving progress after each design.
+        
+        Args:
+            metrics: Output from _run_design_cycle() for one design
+        
+        Returns:
+            True if design was saved successfully, False if no valid best design
+        """
+        a = self.args
+        best_dir = os.path.join(self.save_dir, "best_designs")
+        os.makedirs(best_dir, exist_ok=True)
+        
+        best_pdb = metrics.get("best_pdb_filename")
+        if not best_pdb or not os.path.exists(best_pdb):
+            return False
+        
+        # Copy PDB to best_designs/
+        design_idx = int(metrics.get("run_id", 0))
+        best_cycle = metrics.get("best_cycle", 0)
+        design_id = f"{a.name}_d{design_idx}_c{best_cycle}"
+        dest_pdb = os.path.join(best_dir, f"{design_id}.pdb")
+        shutil.copy(best_pdb, dest_pdb)
+        
+        # Build row for best_designs.csv
+        seq = metrics.get("best_seq", "")
+        binder_length = len(seq) if seq else 0
+        alanine_count = metrics.get("best_alanine_count", 0)
+        alanine_pct = (alanine_count / binder_length * 100) if binder_length > 0 else 0.0
+        
+        row = {
+            "design_id": design_id,
+            "design_num": design_idx,
+            "cycle": best_cycle,
+            "binder_sequence": seq,
+            "binder_length": binder_length,
+            "cyclic": a.cyclic,
+            "boltz_iptm": metrics.get("best_iptm", 0.0),
+            "boltz_ipsae": metrics.get("best_ipsae", 0.0),
+            "boltz_plddt": metrics.get("best_plddt", 0.0),
+            "boltz_iplddt": metrics.get("best_iplddt", 0.0),
+            "alanine_count": alanine_count,
+            "alanine_pct": round(alanine_pct, 2),
+            "target_seqs": a.protein_seqs or "",
+            "contact_residues": a.contact_residues or "",
+            "msa_mode": a.msa_mode,
+            # Fields for AF3 reconstruction
+            "ligand_smiles": a.ligand_smiles or "",
+            "ligand_ccd": a.ligand_ccd or "",
+            "nucleic_seq": a.nucleic_seq or "",
+            "nucleic_type": a.nucleic_type or "",
+            "template_path": a.template_path or "",
+            "template_mapping": a.template_cif_chain_id or "",
+        }
+        
+        # Append to CSV incrementally
+        csv_path = Path(best_dir) / "best_designs.csv"
+        append_to_csv_safe(csv_path, row)
+        
+        return True
 
     def _save_best_designs(self, all_run_metrics):
         """Copy best cycle PDBs to best_designs/ folder and create best_designs.csv."""
@@ -1142,10 +1733,10 @@ class ProteinHunter_Boltz:
                     "binder_sequence": seq,
                     "binder_length": binder_length,
                     "cyclic": a.cyclic,
-                    "iptm": metrics.get("best_iptm", 0.0),
-                    "ipsae": metrics.get("best_ipsae", 0.0),
-                    "plddt": metrics.get("best_plddt", 0.0),
-                    "iplddt": metrics.get("best_iplddt", 0.0),
+                    "boltz_iptm": metrics.get("best_iptm", 0.0),
+                    "boltz_ipsae": metrics.get("best_ipsae", 0.0),
+                    "boltz_plddt": metrics.get("best_plddt", 0.0),
+                    "boltz_iplddt": metrics.get("best_iplddt", 0.0),
                     "alanine_count": alanine_count,
                     "alanine_pct": round(alanine_pct, 2),
                     "target_seqs": a.protein_seqs or "",
@@ -1162,6 +1753,7 @@ class ProteinHunter_Boltz:
 
         if best_rows:
             best_df = pd.DataFrame(best_rows)
+            best_df = _reorder_columns(best_df)
             best_df.to_csv(os.path.join(best_dir, "best_designs.csv"), index=False)
             print(f"\n✅ Saved {len(best_rows)} best designs to {best_dir}/")
 

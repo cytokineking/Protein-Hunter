@@ -50,3 +50,23 @@ SHORT_SEQUENCE_CUTOFF = 50
 
 # Hydrophobic amino acids set for scoring
 HYDROPHOBIC_AA = set("ACFILMPVWY")
+
+# Unified column schema for best_designs, accepted_stats, and rejected_stats CSVs
+# Matches Modal pipeline output format for consistency
+UNIFIED_DESIGN_COLUMNS = [
+    # Identity
+    "design_id", "design_num", "cycle",
+    # Binder info
+    "binder_sequence", "binder_length", "cyclic", "alanine_count", "alanine_pct",
+    # Boltz design metrics (prefixed for clarity)
+    "boltz_iptm", "boltz_ipsae", "boltz_plddt", "boltz_iplddt",
+    # AF3 validation metrics
+    "af3_iptm", "af3_ipsae", "af3_ptm", "af3_plddt",
+    # PyRosetta interface metrics
+    "interface_dG", "interface_sc", "interface_nres", "interface_dSASA",
+    "interface_packstat", "interface_hbonds", "interface_delta_unsat_hbonds",
+    # Secondary quality metrics
+    "apo_holo_rmsd", "i_pae", "rg",
+    # Acceptance status
+    "accepted", "rejection_reason",
+]
