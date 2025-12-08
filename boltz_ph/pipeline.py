@@ -1177,6 +1177,55 @@ class ProteinHunter_Boltz:
         print(f"      └── *_relaxed.pdb")
 
 
+    def _create_skipped_validation_result(self, design_metrics: dict, rejection_reason: str) -> dict:
+        """
+        Create a validation result for designs that skip AF3/PyRosetta validation.
+        
+        This is used when a design fails pre-validation checks (e.g., Boltz ipTM
+        below threshold) and we want to record a rejection without wasting compute
+        on AF3 prediction.
+        
+        Args:
+            design_metrics: Output from _run_design_cycle() for one design
+            rejection_reason: String explaining why validation was skipped
+        
+        Returns:
+            dict with design_metrics and rejection status (no AF3/PyRosetta metrics)
+        """
+        a = self.args
+        design_idx = int(design_metrics.get("run_id", 0))
+        best_cycle = design_metrics.get("best_cycle", 0)
+        design_id = f"{a.name}_d{design_idx}_c{best_cycle}"
+        
+        binder_seq = design_metrics.get("best_seq", "")
+        binder_length = len(binder_seq)
+        alanine_count = design_metrics.get("best_alanine_count", 0)
+        alanine_pct = round(alanine_count / binder_length * 100, 2) if binder_length > 0 else 0.0
+        
+        return {
+            "design_id": design_id,
+            "design_num": design_idx,
+            "cycle": best_cycle,
+            "binder_sequence": binder_seq,
+            "binder_length": binder_length,
+            "cyclic": a.cyclic,
+            "alanine_count": alanine_count,
+            "alanine_pct": alanine_pct,
+            # Boltz design metrics
+            "boltz_iptm": design_metrics.get("best_iptm", 0.0),
+            "boltz_ipsae": design_metrics.get("best_ipsae", 0.0),
+            "boltz_plddt": design_metrics.get("best_plddt", 0.0),
+            "boltz_iplddt": design_metrics.get("best_iplddt", 0.0),
+            # AF3 metrics (not computed - validation skipped)
+            "af3_iptm": 0.0,
+            "af3_ipsae": 0.0,
+            "af3_ptm": 0.0,
+            "af3_plddt": 0.0,
+            # Rejection status
+            "accepted": False,
+            "rejection_reason": rejection_reason,
+        }
+
     def _run_single_design_validation(self, design_metrics: dict) -> dict:
         """
         Run AF3 + PyRosetta validation for a SINGLE design.
@@ -1639,7 +1688,21 @@ class ProteinHunter_Boltz:
             
             # 5. Run validation for THIS design (design-by-design execution)
             if self.args.use_alphafold3_validation and saved:
-                validation_result = self._run_single_design_validation(run_metrics)
+                # Check if design meets minimum Boltz ipTM threshold before expensive AF3 validation
+                boltz_iptm = run_metrics.get("best_iptm", 0.0)
+                meets_threshold = boltz_iptm >= self.args.high_iptm_threshold
+                
+                if meets_threshold:
+                    # Run full AF3 + PyRosetta validation
+                    validation_result = self._run_single_design_validation(run_metrics)
+                else:
+                    # Skip validation - create rejection result directly
+                    print(f"  ⏭ Skipping validation: boltz_iptm ({boltz_iptm:.3f}) < threshold ({self.args.high_iptm_threshold})")
+                    validation_result = self._create_skipped_validation_result(
+                        run_metrics, 
+                        f"boltz_iptm_below_threshold ({boltz_iptm:.3f} < {self.args.high_iptm_threshold})"
+                    )
+                
                 self._save_design_result(validation_result)
                 
                 # Print validation summary for this design

@@ -157,31 +157,21 @@ def convert_cif_files_to_pdb(
 
         # Skip if conversion already done
         if os.path.exists(pdb_path):
-             # Try to check if confidence data exists for existing files if in high_iptm mode
-            if high_iptm:
-                score_name = file.replace(".cif", ".cif")
-                if any(score.get('file') == score_name for score in confidence_scores):
-                     continue # Already processed and score recorded
-            else:
-                continue
+            score_name = file
+            if any(score.get('file') == score_name for score in confidence_scores):
+                continue  # Already processed and score recorded
 
         iptm = float("-inf")
         plddt = float("-inf")
         should_convert = True
 
-        if high_iptm:
+        # ALWAYS try to read confidence data for AF3 files (needed for RMSD calculation)
+        if af_dir:
             try:
-                # AlphaFold3 output format
-                if af_dir:
-                    base_name = file.replace("_model.cif", "")
-                    confidence_file_summary = os.path.join(root, f"{base_name}_summary_confidences.json")
-                    confidence_file = os.path.join(root, f"{base_name}_confidences.json")
-                # Boltz output format
-                else:
-                    confidence_file_summary = os.path.join(root, "confidence_summary.json") # Example name
-                    confidence_file = os.path.join(root, "confidence_full.json") # Example name
+                base_name = file.replace("_model.cif", "")
+                confidence_file_summary = os.path.join(root, f"{base_name}_summary_confidences.json")
+                confidence_file = os.path.join(root, f"{base_name}_confidences.json")
 
-                
                 # Try loading summary confidence data for ipTM
                 if os.path.exists(confidence_file_summary):
                     with open(confidence_file_summary) as f:
@@ -194,23 +184,26 @@ def convert_cif_files_to_pdb(
                         confidence_data = json.load(f)
                         plddt = np.mean(confidence_data.get("atom_plddts", [0.0]))
 
-                if iptm < i_ptm_cutoff:
+                # Only filter by threshold when high_iptm mode is enabled
+                if high_iptm and iptm < i_ptm_cutoff:
                     should_convert = False
                     print(f"Skipping {file}: i-pTM ({iptm:.2f}) below threshold ({i_ptm_cutoff:.2f}).")
 
             except Exception as e:
                 print(f"WARNING: Could not read confidence data for {file}: {e}")
-                should_convert = True # Fail open
+                should_convert = True  # Fail open
 
         if should_convert:
-            print(f"Converting {cif_path} (i-pTM: {iptm:.2f})...")
+            iptm_display = f"{iptm:.2f}" if iptm > float("-inf") else "N/A"
+            print(f"Converting {cif_path} (i-pTM: {iptm_display})...")
             if convert_cif_to_pdb(cif_path, pdb_path):
-                if high_iptm:
+                # ALWAYS record confidence scores for AF3 files (needed for RMSD calc)
+                if af_dir:
                     confidence_scores.append({"file": file, "iptm": iptm, "plddt": plddt})
             else:
                 print(f"❌ Failed to convert {cif_path}.")
 
-
+    # ALWAYS write confidence CSV for AF3 files (needed by calculate_holo_apo_rmsd)
     if confidence_scores:
         confidence_scores_path = os.path.join(save_dir, "high_iptm_confidence_scores.csv")
         pd.DataFrame(confidence_scores).to_csv(confidence_scores_path, index=False)

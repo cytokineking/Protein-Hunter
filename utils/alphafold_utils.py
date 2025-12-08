@@ -37,6 +37,8 @@ _AF3_SUPPRESSED_PATTERNS = [
     "If you do not agree to these terms",
     "cancel execution of AlphaFold 3",
     "use the model parameters.",
+    "WEIGHTS_TERMS_OF_USE",  # URL reference
+    "github.com/google-deepmind/alphafold3",  # Bare URL
     # JAX backend probing (not relevant for CUDA users)
     "Unable to initialize backend 'rocm'",
     "Unable to initialize backend 'tpu'",
@@ -45,6 +47,8 @@ _AF3_SUPPRESSED_PATTERNS = [
     "Got bucket size",
     "resulting in",
     "padded tokens",
+    # absl INFO logs from AF3 (timestamps like "I1208 23:17:47")
+    "] processing ",  # "I1208 23:17:47... pipeline.py:173] processing ..."
 ]
 
 def _run_af3_subprocess(cmd: list, check: bool = True) -> subprocess.CompletedProcess:
