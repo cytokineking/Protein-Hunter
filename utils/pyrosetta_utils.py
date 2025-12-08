@@ -266,10 +266,10 @@ def score_interface(pdb_file, pdb_file_collapsed, binder_chain="B", target_chain
 
     # 5. Percentage scores
     interface_hbond_percentage = (
-        (interface_interface_hbonds / interface_nres) * 100 if interface_nres != 0 else None
+        (interface_interface_hbonds / interface_nres) * 100 if interface_nres != 0 else 0.0
     )
     interface_bunsch_percentage = (
-        (interface_delta_unsat_hbonds / interface_nres) * 100 if interface_nres != 0 else None
+        (interface_delta_unsat_hbonds / interface_nres) * 100 if interface_nres != 0 else 0.0
     )
 
     # 6. Total Score (full complex energy)
