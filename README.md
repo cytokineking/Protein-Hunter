@@ -8,7 +8,7 @@ A protein binder design pipeline using Boltz structure prediction and LigandMPNN
 
 ## Why This Fork?
 
-1. **BindCraft-style Design Cycles** — Restructured workflow amenable to long-running jobs (checkpointing planned)
+1. **BindCraft-style Design Cycles** — Restructured workflow with resumable execution and early stopping
 2. **Serverless Compute Ready** — Full Modal cloud compatibility with massive parallelization and real-time streaming
 3. **Open-Source Future** — Working toward replacing AF3/PyRosetta with open-source alternatives
 
@@ -21,7 +21,7 @@ A protein binder design pipeline using Boltz structure prediction and LigandMPNN
 | **Modal Cloud Pipeline** | ❌ | ✅ Parallelized design runs |
 | **ipSAE Scoring** | ❌ | ✅ Interface pSAE metric |
 | **Output Organization** | Complex folder structure | Streamlined: `designs/`, `best_designs/`, `accepted_designs/`, etc. |
-| **Checkpointable Runs** | ❌ | 🔜 Planned: Resume interrupted jobs |
+| **Resumable Execution** | ❌ | ✅ Resume interrupted jobs, stop at N accepted |
 
 ---
 
@@ -39,6 +39,7 @@ A protein binder design pipeline using Boltz structure prediction and LigandMPNN
 - [Hotspot Configuration](#hotspot-configuration)
 - [Command-Line Arguments Reference](#command-line-arguments-reference)
 - [Output Files](#output-files)
+- [Resumable Execution](#resumable-execution)
 - [Examples](#examples)
 - [Modal Cloud Deployment](#modal-cloud-deployment)
   - [Modal Setup](#modal-setup)
@@ -166,7 +167,7 @@ python boltz_ph/design.py \
 | `--percent_X` | % of "unknown" residues in initial sequence | 50-100 |
 | `--min_protein_length` | Minimum binder length | 60-80 |
 | `--max_protein_length` | Maximum binder length | 120-150 |
-| `--num_designs` | Independent design attempts | 100+ for a full run |
+| `--num_designs` | Independent design attempts | 100+ for a full run (required) |
 | `--num_cycles` | Optimization iterations per design | 7 |
 
 ---
@@ -337,9 +338,12 @@ python boltz_ph/design.py \
 |----------|------|---------|-------------|
 | `--name` | str | required | Job name (used for output folder) |
 | `--gpu_id` | int | `0` | GPU device ID |
-| `--num_designs` | int | `50` | Number of independent design runs |
+| `--num_designs` | int | — | Total designs to generate (at least one of `--num_designs` or `--num_accepted` required) |
+| `--num_accepted` | int | — | Stop after N designs pass filters (requires `--use_alphafold3_validation`) |
 | `--num_cycles` | int | `5` | Fold→design iterations per run |
 | `--mode` | str | `"binder"` | `"binder"` or `"unconditional"` |
+
+**Stopping conditions:** You must specify at least one of `--num_designs` or `--num_accepted`. If both are provided, the pipeline stops when *either* target is reached (OR logic). See [Resumable Execution](#resumable-execution) for details.
 
 ### Binder Sequence Settings
 
@@ -484,11 +488,12 @@ Designs are accepted if they pass ALL of the following (protein targets):
 #### Example: Full Validation Pipeline
 
 ```bash
-# Local
+# Local — run until 5 designs pass all filters (or 100 total attempts)
 python boltz_ph/design.py \
     --name PDL1_validated \
     --protein_seqs "AFTVTVPK..." \
-    --num_designs 5 \
+    --num_designs 100 \
+    --num_accepted 5 \
     --use_alphafold3_validation \
     --alphafold_dir ~/alphafold3
 
@@ -569,16 +574,126 @@ results_my_design/
 | `binder_sequence` | Designed binder sequence |
 | `binder_length` | Length of binder |
 | `cyclic` | Whether cyclic topology was used |
-| `iptm` | Interface pTM score |
-| `ipsae` | Interface pSAE score (0-1, higher is better) |
-| `plddt` | Complex pLDDT |
-| `iplddt` | Interface pLDDT |
+| `boltz_iptm` | Interface pTM score (from Boltz) |
+| `boltz_ipsae` | Interface pSAE score (from Boltz, 0-1, higher is better) |
+| `boltz_plddt` | Complex pLDDT (from Boltz) |
+| `boltz_iplddt` | Interface pLDDT (from Boltz) |
 | `alanine_count` | Number of alanines |
 | `alanine_pct` | Percentage alanine |
 | `target_seqs` | Target sequence(s) used |
 | `contact_residues` | Hotspot residues (if specified) |
 | `msa_mode` | MSA mode used |
 | `timestamp` | When the cycle completed |
+
+**Additional columns in `accepted_stats.csv` / `rejected_stats.csv`:**
+
+| Column | Description |
+|--------|-------------|
+| `af3_iptm` | Interface pTM from AF3 validation |
+| `af3_ipsae` | Interface pSAE from AF3 (calculated from PAE matrix) |
+| `af3_ptm` | Global pTM from AF3 |
+| `af3_plddt` | Average pLDDT from AF3 |
+| `interface_dG` | Binding free energy (kcal/mol) |
+| `interface_sc` | Shape complementarity (0-1) |
+| `interface_hbonds` | Number of interface hydrogen bonds |
+| `apo_holo_rmsd` | RMSD between bound and unbound binder |
+| `accepted` | Whether design passed all filters |
+| `rejection_reason` | Why design was rejected (if applicable) |
+
+---
+
+## Resumable Execution
+
+The local pipeline supports **resumable jobs** and **dual stopping conditions**, enabling long-running design campaigns that can survive interruptions.
+
+### How It Works
+
+The pipeline saves results incrementally after each design completes. Progress is tracked by counting files on disk:
+
+- **Completed designs**: Count of `*.pdb` files in `best_designs/`
+- **Accepted designs**: Count of `*_relaxed.pdb` files in `accepted_designs/`
+
+To resume an interrupted job, simply re-run the same command — the pipeline detects existing progress and continues from where it left off.
+
+### Stopping Conditions
+
+You must specify at least one stopping condition:
+
+| Flag | Description |
+|------|-------------|
+| `--num_designs N` | Stop after N total designs generated |
+| `--num_accepted N` | Stop after N designs pass all filters |
+
+**Rules:**
+1. At least one required
+2. Both allowed — first condition met triggers exit (OR logic)
+3. `--num_accepted` requires `--use_alphafold3_validation`
+4. `--num_accepted` alone prints a warning (no upper limit on attempts)
+
+### Examples
+
+```bash
+# Generate exactly 50 designs (classic mode, resumable)
+python boltz_ph/design.py \
+    --name PDL1 \
+    --num_designs 50 \
+    --protein_seqs "..."
+
+# Generate until 10 pass filters (warning: no upper limit)
+python boltz_ph/design.py \
+    --name PDL1 \
+    --num_accepted 10 \
+    --use_alphafold3_validation \
+    --protein_seqs "..."
+
+# Recommended: Generate until 10 accepted OR 500 total (whichever comes first)
+python boltz_ph/design.py \
+    --name PDL1 \
+    --num_designs 500 \
+    --num_accepted 10 \
+    --use_alphafold3_validation \
+    --protein_seqs "..."
+
+# Resume a crashed job (just re-run the same command)
+python boltz_ph/design.py \
+    --name PDL1 \
+    --num_designs 50 \
+    --protein_seqs "..."
+# → "Found 32 existing designs. Resuming from design 32..."
+```
+
+### Progress Display
+
+During execution, the pipeline shows real-time progress:
+
+```
+============================================================
+Starting Design 47 | Progress: 47/500 designs, 7/10 accepted
+============================================================
+  Best cycle: 5 (boltz_iptm=0.82)
+  AF3: iptm=0.71, ipsae=0.65
+  PyRosetta: dG=-12.3, SC=0.72
+  → ACCEPTED
+
+...
+
+✓ Target reached: 10/10 accepted designs
+Pipeline complete. Generated 63 total designs to obtain 10 accepted.
+```
+
+### Design-by-Design Execution
+
+Unlike batch processing, the local pipeline now processes each design through the **full validation pipeline** before starting the next:
+
+```
+For each design:
+    Boltz cycles → Best → AF3 holo → AF3 apo → PyRosetta → Save → Next
+```
+
+This enables:
+- **Early stopping**: Stop as soon as you have enough good designs
+- **Crash recovery**: All completed designs are saved, even if the job dies mid-run
+- **Real-time filtering**: Know immediately which designs pass/fail
 
 ---
 
@@ -743,6 +858,10 @@ python boltz_ph/design.py \
 4. **For difficult targets**, increase `--max_contact_filter_retries` and use hotspots to guide the design.
 
 5. **Template mode** is recommended when you have high-confidence structures; sequence-only mode is better for exploring conformational flexibility.
+
+6. **Use dual stopping conditions** for production runs: `--num_designs 500 --num_accepted 20` stops when you have 20 good designs OR after 500 attempts, whichever comes first.
+
+7. **Jobs are resumable**: If a job crashes, just re-run the same command. The pipeline detects existing progress and continues from where it left off.
 
 ---
 
