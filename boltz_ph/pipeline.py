@@ -72,6 +72,10 @@ class InputDataBuilder:
         self.contact_residues_canonical = ""
         self.contact_residues_auth = ""  # Original auth values if --use_auth_numbering
         self.template_first_residues = {}  # chain_id -> first auth residue
+        
+        # Target sequences actually used (populated by _process_sequence_inputs)
+        # This captures auto-extracted sequences for CSV output/AF3 validation
+        self.target_seqs_used = ""
 
     def _analyze_templates(self) -> dict:
         """
@@ -185,6 +189,10 @@ class InputDataBuilder:
                 print(f"✓ Auto-extracted {len([s for s in protein_seqs_list if s])} sequence(s) from template(s)")
         else:
             protein_seqs_list = []
+
+        # Store actual sequences used for CSV output and AF3 validation
+        # This ensures auto-extracted sequences are available downstream
+        self.target_seqs_used = ":".join(protein_seqs_list)
 
         # Handle special "empty" case: --protein_msas "empty" applies to all seqs
         if a.msa_mode == "single":
@@ -789,7 +797,7 @@ class ProteinHunter_Boltz:
             "iplddt": cycle_0_iplddt,
             "alanine_count": 0,
             "alanine_pct": 0.0,
-            "target_seqs": a.protein_seqs or "",
+            "target_seqs": self.data_builder.target_seqs_used,
             "contact_residues": self.data_builder.contact_residues_canonical or a.contact_residues or "",
             "contact_residues_auth": self.data_builder.contact_residues_auth or "",
             "template_first_residue": ",".join(f"{k}:{v}" for k, v in self.data_builder.template_first_residues.items()) if self.data_builder.template_first_residues else "",
@@ -942,7 +950,7 @@ class ProteinHunter_Boltz:
                 "iplddt": curr_iplddt,
                 "alanine_count": alanine_count,
                 "alanine_pct": round(alanine_percentage * 100, 2),
-                "target_seqs": a.protein_seqs or "",
+                "target_seqs": self.data_builder.target_seqs_used,
                 "contact_residues": self.data_builder.contact_residues_canonical or a.contact_residues or "",
                 "contact_residues_auth": self.data_builder.contact_residues_auth or "",
                 "template_first_residue": ",".join(f"{k}:{v}" for k, v in self.data_builder.template_first_residues.items()) if self.data_builder.template_first_residues else "",
@@ -1514,7 +1522,7 @@ class ProteinHunter_Boltz:
                 "boltz_ipsae": design_metrics.get("best_ipsae", 0.0),
                 "boltz_plddt": design_metrics.get("best_plddt", 0.0),
                 "boltz_iplddt": design_metrics.get("best_iplddt", 0.0),
-                "target_seqs": a.protein_seqs or "",
+                "target_seqs": self.data_builder.target_seqs_used,
                 "contact_residues": a.contact_residues or "",
                 "msa_mode": a.msa_mode,
                 "ligand_smiles": a.ligand_smiles or "",
@@ -2049,7 +2057,7 @@ class ProteinHunter_Boltz:
             "boltz_iplddt": metrics.get("best_iplddt", 0.0) if has_valid_pdb else float("nan"),
             "alanine_count": alanine_count,
             "alanine_pct": round(alanine_pct, 2),
-            "target_seqs": a.protein_seqs or "",
+            "target_seqs": self.data_builder.target_seqs_used,
             "contact_residues": self.data_builder.contact_residues_canonical or a.contact_residues or "",
             "contact_residues_auth": self.data_builder.contact_residues_auth or "",
             "template_first_residue": ",".join(f"{k}:{v}" for k, v in self.data_builder.template_first_residues.items()) if self.data_builder.template_first_residues else "",
