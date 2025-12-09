@@ -2221,13 +2221,13 @@ class ProteinHunter_Boltz:
 def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutdown_event):
     """
     Worker process that runs on a specific GPU.
-    
+
     Each worker:
     1. Initializes its own ProteinHunter_Boltz instance on the assigned GPU
     2. Pulls design indices from the shared task queue
     3. Executes designs and puts results in the result queue
     4. Exits gracefully when receiving None (poison pill) or shutdown signal
-    
+
     Args:
         gpu_id: CUDA device ID for this worker
         args: Command-line arguments (will be modified to set gpu_id)
@@ -2237,10 +2237,14 @@ def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutd
     """
     import copy
     
+    # CRITICAL: Set CUDA_VISIBLE_DEVICES for this worker process
+    # This ensures all child processes (LigandMPNN, etc.) use the correct GPU
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
     # Set GPU for this worker
     worker_args = copy.deepcopy(args)
-    worker_args.gpu_id = gpu_id
-    
+    worker_args.gpu_id = 0  # Now always 0 since CUDA_VISIBLE_DEVICES restricts to one GPU
+
     try:
         # Initialize model on this GPU
         print(f"[GPU {gpu_id}] Initializing worker...")
