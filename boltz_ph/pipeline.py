@@ -77,8 +77,11 @@ class InputDataBuilder:
         """
         Analyze templates for sequence extraction, gap detection, and auth→canonical mapping.
         
+        Handles multi-chain templates correctly: when a single template file has multiple
+        chain IDs specified (e.g., --template_cif_chain_id "A,B"), analyzes ALL chains.
+        
         Returns:
-            Dict mapping chain_id to analysis results from analyze_template_structure()
+            Dict mapping template_chain_id to analysis results from analyze_template_structure()
         
         Raises:
             SystemExit: If gaps are detected and --protein_seqs not provided
@@ -95,26 +98,34 @@ class InputDataBuilder:
             else []
         )
         
+        if not template_cif_chain_id_list:
+            print("⚠ Warning: No --template_cif_chain_id specified, defaulting to chain 'A'")
+            template_cif_chain_id_list = ["A"]
+        
         all_analysis = {}
         auto_seqs = []
         
-        for i, template_path in enumerate(template_path_list):
-            if not template_path:
-                auto_seqs.append("")
-                continue
+        # Get the first template file (handles PDB codes, downloads, etc.)
+        # For multi-chain from single file, we analyze all chains from this file
+        template_file = get_cif(template_path_list[0]) if template_path_list else None
+        
+        if not template_file:
+            return {}
+        
+        # Store template chain IDs in order (for hotspot index mapping)
+        self._template_chain_ids = template_cif_chain_id_list
+        
+        try:
+            # Analyze ALL specified chains at once
+            analysis = analyze_template_structure(template_file, template_cif_chain_id_list)
             
-            # Get the actual file path (handles PDB codes, downloads, etc.)
-            template_file = get_cif(template_path)
-            
-            # Determine the chain to analyze
-            cif_chain = template_cif_chain_id_list[i] if i < len(template_cif_chain_id_list) else ""
-            if not cif_chain:
-                # Default to first chain - will be overridden if user provides
-                cif_chain = "A"
-            
-            try:
-                analysis = analyze_template_structure(template_file, [cif_chain])
+            for i, cif_chain in enumerate(template_cif_chain_id_list):
                 chain_analysis = analysis.get(cif_chain, {})
+                
+                if not chain_analysis:
+                    print(f"⚠ Warning: Chain '{cif_chain}' not found in template {template_file}")
+                    auto_seqs.append("")
+                    continue
                 
                 # Check for gaps
                 if chain_analysis.get('has_gaps', False):
@@ -127,23 +138,29 @@ class InputDataBuilder:
                         # User provided sequences, just warn
                         print(f"⚠ Warning: Gaps detected in chain {cif_chain}, using provided --protein_seqs")
                 
-                # Store analysis keyed by internal chain ID (B, C, D, etc.)
-                internal_chain_id = chr(ord('B') + i)
-                all_analysis[internal_chain_id] = {
+                # Store analysis keyed by TEMPLATE chain ID (A, B, etc.)
+                # This matches the Modal pipeline approach
+                all_analysis[cif_chain] = {
                     **chain_analysis,
                     'template_file': template_file,
                     'template_cif_chain': cif_chain,
+                    'chain_index': i,  # Track order for hotspot mapping
                 }
                 
                 # Auto-extract sequence
                 auto_seqs.append(chain_analysis.get('sequence', ''))
                 
-            except Exception as e:
-                print(f"⚠ Warning: Could not analyze template {template_path}: {e}")
+        except Exception as e:
+            print(f"⚠ Warning: Could not analyze template {template_file}: {e}")
+            for _ in template_cif_chain_id_list:
                 auto_seqs.append("")
         
         self._template_analysis = all_analysis
         self._auto_extracted_seqs = auto_seqs
+        
+        if auto_seqs and any(s for s in auto_seqs):
+            print(f"✓ Analyzed {len([s for s in auto_seqs if s])} chain(s) from template")
+        
         return all_analysis
 
     def _process_sequence_inputs(self):
@@ -189,7 +206,7 @@ class InputDataBuilder:
         Returns:
             Tuple of:
             - contact_residues_canonical: Converted contact_residues string for Boltz
-            - hotspots_per_chain: Dict mapping chain_id to list of canonical hotspot positions
+            - hotspots_per_chain: Dict mapping internal_chain_id to list of canonical hotspot positions
         
         Raises:
             SystemExit: If hotspot validation fails
@@ -208,7 +225,10 @@ class InputDataBuilder:
         
         use_auth = getattr(a, 'use_auth_numbering', False)
         
-        # Store template first residues for CSV output
+        # Get template chain IDs (for mapping hotspot index → template chain)
+        template_chain_ids = getattr(self, '_template_chain_ids', [])
+        
+        # Store template first residues for CSV output (keyed by template chain ID)
         for chain_id, analysis in self._template_analysis.items():
             auth_range = analysis.get('auth_range', (1, 1))
             self.template_first_residues[chain_id] = auth_range[0]
@@ -220,7 +240,12 @@ class InputDataBuilder:
                 auth_chains.append("")
                 continue
             
-            chain_id = protein_chain_ids[i] if i < len(protein_chain_ids) else chr(ord('B') + i)
+            # Internal chain ID for Boltz (B, C, D, etc.)
+            internal_chain_id = protein_chain_ids[i] if i < len(protein_chain_ids) else chr(ord('B') + i)
+            
+            # Template chain ID for analysis lookup (A, B, etc. from --template_cif_chain_id)
+            template_chain_id = template_chain_ids[i] if i < len(template_chain_ids) else None
+            
             positions = [int(r.strip()) for r in residues_str.split(",") if r.strip()]
             
             if not positions:
@@ -228,8 +253,8 @@ class InputDataBuilder:
                 auth_chains.append("")
                 continue
             
-            # Get chain analysis if available
-            chain_analysis = self._template_analysis.get(chain_id, {})
+            # Get chain analysis using TEMPLATE chain ID (not internal chain ID)
+            chain_analysis = self._template_analysis.get(template_chain_id, {}) if template_chain_id else {}
             seq_length = len(chain_analysis.get('sequence', ''))
             auth_residue_set = chain_analysis.get('auth_residues', set())
             auth_range = chain_analysis.get('auth_range', (1, seq_length))
@@ -241,7 +266,7 @@ class InputDataBuilder:
                 is_valid, error_msg = validate_hotspots(
                     positions,
                     seq_length,
-                    chain_id,
+                    template_chain_id,  # Use template chain ID for error messages
                     use_auth_numbering=True,
                     auth_residue_set=auth_residue_set,
                     auth_range=auth_range,
@@ -253,7 +278,7 @@ class InputDataBuilder:
                 
                 # Convert auth to canonical
                 canonical_positions = [auth_to_can.get(p, p) for p in positions]
-                hotspots_per_chain[chain_id] = canonical_positions
+                hotspots_per_chain[internal_chain_id] = canonical_positions
                 converted_chains.append(",".join(str(p) for p in canonical_positions))
                 auth_chains.append(",".join(str(p) for p in positions))  # Store original auth
             else:
@@ -262,7 +287,7 @@ class InputDataBuilder:
                     is_valid, error_msg = validate_hotspots(
                         positions,
                         seq_length,
-                        chain_id,
+                        template_chain_id or internal_chain_id,
                         use_auth_numbering=False,
                     )
                     
@@ -270,9 +295,9 @@ class InputDataBuilder:
                         print(error_msg)
                         sys.exit(1)
                 
-                hotspots_per_chain[chain_id] = positions
+                hotspots_per_chain[internal_chain_id] = positions
                 converted_chains.append(",".join(str(p) for p in positions))
-                # If not using auth numbering, auth_chains stays empty or we can compute it
+                # If not using auth numbering, compute auth positions if we have the mapping
                 if can_to_auth:
                     auth_positions = [can_to_auth.get(p, p) for p in positions]
                     auth_chains.append(",".join(str(p) for p in auth_positions))
@@ -441,9 +466,19 @@ class InputDataBuilder:
         if self._template_analysis and protein_seqs_list:
             use_auth = getattr(a, 'use_auth_numbering', False)
             template_source = f"template ({a.template_path})" if a.template_path else ""
+            
+            # Remap hotspots from internal chain ID (B, C) to template chain ID (A, B)
+            # for display purposes
+            template_chain_ids = getattr(self, '_template_chain_ids', [])
+            hotspots_for_display = {}
+            for i, template_chain_id in enumerate(template_chain_ids):
+                internal_chain_id = protein_chain_ids[i] if i < len(protein_chain_ids) else chr(ord('B') + i)
+                if internal_chain_id in hotspots_per_chain:
+                    hotspots_for_display[template_chain_id] = hotspots_per_chain[internal_chain_id]
+            
             print_target_analysis(
                 self._template_analysis,
-                hotspots_per_chain,
+                hotspots_for_display,
                 use_auth,
                 template_source,
             )
@@ -453,38 +488,44 @@ class InputDataBuilder:
     def _build_templates(self, protein_chain_ids):
         """
         Constructs the list of template dictionaries.
+        
+        Handles multi-chain templates correctly: when a single template file has
+        multiple chain IDs specified (e.g., --template_cif_chain_id "A,B"), creates
+        a template entry for each protein chain using the same file.
         """
         a = self.args
         templates = []
         if a.template_path:
             template_path_list = smart_split(a.template_path)
-            # We use the internal protein_chain_ids list
             template_cif_chain_id_list = (
                 smart_split(a.template_cif_chain_id)
                 if a.template_cif_chain_id
                 else []
             )
             
-            # Use protein_chain_ids to determine the number of expected templates
             num_proteins = len(protein_chain_ids)
+            num_template_chains = len(template_cif_chain_id_list)
             
-            # Pad template paths list to match number of proteins
-            if len(template_path_list) != num_proteins:
-                print(f"Warning: Mismatch between number of proteins ({num_proteins}) and template paths ({len(template_path_list)}). Padding with empty entries.")
-                while len(template_path_list) < num_proteins:
-                    template_path_list.append("")
-            
-            # Pad cif chains list to match number of proteins
-            if len(template_cif_chain_id_list) != num_proteins:
-                print(f"Warning: Mismatch between number of proteins ({num_proteins}) and template CIF chains ({len(template_cif_chain_id_list)}). Padding with empty entries.")
-                while len(template_cif_chain_id_list) < num_proteins:
-                    template_cif_chain_id_list.append("")
-            
-            # Now, iterate up to num_proteins, linking them
+            # For multi-chain from single file: reuse the same template file for each chain
+            # This is the key fix: iterate over template_cif_chain_id_list, not template_path_list
             for i in range(num_proteins):
-                template_file_path = template_path_list[i]
+                # Get the template file: if there's only one file but multiple chains,
+                # reuse the same file for all chains
+                if i < len(template_path_list):
+                    template_file_path = template_path_list[i]
+                elif len(template_path_list) == 1:
+                    # Single file with multiple chains - reuse it
+                    template_file_path = template_path_list[0]
+                else:
+                    template_file_path = ""
+                
                 if not template_file_path:
-                    continue # Skip if no template path for this protein
+                    continue  # Skip if no template path
+                
+                # Get the cif_chain_id for this protein
+                cif_chain = template_cif_chain_id_list[i] if i < num_template_chains else ""
+                if not cif_chain:
+                    continue  # Skip if no cif chain specified
                     
                 template_file = get_cif(template_file_path)
                 
@@ -494,12 +535,8 @@ class InputDataBuilder:
                     else {"pdb": template_file}
                 )
                 
-                t_block["chain_id"] = protein_chain_ids[i] # e.g., 'B'
-                
-                # Only add cif_chain_id if provided for this template
-                cif_chain = template_cif_chain_id_list[i]
-                if cif_chain:
-                    t_block["cif_chain_id"] = cif_chain # e.g., 'P'
+                t_block["chain_id"] = protein_chain_ids[i]  # Internal chain ID (e.g., 'B')
+                t_block["cif_chain_id"] = cif_chain  # Template chain ID (e.g., 'A')
                 
                 templates.append(t_block)
                 
