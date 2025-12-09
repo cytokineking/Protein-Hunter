@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import warnings
 
 # ============================================================================
@@ -18,7 +19,7 @@ logging.getLogger("absl").setLevel(logging.WARNING)
 # Suppress PyTorch warning about numpy array conversion
 warnings.filterwarnings("ignore", message=".*Creating a tensor from a list of numpy.ndarrays.*")
 
-from pipeline import ProteinHunter_Boltz
+from pipeline import ProteinHunter_Boltz, MultiGPUOrchestrator
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -36,7 +37,10 @@ def parse_args():
         description="Boltz protein design with cycle optimization"
     )
     # --- Existing Arguments (omitted for brevity, keep all original args) ---
-    parser.add_argument("--gpu_id", default=0, type=int)
+    parser.add_argument("--gpu_id", default=0, type=int,
+        help="GPU device ID to use (default: 0)")
+    parser.add_argument("--num_gpus", default=1, type=int,
+        help="Number of GPUs for parallel execution. When > 1, spawns multiple workers with automatic work distribution.")
     parser.add_argument("--grad_enabled", action="store_true", default=False)
     parser.add_argument("--name", default="target_name_is_missing", type=str)
     parser.add_argument(
@@ -183,6 +187,11 @@ def main():
     # Validate stopping condition arguments
     validate_args(args)
     
+    # Validate num_gpus
+    if args.num_gpus < 1:
+        print("ERROR: --num_gpus must be at least 1")
+        sys.exit(1)
+    
     # Smart MSA mode: skip MSAs when template provided without AF3 validation
     # - Template provided + no AF3 validation: skip MSAs (Boltz uses template, no AF3 needs)
     # - Template provided + AF3 validation: compute MSAs (AF3 needs them)
@@ -194,8 +203,16 @@ def main():
     
     # Pretty print each argument in a row for better visualization
     print_args(args)
-    protein_hunter = ProteinHunter_Boltz(args)
-    protein_hunter.run_pipeline()
+    
+    # Choose execution mode based on num_gpus
+    if args.num_gpus > 1:
+        # Multi-GPU mode: use orchestrator for parallel execution
+        orchestrator = MultiGPUOrchestrator(args)
+        orchestrator.run()
+    else:
+        # Single-GPU mode: use standard pipeline
+        protein_hunter = ProteinHunter_Boltz(args)
+        protein_hunter.run_pipeline()
 
 if __name__ == "__main__":
     main()

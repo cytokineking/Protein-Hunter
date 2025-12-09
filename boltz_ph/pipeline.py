@@ -4,6 +4,7 @@ import random
 import sys
 import shutil
 from collections import defaultdict
+from multiprocessing import Process, Queue, Manager
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -1871,6 +1872,90 @@ class ProteinHunter_Boltz:
         
         return True
 
+    def run_single_design(self, design_idx: int, base_data: dict, pocket_conditioning: bool) -> dict:
+        """
+        Execute a single design run and return results.
+        
+        This method is designed to be called by the multi-GPU orchestrator,
+        allowing parallel execution across multiple GPUs.
+        
+        Args:
+            design_idx: The unique index for this design
+            base_data: Pre-built base data dictionary from data_builder.build()
+            pocket_conditioning: Whether pocket conditioning is enabled
+            
+        Returns:
+            dict containing:
+            - design_idx: The design index
+            - run_metrics: Output from _run_design_cycle()
+            - design_id: The unique design identifier
+            - has_valid_pdb: Whether a valid PDB was generated
+            - validation_result: If AF3 validation ran, the result dict (or None)
+            - accepted: Final acceptance status
+        """
+        data_cp = copy.deepcopy(base_data)
+        run_id = str(design_idx)
+        
+        # Run the design cycle
+        run_metrics = self._run_design_cycle(data_cp, run_id, pocket_conditioning)
+        
+        # Save best design
+        design_id, has_valid_pdb = self._save_single_best_design(run_metrics)
+        
+        result = {
+            "design_idx": design_idx,
+            "run_metrics": run_metrics,
+            "design_id": design_id,
+            "has_valid_pdb": has_valid_pdb,
+            "validation_result": None,
+            "accepted": None,
+            "rejection_reason": "",
+        }
+        
+        if not has_valid_pdb:
+            result["accepted"] = False
+            result["rejection_reason"] = f"no cycle passed all criteria (alanine <= 20%, ipTM >= {self.args.high_iptm_threshold}, pLDDT >= {self.args.high_plddt_threshold})"
+            return result
+        
+        # Check if AF3 validation is enabled
+        if not self.args.use_alphafold3_validation:
+            return result
+        
+        # Check Boltz thresholds before expensive AF3 validation
+        boltz_iptm = run_metrics.get("best_iptm", 0.0)
+        boltz_plddt = run_metrics.get("best_plddt", 0.0)
+        
+        iptm_ok = boltz_iptm >= self.args.high_iptm_threshold
+        plddt_ok = boltz_plddt >= self.args.high_plddt_threshold
+        
+        if not (iptm_ok and plddt_ok):
+            failure_reasons = []
+            if not iptm_ok:
+                failure_reasons.append(f"boltz_iptm < {self.args.high_iptm_threshold}")
+            if not plddt_ok:
+                failure_reasons.append(f"boltz_plddt < {self.args.high_plddt_threshold}")
+            result["accepted"] = False
+            result["rejection_reason"] = "; ".join(failure_reasons)
+            self._update_design_status(design_id, False, result["rejection_reason"])
+            return result
+        
+        # Run full AF3 + PyRosetta validation
+        validation_result = self._run_single_design_validation(run_metrics)
+        self._save_design_result(validation_result)
+        
+        result["validation_result"] = validation_result
+        result["accepted"] = validation_result.get("accepted", False)
+        result["rejection_reason"] = validation_result.get("rejection_reason", "")
+        
+        # Update best_designs.csv with final validation result
+        self._update_design_status(
+            design_id,
+            result["accepted"],
+            result["rejection_reason"]
+        )
+        
+        return result
+
     def run_pipeline(self):
         """Orchestrates the entire protein design and validation pipeline."""
         # 1. Prepare Base Data (using the new InputDataBuilder)
@@ -2127,3 +2212,282 @@ class ProteinHunter_Boltz:
         print(f"  ├── designs/           # ALL cycles (PDBs + design_stats.csv)")
         print(f"  └── best_designs/      # Best cycle per design run")
         print(f"\nResults saved to: {self.save_dir}")
+
+
+# =============================================================================
+# Multi-GPU Orchestrator
+# =============================================================================
+
+def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutdown_event):
+    """
+    Worker process that runs on a specific GPU.
+    
+    Each worker:
+    1. Initializes its own ProteinHunter_Boltz instance on the assigned GPU
+    2. Pulls design indices from the shared task queue
+    3. Executes designs and puts results in the result queue
+    4. Exits gracefully when receiving None (poison pill) or shutdown signal
+    
+    Args:
+        gpu_id: CUDA device ID for this worker
+        args: Command-line arguments (will be modified to set gpu_id)
+        task_queue: Queue to pull design indices from
+        result_queue: Queue to put results into
+        shutdown_event: Multiprocessing event to signal shutdown
+    """
+    import copy
+    
+    # Set GPU for this worker
+    worker_args = copy.deepcopy(args)
+    worker_args.gpu_id = gpu_id
+    
+    try:
+        # Initialize model on this GPU
+        print(f"[GPU {gpu_id}] Initializing worker...")
+        hunter = ProteinHunter_Boltz(worker_args)
+        
+        # Build base data (done once per worker)
+        base_data, pocket_conditioning = hunter.data_builder.build()
+        print(f"[GPU {gpu_id}] Ready for designs")
+        
+        while not shutdown_event.is_set():
+            try:
+                # Non-blocking get with timeout to check shutdown
+                design_idx = task_queue.get(timeout=1.0)
+            except:
+                continue  # Timeout - check shutdown event and retry
+            
+            if design_idx is None:
+                # Poison pill - exit gracefully
+                print(f"[GPU {gpu_id}] Received shutdown signal, finishing...")
+                break
+            
+            print(f"[GPU {gpu_id}] Starting design {design_idx}")
+            
+            try:
+                result = hunter.run_single_design(design_idx, base_data, pocket_conditioning)
+                result["gpu_id"] = gpu_id
+                result_queue.put(result)
+                
+                status = "✓" if result.get("has_valid_pdb") else "✗"
+                accepted = result.get("accepted")
+                if accepted is True:
+                    status = "✓✓ ACCEPTED"
+                elif accepted is False and result.get("has_valid_pdb"):
+                    status = f"✗ {result.get('rejection_reason', 'rejected')[:50]}"
+                
+                print(f"[GPU {gpu_id}] Design {design_idx} complete: {status}")
+                
+            except Exception as e:
+                print(f"[GPU {gpu_id}] Error on design {design_idx}: {e}")
+                result_queue.put({
+                    "design_idx": design_idx,
+                    "gpu_id": gpu_id,
+                    "error": str(e),
+                    "has_valid_pdb": False,
+                    "accepted": False,
+                })
+                
+    except Exception as e:
+        print(f"[GPU {gpu_id}] Worker initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+class MultiGPUOrchestrator:
+    """
+    Orchestrates parallel protein design across multiple GPUs.
+    
+    Uses a producer-consumer pattern:
+    - Orchestrator manages a task queue of design indices
+    - Worker processes pull from queue and execute designs
+    - Results are collected and progress is tracked centrally
+    
+    Design IDs are assigned atomically from the queue, preventing collisions.
+    Workers finish their current design before shutting down (graceful exit).
+    """
+    
+    def __init__(self, args):
+        """
+        Initialize the orchestrator.
+        
+        Args:
+            args: Command-line arguments with num_gpus set
+        """
+        self.args = args
+        self.num_gpus = args.num_gpus
+        
+        # Create save directory structure
+        self.save_dir = args.save_dir if args.save_dir else f"./results_{args.name}"
+        os.makedirs(self.save_dir, exist_ok=True)
+        os.makedirs(f"{self.save_dir}/designs", exist_ok=True)
+        os.makedirs(f"{self.save_dir}/best_designs", exist_ok=True)
+        
+    def _count_completed_designs(self) -> int:
+        """Count completed designs by checking best_designs/ folder."""
+        best_dir = Path(self.save_dir) / "best_designs"
+        if not best_dir.exists():
+            return 0
+        return len(list(best_dir.glob("*.pdb")))
+    
+    def _count_accepted_designs(self) -> int:
+        """Count accepted designs by checking accepted_designs/ folder."""
+        accepted_dir = Path(self.save_dir) / "accepted_designs"
+        if not accepted_dir.exists():
+            return 0
+        return len(list(accepted_dir.glob("*_relaxed.pdb")))
+    
+    def _get_next_design_index(self) -> int:
+        """Get next design index from design_stats.csv."""
+        csv_path = Path(self.save_dir) / "designs" / "design_stats.csv"
+        if not csv_path.exists():
+            return 0
+        try:
+            df = pd.read_csv(csv_path)
+            if "design_num" in df.columns and len(df) > 0:
+                return int(df["design_num"].max()) + 1
+        except Exception:
+            pass
+        return 0
+    
+    def run(self):
+        """
+        Run the multi-GPU design pipeline.
+        
+        Spawns worker processes, distributes work, and collects results.
+        """
+        print(f"\n{'='*70}")
+        print(f"🚀 MULTI-GPU ORCHESTRATOR")
+        print(f"{'='*70}")
+        print(f"GPUs: {self.num_gpus}")
+        print(f"Target designs: {self.args.num_designs}")
+        if self.args.num_accepted:
+            print(f"Target accepted: {self.args.num_accepted}")
+        print(f"Output: {self.save_dir}")
+        print(f"{'='*70}\n")
+        
+        # Create shared queues and shutdown event
+        manager = Manager()
+        task_queue = manager.Queue()
+        result_queue = manager.Queue()
+        shutdown_event = manager.Event()
+        
+        # Check for existing progress (resume support)
+        existing_count = self._get_next_design_index()
+        completed_count = self._count_completed_designs()
+        accepted_count = self._count_accepted_designs()
+        
+        if existing_count > 0:
+            print(f"📁 Found {existing_count} existing design attempts, {completed_count} completed")
+            print(f"   Resuming from design index {existing_count}...")
+        
+        next_design_idx = existing_count
+        
+        # Spawn worker processes
+        workers = []
+        for gpu_id in range(self.num_gpus):
+            p = Process(
+                target=_gpu_worker,
+                args=(gpu_id, self.args, task_queue, result_queue, shutdown_event)
+            )
+            p.start()
+            workers.append(p)
+        
+        # Initial work distribution - one design per worker
+        in_flight = 0
+        target_designs = self.args.num_designs or float('inf')
+        target_accepted = self.args.num_accepted or float('inf')
+        
+        for _ in range(min(self.num_gpus, int(target_designs - completed_count))):
+            task_queue.put(next_design_idx)
+            next_design_idx += 1
+            in_flight += 1
+        
+        # Main loop: monitor results and queue more work
+        all_results = []
+        try:
+            while completed_count < target_designs and accepted_count < target_accepted:
+                if in_flight == 0:
+                    break  # No more work in flight and targets not met
+                
+                try:
+                    result = result_queue.get(timeout=5.0)
+                except:
+                    continue  # Timeout - check conditions and retry
+                
+                in_flight -= 1
+                all_results.append(result)
+                
+                if result.get("has_valid_pdb"):
+                    completed_count += 1
+                
+                if result.get("accepted"):
+                    accepted_count += 1
+                
+                # Progress update
+                progress_parts = [f"{completed_count}/{target_designs} designs"]
+                if self.args.num_accepted:
+                    progress_parts.append(f"{accepted_count}/{target_accepted} accepted")
+                print(f"   Progress: {', '.join(progress_parts)}")
+                
+                # Queue more work if needed
+                if completed_count < target_designs and accepted_count < target_accepted:
+                    task_queue.put(next_design_idx)
+                    next_design_idx += 1
+                    in_flight += 1
+            
+            print(f"\n✓ Target reached!")
+            
+        except KeyboardInterrupt:
+            print("\n⚠ Interrupted! Waiting for workers to finish current designs...")
+        
+        finally:
+            # Signal shutdown
+            shutdown_event.set()
+            
+            # Send poison pills to stop workers
+            for _ in range(self.num_gpus):
+                task_queue.put(None)
+            
+            # Wait for workers to finish (they complete current design first)
+            print("Waiting for workers to complete current designs...")
+            for p in workers:
+                p.join(timeout=600)  # 10 minute timeout per worker
+                if p.is_alive():
+                    print(f"Worker {p.pid} didn't finish in time, terminating...")
+                    p.terminate()
+        
+        # Final summary
+        self._print_final_summary(all_results)
+    
+    def _print_final_summary(self, all_results: list):
+        """Print final summary of the multi-GPU run."""
+        completed = self._count_completed_designs()
+        accepted = self._count_accepted_designs()
+        
+        print(f"\n{'='*70}")
+        print("MULTI-GPU PIPELINE COMPLETE")
+        print(f"{'='*70}")
+        print(f"Total designs generated: {completed}")
+        print(f"Accepted: {accepted}")
+        print(f"Rejected: {completed - accepted}")
+        
+        # Per-GPU stats
+        gpu_counts = {}
+        for r in all_results:
+            gpu_id = r.get("gpu_id", -1)
+            gpu_counts[gpu_id] = gpu_counts.get(gpu_id, 0) + 1
+        
+        if gpu_counts:
+            print(f"\nPer-GPU distribution:")
+            for gpu_id in sorted(gpu_counts.keys()):
+                print(f"  GPU {gpu_id}: {gpu_counts[gpu_id]} designs")
+        
+        print(f"\nOutput structure:")
+        print(f"  {self.save_dir}/")
+        print(f"  ├── designs/              # All cycle PDBs + design_stats.csv")
+        print(f"  ├── best_designs/         # Best per design + best_designs.csv")
+        if self.args.use_alphafold3_validation:
+            print(f"  ├── af3_validation/       # AF3 structures + metrics")
+            print(f"  ├── accepted_designs/     # Passed filters")
+            print(f"  └── rejected/             # Failed filters")
