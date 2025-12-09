@@ -744,6 +744,7 @@ def run_alphafold_step(
     gpu_id=0,
     high_iptm=False,
     use_msa_for_af3=False,
+    msa_cache_dir=None,
 ):
     """
     Orchestrates the AlphaFold validation step:
@@ -774,7 +775,8 @@ def run_alphafold_step(
         binder_chain=binder_id,
         use_msa_for_af3=use_msa_for_af3,
         afdb_dir=afdb_dir,
-        hmmer_path=hmmer_path
+        hmmer_path=hmmer_path,
+        msa_cache_dir=msa_cache_dir,
     )
     
     # Check if any JSON files were created
@@ -843,7 +845,8 @@ def process_yaml_files(
     binder_chain: str = "A",
     use_msa_for_af3: bool = False,
     afdb_dir: str = "",
-    hmmer_path: str = ""
+    hmmer_path: str = "",
+    msa_cache_dir: str = None,
 ):
     """
     Process Boltz output YAML files into AlphaFold3 JSON input format.
@@ -914,6 +917,17 @@ def process_yaml_files(
                 # Note: Trailing \n is required for proper FASTA format (matches Modal pipeline)
                 processed_msas.append(f">query\n{query_seq}\n")
                 continue
+
+            # Check for cached MSA first (from Boltz design phase)
+            # This avoids re-fetching MSAs that were already computed
+            if msa_cache_dir:
+                cached_a3m = Path(msa_cache_dir) / f"{chain_id}_env" / "msa.a3m"
+                if cached_a3m.exists():
+                    protein_msa = extract_sequences_and_format(
+                        str(cached_a3m), replace_query_seq=True, query_seq=query_seq
+                    )
+                    processed_msas.append(protein_msa)
+                    continue
 
             msa_file = None
             if msa_path:
@@ -1218,6 +1232,7 @@ def run_alphafold_step_from_csv(
     gpu_id: int = 0,
     high_iptm: bool = False,
     use_msa_for_af3: bool = False,
+    msa_cache_dir: str = None,
 ):
     """
     Run AlphaFold validation using a CSV file as input.
@@ -1227,6 +1242,7 @@ def run_alphafold_step_from_csv(
     
     Args:
         csv_path: Path to design_stats.csv or best_designs.csv
+        msa_cache_dir: Directory containing cached MSAs from Boltz design (e.g., save_dir/designs)
         ... (other args same as run_alphafold_step)
     
     Returns:
@@ -1255,6 +1271,7 @@ def run_alphafold_step_from_csv(
         gpu_id=gpu_id,
         high_iptm=high_iptm,
         use_msa_for_af3=use_msa_for_af3,
+        msa_cache_dir=msa_cache_dir,
     )
     
     # Clean up temporary YAMLs

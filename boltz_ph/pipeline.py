@@ -1130,6 +1130,7 @@ class ProteinHunter_Boltz:
                 gpu_id=a.gpu_id,
                 high_iptm=False,  # Don't filter at AF3 stage - let PyRosetta handle all filtering
                 use_msa_for_af3=a.use_msa_for_af3,
+                msa_cache_dir=self.designs_dir,  # Use cached MSAs from Boltz design
             )
         )
 
@@ -1550,6 +1551,7 @@ class ProteinHunter_Boltz:
                     gpu_id=a.gpu_id,
                     high_iptm=False,
                     use_msa_for_af3=a.use_msa_for_af3,
+                    msa_cache_dir=self.designs_dir,  # Use cached MSAs from Boltz design
                 )
             )
             
