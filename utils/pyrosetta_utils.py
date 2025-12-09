@@ -556,6 +556,10 @@ def measure_rosetta_energy(
         print("No data available for filtering.")
         return
 
+    # Convert Python None to NaN first (fillna only handles NaN, not None in object columns)
+    import numpy as np
+    df = df.replace({None: np.nan})
+    
     # Fill NA/None values with defaults to prevent comparison errors
     # Use values that will cause the row to fail filters (safe defaults)
     fill_values = {
