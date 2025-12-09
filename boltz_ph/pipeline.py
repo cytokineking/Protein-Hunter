@@ -744,6 +744,12 @@ class ProteinHunter_Boltz:
             clean_memory()
 
         clean_memory()
+        
+        # Check for valid output (Boltz may OOM and return incomplete results)
+        if "pair_chains_iptm" not in output or "plddt" not in output:
+            print(f"ERROR: Boltz returned incomplete output at cycle 0 (likely OOM). Skipping this design.")
+            return run_metrics  # Return early with no valid design
+        
         # Capture Cycle 0 metrics
         binder_chain_idx = CHAIN_TO_NUMBER[self.binder_chain]
         pair_chains = output["pair_chains_iptm"]
@@ -865,6 +871,11 @@ class ProteinHunter_Boltz:
                 device=self.device,
                 return_feats=True,
             )
+
+            # Check for valid output (Boltz may OOM and return incomplete results)
+            if "pair_chains_iptm" not in output or "plddt" not in output:
+                print(f"ERROR: Boltz returned incomplete output (likely OOM). Skipping this design.")
+                return run_metrics  # Return early with no valid design
 
             # Calculate ipTM
             current_chain_idx = CHAIN_TO_NUMBER[self.binder_chain]
@@ -1128,7 +1139,7 @@ class ProteinHunter_Boltz:
                 ligandmpnn_dir=work_dir_validation,
                 work_dir=os.path.expanduser(a.work_dir) or os.getcwd(),
                 binder_id=self.binder_chain,
-                gpu_id=a.gpu_id,
+                gpu_id=getattr(a, 'physical_gpu_id', a.gpu_id),  # Use physical GPU for Docker
                 high_iptm=False,  # Don't filter at AF3 stage - let PyRosetta handle all filtering
                 use_msa_for_af3=a.use_msa_for_af3,
                 msa_cache_dir=self.designs_dir,  # Use cached MSAs from Boltz design
@@ -1549,7 +1560,7 @@ class ProteinHunter_Boltz:
                     ligandmpnn_dir=work_dir_validation,
                     work_dir=os.path.expanduser(a.work_dir) or os.getcwd(),
                     binder_id=self.binder_chain,
-                    gpu_id=a.gpu_id,
+                    gpu_id=getattr(a, 'physical_gpu_id', a.gpu_id),  # Use physical GPU for Docker
                     high_iptm=False,
                     use_msa_for_af3=a.use_msa_for_af3,
                     msa_cache_dir=self.designs_dir,  # Use cached MSAs from Boltz design
@@ -2245,6 +2256,7 @@ def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutd
     # Set GPU for this worker
     worker_args = copy.deepcopy(args)
     worker_args.gpu_id = 0  # Now always 0 since CUDA_VISIBLE_DEVICES restricts to one GPU
+    worker_args.physical_gpu_id = gpu_id  # Keep track of actual GPU for Docker (AF3)
     
     # Create per-worker log file for detailed output
     save_dir = args.save_dir if args.save_dir else f"./results_{args.name}"
