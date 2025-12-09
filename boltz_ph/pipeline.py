@@ -1468,7 +1468,9 @@ class ProteinHunter_Boltz:
                 result["rejection_reason"] = "validation_failed"
             
         except Exception as e:
+            import traceback
             print(f"    Error during validation: {e}")
+            traceback.print_exc()
             result["rejection_reason"] = f"validation_error: {str(e)}"
         
         finally:
