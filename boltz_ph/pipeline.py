@@ -2379,13 +2379,14 @@ class MultiGPUOrchestrator:
             return
         
         # Get metrics from run_metrics
-        metrics = result.get("run_metrics", {})
+        metrics = result.get("run_metrics", {}) or {}
         best_cycle = metrics.get("best_cycle")
-        best_iptm = metrics.get("best_iptm", 0)
-        best_plddt = metrics.get("best_plddt", 0)
-        best_ipsae = metrics.get("best_ipsae", 0)
-        alanine_count = metrics.get("best_alanine_count", 0)
-        binder_len = len(metrics.get("best_seq", "")) or 1
+        best_iptm = metrics.get("best_iptm") or 0
+        best_plddt = metrics.get("best_plddt") or 0
+        best_ipsae = metrics.get("best_ipsae") or 0
+        alanine_count = metrics.get("best_alanine_count") or 0
+        best_seq = metrics.get("best_seq") or ""
+        binder_len = len(best_seq) if best_seq else 1
         alanine_pct = (alanine_count / binder_len * 100) if binder_len > 0 else 0
         
         has_valid_pdb = result.get("has_valid_pdb", False)
