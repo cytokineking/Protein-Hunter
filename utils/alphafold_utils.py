@@ -1082,15 +1082,22 @@ def csv_row_to_yaml(row: Dict, binder_chain: str = "A") -> Dict:
         binder_entry["protein"]["cyclic"] = True
     sequences.append(binder_entry)
     
-    # 2. Add target sequences - handle both JSON-encoded and plain string formats
+    # 2. Add target sequences - handle JSON, colon-separated, and NaN formats
     target_seqs = row.get("target_seqs", "{}")
-    if isinstance(target_seqs, str):
-        # Try JSON first, fall back to plain sequence string
+    
+    # Handle NaN/None/empty values (pandas reads empty CSV cells as float NaN)
+    if not _is_valid_value(target_seqs):
+        target_seqs = {}
+    elif isinstance(target_seqs, str):
+        # Try JSON first, then colon-separated, then single sequence
         try:
             target_seqs = json.loads(target_seqs)
         except json.JSONDecodeError:
-            # Plain sequence string - assume it's chain B target
-            if target_seqs:
+            # Handle colon-separated format: "SEQ1:SEQ2" → {"B": SEQ1, "C": SEQ2}
+            if ":" in target_seqs:
+                seqs = target_seqs.split(":")
+                target_seqs = {chr(ord("B") + i): seq for i, seq in enumerate(seqs) if seq}
+            elif target_seqs:
                 target_seqs = {"B": target_seqs}
             else:
                 target_seqs = {}

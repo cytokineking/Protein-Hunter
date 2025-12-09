@@ -196,7 +196,7 @@ class InputDataBuilder:
 
         return protein_seqs_list, protein_msas_list
 
-    def _validate_and_convert_hotspots(self, protein_chain_ids: list[str]) -> tuple[str, dict[str, list[int]]]:
+    def _validate_and_convert_hotspots(self, protein_chain_ids: list[str]) -> tuple[str, dict[str, list[int]], dict[str, list[int]]]:
         """
         Validate hotspots and convert from auth to canonical numbering if needed.
         
@@ -207,6 +207,7 @@ class InputDataBuilder:
             Tuple of:
             - contact_residues_canonical: Converted contact_residues string for Boltz
             - hotspots_per_chain: Dict mapping internal_chain_id to list of canonical hotspot positions
+            - auth_hotspots_per_chain: Dict mapping internal_chain_id to list of auth hotspot positions
         
         Raises:
             SystemExit: If hotspot validation fails
@@ -216,12 +217,13 @@ class InputDataBuilder:
         if not a.contact_residues or not a.contact_residues.strip():
             self.contact_residues_canonical = ""
             self.contact_residues_auth = ""
-            return "", {}
+            return "", {}, {}
         
         residues_chains = a.contact_residues.split("|")
         converted_chains = []
         auth_chains = []  # Store original auth values
         hotspots_per_chain = {}
+        auth_hotspots_per_chain = {}  # Store auth positions for display
         
         use_auth = getattr(a, 'use_auth_numbering', False)
         
@@ -279,8 +281,9 @@ class InputDataBuilder:
                 # Convert auth to canonical
                 canonical_positions = [auth_to_can.get(p, p) for p in positions]
                 hotspots_per_chain[internal_chain_id] = canonical_positions
+                auth_hotspots_per_chain[internal_chain_id] = positions  # Store original auth
                 converted_chains.append(",".join(str(p) for p in canonical_positions))
-                auth_chains.append(",".join(str(p) for p in positions))  # Store original auth
+                auth_chains.append(",".join(str(p) for p in positions))
             else:
                 # Validate in canonical numbering
                 if seq_length > 0:
@@ -296,18 +299,20 @@ class InputDataBuilder:
                         sys.exit(1)
                 
                 hotspots_per_chain[internal_chain_id] = positions
-                converted_chains.append(",".join(str(p) for p in positions))
                 # If not using auth numbering, compute auth positions if we have the mapping
                 if can_to_auth:
                     auth_positions = [can_to_auth.get(p, p) for p in positions]
+                    auth_hotspots_per_chain[internal_chain_id] = auth_positions
                     auth_chains.append(",".join(str(p) for p in auth_positions))
                 else:
+                    auth_hotspots_per_chain[internal_chain_id] = positions  # Use canonical as fallback
                     auth_chains.append("")
+                converted_chains.append(",".join(str(p) for p in positions))
         
         self.contact_residues_canonical = "|".join(converted_chains)
         self.contact_residues_auth = "|".join(auth_chains) if use_auth else ""
         
-        return self.contact_residues_canonical, hotspots_per_chain
+        return self.contact_residues_canonical, hotspots_per_chain, auth_hotspots_per_chain
 
 
     def build(self):
@@ -372,7 +377,7 @@ class InputDataBuilder:
             next_chain_idx += 1
 
         # Validate and convert hotspots (auth → canonical if needed)
-        contact_residues_canonical, hotspots_per_chain = self._validate_and_convert_hotspots(protein_chain_ids)
+        contact_residues_canonical, hotspots_per_chain, auth_hotspots_per_chain = self._validate_and_convert_hotspots(protein_chain_ids)
 
         # Step 1: Determine canonical MSA for each unique target sequence
         seq_to_indices = defaultdict(list)
@@ -464,22 +469,24 @@ class InputDataBuilder:
 
         # Step 7: Print target sequence visualization (if we have template analysis)
         if self._template_analysis and protein_seqs_list:
-            use_auth = getattr(a, 'use_auth_numbering', False)
             template_source = f"template ({a.template_path})" if a.template_path else ""
             
             # Remap hotspots from internal chain ID (B, C) to template chain ID (A, B)
             # for display purposes
             template_chain_ids = getattr(self, '_template_chain_ids', [])
-            hotspots_for_display = {}
+            canonical_hotspots_for_display = {}
+            auth_hotspots_for_display = {}
             for i, template_chain_id in enumerate(template_chain_ids):
                 internal_chain_id = protein_chain_ids[i] if i < len(protein_chain_ids) else chr(ord('B') + i)
                 if internal_chain_id in hotspots_per_chain:
-                    hotspots_for_display[template_chain_id] = hotspots_per_chain[internal_chain_id]
+                    canonical_hotspots_for_display[template_chain_id] = hotspots_per_chain[internal_chain_id]
+                if internal_chain_id in auth_hotspots_per_chain:
+                    auth_hotspots_for_display[template_chain_id] = auth_hotspots_per_chain[internal_chain_id]
             
             print_target_analysis(
                 self._template_analysis,
-                hotspots_for_display,
-                use_auth,
+                canonical_hotspots_for_display,
+                auth_hotspots_for_display,
                 template_source,
             )
 
@@ -859,18 +866,7 @@ class ProteinHunter_Boltz:
             )
             current_ipsae = ipsae_result['ipSAE']
 
-            # Update best structure (only if alanine content is acceptable)
-            if alanine_percentage <= 0.20 and current_iptm > best_iptm:
-                best_iptm = current_iptm
-                best_seq = seq
-                best_structure = copy.deepcopy(structure)
-                best_output = shallow_copy_tensor_dict(output)
-                best_cycle_idx = cycle + 1
-                best_alanine_percentage = alanine_percentage
-                best_ipsae = current_ipsae
-                best_alanine_count = alanine_count
-
-            # 3. Log Metrics and Save PDB
+            # 3. Log Metrics and Save PDB (compute pLDDT before best selection)
             curr_plddt = float(
                 output.get("complex_plddt", torch.tensor([0.0]))
                 .detach()
@@ -883,6 +879,27 @@ class ProteinHunter_Boltz:
                 .cpu()
                 .numpy()[0]
             )
+
+            # Update best structure - must pass BOTH thresholds:
+            # 1. Alanine content <= 20%
+            # 2. ipTM >= threshold (default 0.8)
+            # 3. pLDDT >= threshold (default 0.8)
+            # Tiebreaker: highest ipTM
+            passes_alanine = alanine_percentage <= 0.20
+            passes_iptm = current_iptm >= a.high_iptm_threshold
+            passes_plddt = curr_plddt >= a.high_plddt_threshold
+            
+            if passes_alanine and passes_iptm and passes_plddt and current_iptm > best_iptm:
+                best_iptm = current_iptm
+                best_seq = seq
+                best_structure = copy.deepcopy(structure)
+                best_output = shallow_copy_tensor_dict(output)
+                best_cycle_idx = cycle + 1
+                best_alanine_percentage = alanine_percentage
+                best_ipsae = current_ipsae
+                best_alanine_count = alanine_count
+                best_plddt = curr_plddt
+                best_iplddt = curr_iplddt
 
             run_metrics[f"cycle_{cycle + 1}_iptm"] = current_iptm
             run_metrics[f"cycle_{cycle + 1}_ipsae"] = current_ipsae
@@ -947,25 +964,17 @@ class ProteinHunter_Boltz:
             plot_from_pdb(best_pdb_filename)
         elif best_structure is None:
             print(
-                f"\nNo structure was generated for run {run_id} (no eligible best design with <= 20% alanine)."
+                f"\nNo structure was generated for run {run_id} (no cycle passed all criteria: "
+                f"alanine <= 20%, ipTM >= {a.high_iptm_threshold}, pLDDT >= {a.high_plddt_threshold})."
             )
 
         # Finalize best metrics for CSV
-        if best_alanine_percentage is not None and best_alanine_percentage <= 0.20:
+        # best_plddt and best_iplddt are now stored during selection
+        if best_structure is not None and best_plddt is not None:
             run_metrics["best_iptm"] = float(best_iptm)
             run_metrics["best_cycle"] = best_cycle_idx
-            run_metrics["best_plddt"] = float(
-                best_output.get("complex_plddt", torch.tensor([0.0]))
-                .detach()
-                .cpu()
-                .numpy()[0]
-            )
-            run_metrics["best_iplddt"] = float(
-                best_output.get("complex_iplddt", torch.tensor([0.0]))
-                .detach()
-                .cpu()
-                .numpy()[0]
-            )
+            run_metrics["best_plddt"] = float(best_plddt)
+            run_metrics["best_iplddt"] = float(best_iplddt) if best_iplddt is not None else float("nan")
             run_metrics["best_seq"] = best_seq
             run_metrics["best_ipsae"] = best_ipsae
             run_metrics["best_alanine_count"] = best_alanine_count
@@ -1881,7 +1890,7 @@ class ProteinHunter_Boltz:
             if has_valid_pdb:
                 print(f"  ✓ Saved best design {design_idx} to best_designs/")
             else:
-                print(f"  ✗ Design {design_idx} failed: all cycles had >20% alanine")
+                print(f"  ✗ Design {design_idx} failed: no cycle passed all criteria (alanine/ipTM/pLDDT)")
             
             # 5. Run validation for THIS design (design-by-design execution)
             if self.args.use_alphafold3_validation and has_valid_pdb:
@@ -2001,16 +2010,16 @@ class ProteinHunter_Boltz:
             accepted = None
             rejection_reason = ""
         else:
-            # All cycles failed (e.g., all >20% alanine) - record as rejected
+            # All cycles failed criteria: alanine <= 20%, ipTM >= threshold, pLDDT >= threshold
             design_id = f"{a.name}_d{design_idx}_failed"
             seq = ""
             binder_length = 0
             alanine_count = 0
             alanine_pct = 0.0
             best_cycle = None
-            
+
             accepted = False
-            rejection_reason = "alanine_pct > 20% (all cycles)"
+            rejection_reason = f"no cycle passed all criteria (alanine <= 20%, ipTM >= {a.high_iptm_threshold}, pLDDT >= {a.high_plddt_threshold})"
         
         # Build row for best_designs.csv
         row = {

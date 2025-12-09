@@ -691,16 +691,15 @@ def run_pipeline(
         # ========== STAGE 2: AF3 VALIDATION ==========
         binder_seq = best_seq
         target_seq = task_input.get("protein_seqs", "")
-        target_msas = design_result.get("target_msas", {})
-        target_msa = target_msas.get("B") if use_msa_for_af3 else None
+        target_msas = design_result.get("target_msas", {}) if use_msa_for_af3 else {}
         
         print(f"  [{design_id}] Starting AF3 validation...")
         
         try:
             af3_result = af3_fn.remote(
                 design_id, binder_seq, target_seq,
-                "A", "B",  # binder_chain, target_chain
-                target_msa,
+                "A", "B",  # binder_chain, starting target_chain
+                target_msas,  # Full dict of chain_id -> MSA content
                 "reuse" if use_msa_for_af3 else "none",
                 None, None  # template_path, template_chain_id
             )

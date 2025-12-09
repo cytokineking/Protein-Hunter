@@ -144,7 +144,7 @@ def _run_af3_single_impl(
     target_seq: str,
     binder_chain: str = "A",
     target_chain: str = "B",
-    target_msa: Optional[str] = None,
+    target_msas: Optional[Dict[str, str]] = None,
     af3_msa_mode: str = "none",
     template_path: Optional[str] = None,
     template_chain_id: Optional[str] = None,
@@ -158,10 +158,10 @@ def _run_af3_single_impl(
     Args:
         design_id: Unique identifier for this design
         binder_seq: Binder protein sequence
-        target_seq: Target protein sequence
+        target_seq: Colon-separated target protein sequences (e.g., "seq1:seq2")
         binder_chain: Chain ID for binder (default "A")
-        target_chain: Chain ID for target (default "B")
-        target_msa: Optional MSA content for target (A3M format)
+        target_chain: Starting chain ID for targets (default "B")
+        target_msas: Dict mapping chain_id -> MSA content (A3M format)
         af3_msa_mode: MSA mode ("none", "reuse")
         template_path: Optional path to template structure file
         template_chain_id: Optional chain ID in template file
@@ -174,6 +174,13 @@ def _run_af3_single_impl(
     af_output_dir = work_dir / "af_output"
     af_input_dir.mkdir()
     af_output_dir.mkdir()
+    
+    # Parse multi-chain target sequences
+    target_seqs = target_seq.split(":") if target_seq else []
+    target_chain_ids = [chr(ord(target_chain) + i) for i in range(len(target_seqs))]
+    total_target_length = sum(len(seq) for seq in target_seqs)
+    
+    target_msas = target_msas or {}
     
     result = {
         "design_id": design_id,
@@ -190,18 +197,6 @@ def _run_af3_single_impl(
     if not weights_path.exists():
         result["error"] = "AF3 weights not found"
         return result
-    
-    # Process template if provided
-    target_template_json = []
-    if template_path and Path(template_path).exists():
-        try:
-            template_alignment = get_cif_alignment_json(
-                target_seq, template_path, template_chain_id
-            )
-            target_template_json = [template_alignment]
-            print(f"  {design_id}: Using template from {template_path}")
-        except Exception as e:
-            print(f"  {design_id}: Template processing failed: {e}")
     
     # Build AF3 JSON input
     af3_input = {
@@ -223,23 +218,26 @@ def _run_af3_single_impl(
         }
     })
     
-    # TARGET: Handle MSA and templates based on mode
-    target_entry = {
-        "protein": {
-            "id": target_chain,
-            "sequence": target_seq,
-            "templates": target_template_json,
+    # TARGET CHAINS: Handle each target chain separately
+    for i, (chain_id, seq) in enumerate(zip(target_chain_ids, target_seqs)):
+        target_entry = {
+            "protein": {
+                "id": chain_id,
+                "sequence": seq,
+                "templates": [],  # TODO: Support per-chain templates
+            }
         }
-    }
-    
-    if af3_msa_mode == "reuse" and target_msa:
-        target_entry["protein"]["unpairedMsa"] = target_msa
-        target_entry["protein"]["pairedMsa"] = target_msa
-    else:
-        target_entry["protein"]["unpairedMsa"] = f">query\n{target_seq}\n"
-        target_entry["protein"]["pairedMsa"] = f">query\n{target_seq}\n"
-    
-    af3_input["sequences"].append(target_entry)
+        
+        # Handle MSA for this chain
+        chain_msa = target_msas.get(chain_id)
+        if af3_msa_mode == "reuse" and chain_msa:
+            target_entry["protein"]["unpairedMsa"] = chain_msa
+            target_entry["protein"]["pairedMsa"] = chain_msa
+        else:
+            target_entry["protein"]["unpairedMsa"] = f">query\n{seq}\n"
+            target_entry["protein"]["pairedMsa"] = f">query\n{seq}\n"
+        
+        af3_input["sequences"].append(target_entry)
     
     # Write JSON
     json_path = af_input_dir / f"{design_id}.json"
@@ -247,7 +245,7 @@ def _run_af3_single_impl(
     
     # Run AF3
     try:
-        subprocess.run([
+        proc = subprocess.run([
             "python", "/app/alphafold/run_alphafold.py",
             f"--json_path={json_path}",
             "--model_dir=/af3_weights",
@@ -255,58 +253,82 @@ def _run_af3_single_impl(
             "--run_data_pipeline=false",
             "--run_inference=true",
         ], capture_output=True, text=True, timeout=1800, cwd="/app/alphafold")
+        
+        # Check for errors
+        if proc.returncode != 0:
+            print(f"  [{design_id}] AF3 failed with return code {proc.returncode}")
+            if proc.stderr:
+                # Print last 500 chars of stderr for debugging
+                stderr_tail = proc.stderr[-500:] if len(proc.stderr) > 500 else proc.stderr
+                print(f"  [{design_id}] AF3 stderr: {stderr_tail}")
+            result["error"] = f"AF3 returned code {proc.returncode}"
+            return result
+            
+    except subprocess.TimeoutExpired:
+        result["error"] = "AF3 timed out after 30 minutes"
+        return result
     except Exception as e:
         result["error"] = str(e)
         return result
     
     # Read results
     output_subdir = af_output_dir / design_id
-    if output_subdir.exists():
-        # Try both naming conventions
-        confidence_file = output_subdir / f"{design_id}_confidences.json"
-        if not confidence_file.exists():
-            confidence_file = output_subdir / "confidence.json"
-        
-        structure_file = output_subdir / f"{design_id}_model.cif"
-        if not structure_file.exists():
-            structure_file = output_subdir / "model.cif"
-        
-        if confidence_file.exists():
-            try:
-                confidence_text = confidence_file.read_text()
-                confidence = json.loads(confidence_text)
-                
-                # Store raw confidence JSON for i_pae calculation in PyRosetta
-                result["af3_confidence_json"] = confidence_text
-                
-                # Get pLDDT - average of atom_plddts
-                atom_plddts = confidence.get("atom_plddts", [])
-                if atom_plddts:
-                    result["af3_plddt"] = sum(atom_plddts) / len(atom_plddts)
-                
-                # Check for summary file with ipTM
-                summary_file = output_subdir / f"{design_id}_summary_confidences.json"
-                if summary_file.exists():
-                    summary = json.loads(summary_file.read_text())
-                    result["af3_iptm"] = summary.get("iptm", summary.get("ptm", 0))
-                    result["af3_ptm"] = summary.get("ptm", 0)
-                else:
-                    result["af3_iptm"] = confidence.get("iptm", confidence.get("ranking_score", 0))
-                    result["af3_ptm"] = confidence.get("ptm", 0)
-                
-                # Calculate AF3 ipSAE from PAE matrix
-                ipsae_result = calculate_af3_ipsae(
-                    confidence_text,
-                    binder_length=len(binder_seq),
-                    target_length=len(target_seq),
-                )
-                result["af3_ipsae"] = ipsae_result.get("af3_ipsae", 0)
-                
-            except Exception as e:
-                result["error"] = f"Error reading confidence: {e}"
-        
-        if structure_file.exists():
-            result["af3_structure"] = structure_file.read_text()
+    if not output_subdir.exists():
+        print(f"  [{design_id}] AF3 output directory not found: {output_subdir}")
+        result["error"] = "AF3 output directory not found"
+        return result
+    
+    # Try both naming conventions
+    confidence_file = output_subdir / f"{design_id}_confidences.json"
+    if not confidence_file.exists():
+        confidence_file = output_subdir / "confidence.json"
+    
+    structure_file = output_subdir / f"{design_id}_model.cif"
+    if not structure_file.exists():
+        structure_file = output_subdir / "model.cif"
+    
+    if confidence_file.exists():
+        try:
+            confidence_text = confidence_file.read_text()
+            confidence = json.loads(confidence_text)
+            
+            # Store raw confidence JSON for i_pae calculation in PyRosetta
+            result["af3_confidence_json"] = confidence_text
+            
+            # Get pLDDT - average of atom_plddts
+            atom_plddts = confidence.get("atom_plddts", [])
+            if atom_plddts:
+                result["af3_plddt"] = sum(atom_plddts) / len(atom_plddts)
+            
+            # Check for summary file with ipTM
+            summary_file = output_subdir / f"{design_id}_summary_confidences.json"
+            if summary_file.exists():
+                summary = json.loads(summary_file.read_text())
+                result["af3_iptm"] = summary.get("iptm", summary.get("ptm", 0))
+                result["af3_ptm"] = summary.get("ptm", 0)
+            else:
+                result["af3_iptm"] = confidence.get("iptm", confidence.get("ranking_score", 0))
+                result["af3_ptm"] = confidence.get("ptm", 0)
+            
+            # Calculate AF3 ipSAE from PAE matrix
+            # Use total_target_length (sum of all target chains)
+            ipsae_result = calculate_af3_ipsae(
+                confidence_text,
+                binder_length=len(binder_seq),
+                target_length=total_target_length,
+            )
+            result["af3_ipsae"] = ipsae_result.get("af3_ipsae", 0)
+            
+        except Exception as e:
+            result["error"] = f"Error reading confidence: {e}"
+    else:
+        print(f"  [{design_id}] AF3 confidence file not found")
+        result["error"] = "AF3 confidence file not found"
+    
+    if structure_file.exists():
+        result["af3_structure"] = structure_file.read_text()
+    else:
+        print(f"  [{design_id}] AF3 structure file not found")
     
     return result
 
@@ -422,7 +444,7 @@ def run_af3_single_H100(
     target_seq: str,
     binder_chain: str = "A",
     target_chain: str = "B",
-    target_msa: Optional[str] = None,
+    target_msas: Optional[Dict[str, str]] = None,
     af3_msa_mode: str = "none",
     template_path: Optional[str] = None,
     template_chain_id: Optional[str] = None
@@ -430,7 +452,7 @@ def run_af3_single_H100(
     """Run AF3 validation on H100 GPU (80GB VRAM)."""
     return _run_af3_single_impl(
         design_id, binder_seq, target_seq, binder_chain, target_chain,
-        target_msa, af3_msa_mode, template_path, template_chain_id
+        target_msas, af3_msa_mode, template_path, template_chain_id
     )
 
 @app.function(
@@ -446,7 +468,7 @@ def run_af3_single_A100_80GB(
     target_seq: str,
     binder_chain: str = "A",
     target_chain: str = "B",
-    target_msa: Optional[str] = None,
+    target_msas: Optional[Dict[str, str]] = None,
     af3_msa_mode: str = "none",
     template_path: Optional[str] = None,
     template_chain_id: Optional[str] = None
@@ -454,7 +476,7 @@ def run_af3_single_A100_80GB(
     """Run AF3 validation on A100 80GB GPU."""
     return _run_af3_single_impl(
         design_id, binder_seq, target_seq, binder_chain, target_chain,
-        target_msa, af3_msa_mode, template_path, template_chain_id
+        target_msas, af3_msa_mode, template_path, template_chain_id
     )
 
 @app.function(
@@ -470,7 +492,7 @@ def run_af3_single_A100_40GB(
     target_seq: str,
     binder_chain: str = "A",
     target_chain: str = "B",
-    target_msa: Optional[str] = None,
+    target_msas: Optional[Dict[str, str]] = None,
     af3_msa_mode: str = "none",
     template_path: Optional[str] = None,
     template_chain_id: Optional[str] = None
@@ -478,7 +500,7 @@ def run_af3_single_A100_40GB(
     """Run AF3 validation on A100 40GB GPU."""
     return _run_af3_single_impl(
         design_id, binder_seq, target_seq, binder_chain, target_chain,
-        target_msa, af3_msa_mode, template_path, template_chain_id
+        target_msas, af3_msa_mode, template_path, template_chain_id
     )
 
 

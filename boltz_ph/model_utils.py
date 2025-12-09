@@ -963,12 +963,13 @@ def _analyze_pdb_template(template_path: str, chain_ids: list[str]) -> dict[str,
         # Extract residues with auth numbering
         residues = []
         for residue in chain:
+            res_name = residue.name
             # Skip non-amino acid residues (water, ligands, etc.)
-            if not residue.is_amino_acid():
+            # Use THREE_TO_ONE dict for compatibility with older gemmi versions
+            if res_name not in THREE_TO_ONE:
                 continue
             
             auth_num = residue.seqid.num
-            res_name = residue.name
             one_letter = THREE_TO_ONE.get(res_name, 'X')
             residues.append((auth_num, one_letter, res_name))
         
@@ -1171,8 +1172,8 @@ def format_ranges(ranges: list[tuple[int, int]]) -> str:
 
 def print_target_analysis(
     chains_analysis: dict[str, dict],
-    hotspots_per_chain: dict[str, list[int]],
-    use_auth_numbering: bool,
+    canonical_hotspots_per_chain: dict[str, list[int]],
+    auth_hotspots_per_chain: dict[str, list[int]],
     template_source: str = "",
 ) -> None:
     """
@@ -1180,8 +1181,8 @@ def print_target_analysis(
     
     Args:
         chains_analysis: Output from analyze_template_structure()
-        hotspots_per_chain: Dict mapping chain_id to list of hotspot positions
-        use_auth_numbering: True if hotspots are in auth numbering
+        canonical_hotspots_per_chain: Dict mapping chain_id to list of canonical hotspot positions
+        auth_hotspots_per_chain: Dict mapping chain_id to list of auth hotspot positions
         template_source: Source description (e.g., "template (file.pdb, chain A)")
     """
     c = Colors
@@ -1194,18 +1195,11 @@ def print_target_analysis(
         seq = analysis['sequence']
         seq_len = len(seq)
         auth_range = analysis.get('auth_range', (1, seq_len))
-        auth_to_can = analysis.get('auth_to_canonical', {})
         can_to_auth = analysis.get('canonical_to_auth', {})
         
-        hotspots = hotspots_per_chain.get(chain_id, [])
-        
-        # Convert hotspots to canonical if needed
-        if use_auth_numbering and hotspots:
-            canonical_hotspots = [auth_to_can.get(h, h) for h in hotspots if h in auth_to_can]
-            auth_hotspots = hotspots
-        else:
-            canonical_hotspots = hotspots
-            auth_hotspots = [can_to_auth.get(h, h) for h in hotspots if h in can_to_auth]
+        # Get hotspots directly from the passed dictionaries (already converted)
+        canonical_hotspots = canonical_hotspots_per_chain.get(chain_id, [])
+        auth_hotspots = auth_hotspots_per_chain.get(chain_id, [])
         
         # Print chain header
         print(f"{c.bold(f'Chain {chain_id}')} - {seq_len} residues")
@@ -1213,47 +1207,63 @@ def print_target_analysis(
             print(f"├─ Source: {template_source}")
         print(f"├─ Auth numbering: {auth_range[0]}-{auth_range[1]}")
         
-        if hotspots:
+        if canonical_hotspots:
             auth_ranges = format_ranges(collapse_to_ranges(auth_hotspots))
             can_ranges = format_ranges(collapse_to_ranges(canonical_hotspots))
             print(f"└─ Hotspots: auth {auth_ranges} → canonical {can_ranges}")
         else:
             print(f"└─ Hotspots: none specified")
         
-        # Print hotspot detail table
+        # Print hotspot summary (consolidated ranges, not individual residues)
         if canonical_hotspots:
-            print(f"\n┌{'─'*10}┬{'─'*10}┬{'─'*9}┬{'─'*29}┐")
-            print(f"│ {'Canonical':^8} │ {'Auth':^8} │ {'Residue':^7} │ {'Context':^27} │")
-            print(f"├{'─'*10}┼{'─'*10}┼{'─'*9}┼{'─'*29}┤")
+            # Build residue summary: show first, last, and count
+            sorted_canonical = sorted(set(canonical_hotspots))
+            sorted_auth = sorted(set(auth_hotspots))
             
-            for can_pos in sorted(set(canonical_hotspots)):
-                if can_pos < 1 or can_pos > seq_len:
-                    continue
+            # Only show detail table if hotspots are non-consecutive or span a small portion
+            # For ranges that are consecutive, just show the range summary
+            ranges = collapse_to_ranges(sorted_canonical)
+            
+            # Show residue details only if there are non-consecutive hotspots or <= 5 hotspots
+            if len(ranges) > 1 or len(sorted_canonical) <= 5:
+                print(f"\n┌{'─'*10}┬{'─'*10}┬{'─'*9}┬{'─'*29}┐")
+                print(f"│ {'Canonical':^8} │ {'Auth':^8} │ {'Residue':^7} │ {'Context':^27} │")
+                print(f"├{'─'*10}┼{'─'*10}┼{'─'*9}┼{'─'*29}┤")
+                
+                for can_pos, auth_pos in zip(sorted_canonical, sorted_auth):
+                    if can_pos < 1 or can_pos > seq_len:
+                        continue
+                        
+                    residue = seq[can_pos - 1]  # 0-indexed
                     
-                auth_pos = can_to_auth.get(can_pos, '?')
-                residue = seq[can_pos - 1]  # 0-indexed
+                    # Build context (5 residues on each side)
+                    start = max(0, can_pos - 6)
+                    end = min(seq_len, can_pos + 5)
+                    context = seq[start:end]
+                    
+                    # Highlight the hotspot residue in context
+                    highlight_pos = can_pos - 1 - start
+                    context_highlighted = (
+                        context[:highlight_pos] + 
+                        c.red(context[highlight_pos]) + 
+                        context[highlight_pos + 1:]
+                    )
+                    
+                    # Pad context with dots
+                    left_dots = "..." if start > 0 else "   "
+                    right_dots = "..." if end < seq_len else "   "
+                    context_display = f"{left_dots}{context_highlighted}{right_dots}"
+                    
+                    print(f"│ {can_pos:^8} │ {auth_pos:^8} │ {c.red(residue):^7} │ {context_display:<27} │")
                 
-                # Build context (5 residues on each side)
-                start = max(0, can_pos - 6)
-                end = min(seq_len, can_pos + 5)
-                context = seq[start:end]
-                
-                # Highlight the hotspot residue in context
-                highlight_pos = can_pos - 1 - start
-                context_highlighted = (
-                    context[:highlight_pos] + 
-                    c.red(context[highlight_pos]) + 
-                    context[highlight_pos + 1:]
-                )
-                
-                # Pad context with dots
-                left_dots = "..." if start > 0 else "   "
-                right_dots = "..." if end < seq_len else "   "
-                context_display = f"{left_dots}{context_highlighted}{right_dots}"
-                
-                print(f"│ {can_pos:^8} │ {auth_pos:^8} │ {c.red(residue):^7} │ {context_display:<27} │")
-            
-            print(f"└{'─'*10}┴{'─'*10}┴{'─'*9}┴{'─'*29}┘")
+                print(f"└{'─'*10}┴{'─'*10}┴{'─'*9}┴{'─'*29}┘")
+            else:
+                # For large consecutive ranges, show a compact summary
+                first_can, last_can = sorted_canonical[0], sorted_canonical[-1]
+                first_auth, last_auth = sorted_auth[0], sorted_auth[-1]
+                hotspot_seq = seq[first_can - 1:last_can]  # Extract hotspot sequence
+                print(f"\n    Hotspot residues ({len(sorted_canonical)} total): {c.red(hotspot_seq)}")
+                print(f"    Range: canonical {first_can}-{last_can}, auth {first_auth}-{last_auth}")
         
         # Print sequence with hotspots highlighted
         print(f"\nSequence (hotspots in {c.red('RED')}):")
