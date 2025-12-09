@@ -298,6 +298,38 @@ Use `|` to separate hotspots for different target chains:
 - Residues 10, 20, 30 on Chain B
 - Residues 5, 15 on Chain C
 
+### Author vs Canonical Numbering
+
+By default, hotspot residue numbers use **canonical (1-indexed)** numbering. If your template has non-standard numbering (e.g., starting at residue 7), use `--use_auth_numbering`:
+
+```bash
+# Template has residues numbered 7-16 (author numbering)
+--contact_residues "|7,8,9,10,11,12,13,14,15,16" \
+--use_auth_numbering
+```
+
+The pipeline displays a **target sequence analysis** at startup showing the mapping:
+
+```
+═══════════════════════════════════════════════════════════════════════════════
+🎯 TARGET SEQUENCE ANALYSIS
+═══════════════════════════════════════════════════════════════════════════════
+Chain B - 10 residues
+├─ Source: template (/path/to/structure.pdb)
+├─ Auth numbering: 7-16
+└─ Hotspots: auth [7..16] → canonical [1..10]
+    Hotspot residues (10 total): VVVGAVGVGK
+    Range: canonical 1-10, auth 7-16
+
+Sequence (hotspots in RED):
+Canon Auth                                                Canon Auth
+    1     7  VVVGAVGVGK     10    16
+             **********
+═══════════════════════════════════════════════════════════════════════════════
+```
+
+This visualization helps verify your hotspots map correctly to the intended residues.
+
 ### Hotspot Parameters
 
 | Parameter | Default | Description |
@@ -341,9 +373,39 @@ python boltz_ph/design.py \
 | `--num_designs` | int | — | Total designs to generate (at least one of `--num_designs` or `--num_accepted` required) |
 | `--num_accepted` | int | — | Stop after N designs pass filters (requires `--use_alphafold3_validation`) |
 | `--num_cycles` | int | `5` | Fold→design iterations per run |
+| `--num_gpus` | int | `1` | Number of GPUs for parallel design (multi-GPU mode) |
 | `--mode` | str | `"binder"` | `"binder"` or `"unconditional"` |
 
 **Stopping conditions:** You must specify at least one of `--num_designs` or `--num_accepted`. If both are provided, the pipeline stops when *either* target is reached (OR logic). See [Resumable Execution](#resumable-execution) for details.
+
+### Multi-GPU Parallelization (Local)
+
+Run designs in parallel across multiple GPUs on a single machine:
+
+```bash
+python boltz_ph/design.py \
+    --name parallel_design \
+    --protein_seqs "TARGET_SEQUENCE" \
+    --num_designs 40 \
+    --num_gpus 8 \
+    --use_alphafold3_validation
+```
+
+**How it works:**
+- Spawns one worker process per GPU
+- Each worker handles complete designs (Boltz → LigandMPNN → AF3 validation)
+- Centralized job queue with automatic load balancing
+- Resume-aware: picks up from existing progress
+
+**Output:**
+- Per-worker logs: `results_{name}/worker_gpu*.log`
+- Real-time progress in terminal (design completion, validation results)
+- All outputs merged into standard folder structure
+
+**When to use:**
+- Multi-GPU servers (8×A100, 8×H100, etc.)
+- Large design campaigns (100+ designs)
+- When you want parallelization without Modal overhead
 
 ### Binder Sequence Settings
 
@@ -378,6 +440,7 @@ python boltz_ph/design.py \
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--contact_residues` | str | `""` | Target residues to contact (e.g., `"10,20,30"`) |
+| `--use_auth_numbering` | flag | `False` | Use PDB "author" residue numbers for hotspots |
 | `--contact_cutoff` | float | `15.0` | Contact distance threshold (Å) |
 | `--max_contact_filter_retries` | int | `6` | Retries if contacts unsatisfied |
 | `--no_contact_filter` | flag | `False` | Disable contact filtering |
@@ -843,6 +906,22 @@ python boltz_ph/design.py \
     --msa_mode mmseqs \
     --high_iptm_threshold 0.7 \
     --gpu_id 0
+```
+
+### Example 8: Multi-GPU Parallel Design with Template
+
+```bash
+python boltz_ph/design.py \
+    --name parallel_pMHC \
+    --template_path "./pmhc_structure.pdb" \
+    --template_cif_chain_id "A,B" \
+    --contact_residues "|7,8,9,10,11,12,13,14,15,16" \
+    --use_auth_numbering \
+    --num_designs 40 \
+    --num_cycles 5 \
+    --num_gpus 8 \
+    --use_alphafold3_validation \
+    --alphafold_dir ~/alphafold3
 ```
 
 ---
