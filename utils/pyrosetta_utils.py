@@ -556,6 +556,23 @@ def measure_rosetta_energy(
         print("No data available for filtering.")
         return
 
+    # Fill NA/None values with defaults to prevent comparison errors
+    # Use values that will cause the row to fail filters (safe defaults)
+    fill_values = {
+        "binder_score": float('inf'),        # >= 0 fails
+        "surface_hydrophobicity": float('inf'),  # >= 0.35 fails
+        "interface_sc": 0.0,                  # <= 0.55 fails
+        "interface_packstat": 0.0,            # <= 0 fails
+        "interface_dG": float('inf'),         # >= 0 fails
+        "interface_dSASA": 0.0,               # <= 1 fails
+        "interface_dG_SASA_ratio": float('inf'),  # >= 0 fails
+        "interface_nres": 0,                  # <= 4/7 fails
+        "interface_hbonds": 0,                # <= 3 fails
+        "interface_hbond_percentage": 0.0,    # <= 0 fails
+        "interface_delta_unsat_hbonds": float('inf'),  # >= 2/4 fails
+    }
+    df = df.fillna(fill_values)
+
     # Define filtering mask based on target type and capture thresholds for failure reason
     def failure_reasons(row, target="peptide"):
         reasons = []
@@ -716,11 +733,11 @@ def measure_rosetta_energy(
                     f"i_pae: {metrics_row.get('i_pae', float('nan')):.1f}, "
                     f"apo_holo_rmsd: {metrics_row.get('apo_holo_rmsd', float('nan')):.1f}"
                 )
-                iptm_val = metrics_row.get('iptm', 0 if metrics_row.get('iptm') is None else metrics_row.get('iptm'))
-                plddt_val = metrics_row.get('plddt', 0 if metrics_row.get('plddt') is None else metrics_row.get('plddt'))
-                rg_val = metrics_row.get('rg', 999 if metrics_row.get('rg') is None else metrics_row.get('rg'))
-                i_pae_val = metrics_row.get('i_pae', 999 if metrics_row.get('i_pae') is None else metrics_row.get('i_pae'))
-                rmsd_val = metrics_row.get('apo_holo_rmsd', 999 if metrics_row.get('apo_holo_rmsd') is None else metrics_row.get('apo_holo_rmsd'))
+                iptm_val = metrics_row.get('iptm') if metrics_row.get('iptm') is not None else 0
+                plddt_val = metrics_row.get('plddt') if metrics_row.get('plddt') is not None else 0
+                rg_val = metrics_row.get('rg') if metrics_row.get('rg') is not None else 999
+                i_pae_val = metrics_row.get('i_pae') if metrics_row.get('i_pae') is not None else 999
+                rmsd_val = metrics_row.get('apo_holo_rmsd') if metrics_row.get('apo_holo_rmsd') is not None else 999
                 if iptm_val > 0.5 and plddt_val > 80 and rg_val < 17 and i_pae_val < 15 and rmsd_val < 3.5:
                     shutil.copy(Path(metrics_row['PDB']) / metrics_row['Model'], save_dir + '/' + metrics_row['Model'])
                     all_filtered_rows.append(metrics_row)

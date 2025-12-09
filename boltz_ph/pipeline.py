@@ -712,12 +712,14 @@ class ProteinHunter_Boltz:
             run_metrics["best_alanine_count"] = best_alanine_count
             run_metrics["best_pdb_filename"] = best_pdb_filename
         else:
-            run_metrics["best_iptm"] = float("nan")
+            # Use 0.0 instead of NaN so early filter comparisons work correctly
+            # (0.0 < threshold will properly skip validation for failed designs)
+            run_metrics["best_iptm"] = 0.0
             run_metrics["best_cycle"] = None
-            run_metrics["best_plddt"] = float("nan")
-            run_metrics["best_iplddt"] = float("nan")
+            run_metrics["best_plddt"] = 0.0
+            run_metrics["best_iplddt"] = 0.0
             run_metrics["best_seq"] = None
-            run_metrics["best_ipsae"] = float("nan")
+            run_metrics["best_ipsae"] = 0.0
             run_metrics["best_alanine_count"] = None
             run_metrics["best_pdb_filename"] = None
 

@@ -82,7 +82,7 @@ def run_pyrosetta_single(
         "interface_dSASA": 0.0,
         "interface_dG_SASA_ratio": 0.0,
         "interface_nres": 0,
-        "interface_interface_hbonds": 0,
+        "interface_hbonds": 0,
         "interface_delta_unsat_hbonds": 0,
         "interface_hydrophobicity": 0.0,
         "surface_hydrophobicity": 0.0,
@@ -394,7 +394,7 @@ def run_pyrosetta_single(
         # Get interface scores
         interface_data = iam.get_all_data()
         result["interface_sc"] = round(float(interface_data.sc_value), 3)
-        result["interface_interface_hbonds"] = int(interface_data.interface_hbonds)
+        result["interface_hbonds"] = int(interface_data.interface_hbonds)
         result["interface_dG"] = round(float(iam.get_interface_dG()), 2)
         result["interface_dSASA"] = round(float(iam.get_interface_delta_sasa()), 2)
         result["interface_packstat"] = round(float(iam.get_interface_packstat()), 3)
@@ -434,7 +434,7 @@ def run_pyrosetta_single(
         
         # Interface hbond percentage
         result["interface_hbond_percentage"] = round(
-            (result["interface_interface_hbonds"] / interface_nres) * 100 if interface_nres > 0 else 0, 2
+            (result["interface_hbonds"] / interface_nres) * 100 if interface_nres > 0 else 0, 2
         )
         
         # BUNS percentage
@@ -591,45 +591,51 @@ def run_pyrosetta_single(
             nres_threshold = 7
             buns_threshold = 4
         
-        # Primary interface quality filters
+        # Helper to safely get values with None handling
+        # (dict.get returns None if key exists with None value, not the default)
+        def safe_get(key, default):
+            val = result.get(key)
+            return default if val is None else val
+        
+        # Primary interface quality filters (None-safe with defaults that fail filters)
         if af3_iptm < 0.7:
             rejection_reasons.append(f"Low AF3 ipTM: {af3_iptm:.3f}")
         
         if af3_plddt < 80:
             rejection_reasons.append(f"Low AF3 pLDDT: {af3_plddt:.1f}")
         
-        if result["binder_score"] >= 0:
-            rejection_reasons.append(f"binder_score >= 0: {result['binder_score']}")
+        if safe_get("binder_score", float('inf')) >= 0:
+            rejection_reasons.append(f"binder_score >= 0: {result.get('binder_score')}")
         
-        if result["surface_hydrophobicity"] >= 0.35:
-            rejection_reasons.append(f"surface_hydrophobicity >= 0.35: {result['surface_hydrophobicity']}")
+        if safe_get("surface_hydrophobicity", float('inf')) >= 0.35:
+            rejection_reasons.append(f"surface_hydrophobicity >= 0.35: {result.get('surface_hydrophobicity')}")
         
-        if result["interface_sc"] <= 0.55:
-            rejection_reasons.append(f"interface_sc <= 0.55: {result['interface_sc']}")
+        if safe_get("interface_sc", 0.0) <= 0.55:
+            rejection_reasons.append(f"interface_sc <= 0.55: {result.get('interface_sc')}")
         
-        if result["interface_packstat"] <= 0:
-            rejection_reasons.append(f"interface_packstat <= 0: {result['interface_packstat']}")
+        if safe_get("interface_packstat", 0.0) <= 0:
+            rejection_reasons.append(f"interface_packstat <= 0: {result.get('interface_packstat')}")
         
-        if result["interface_dG"] >= 0:
-            rejection_reasons.append(f"interface_dG >= 0: {result['interface_dG']}")
+        if safe_get("interface_dG", float('inf')) >= 0:
+            rejection_reasons.append(f"interface_dG >= 0: {result.get('interface_dG')}")
         
-        if result["interface_dSASA"] <= 1:
-            rejection_reasons.append(f"interface_dSASA <= 1: {result['interface_dSASA']}")
+        if safe_get("interface_dSASA", 0.0) <= 1:
+            rejection_reasons.append(f"interface_dSASA <= 1: {result.get('interface_dSASA')}")
         
-        if result["interface_dG_SASA_ratio"] >= 0:
-            rejection_reasons.append(f"interface_dG_SASA_ratio >= 0: {result['interface_dG_SASA_ratio']}")
+        if safe_get("interface_dG_SASA_ratio", float('inf')) >= 0:
+            rejection_reasons.append(f"interface_dG_SASA_ratio >= 0: {result.get('interface_dG_SASA_ratio')}")
         
-        if result["interface_nres"] <= nres_threshold:
-            rejection_reasons.append(f"interface_nres <= {nres_threshold}: {result['interface_nres']}")
+        if safe_get("interface_nres", 0) <= nres_threshold:
+            rejection_reasons.append(f"interface_nres <= {nres_threshold}: {result.get('interface_nres')}")
         
-        if result["interface_interface_hbonds"] <= 3:
-            rejection_reasons.append(f"interface_interface_hbonds <= 3: {result['interface_interface_hbonds']}")
+        if safe_get("interface_hbonds", 0) <= 3:
+            rejection_reasons.append(f"interface_hbonds <= 3: {result.get('interface_hbonds')}")
         
-        if result["interface_hbond_percentage"] <= 0:
-            rejection_reasons.append(f"interface_hbond_percentage <= 0: {result['interface_hbond_percentage']}")
+        if safe_get("interface_hbond_percentage", 0.0) <= 0:
+            rejection_reasons.append(f"interface_hbond_percentage <= 0: {result.get('interface_hbond_percentage')}")
         
-        if result["interface_delta_unsat_hbonds"] >= buns_threshold:
-            rejection_reasons.append(f"interface_delta_unsat_hbonds >= {buns_threshold}: {result['interface_delta_unsat_hbonds']}")
+        if safe_get("interface_delta_unsat_hbonds", float('inf')) >= buns_threshold:
+            rejection_reasons.append(f"interface_delta_unsat_hbonds >= {buns_threshold}: {result.get('interface_delta_unsat_hbonds')}")
         
         # Secondary quality filters
         if result.get("i_pae") is not None and result["i_pae"] >= 15:
