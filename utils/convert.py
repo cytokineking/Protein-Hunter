@@ -176,13 +176,16 @@ def convert_cif_files_to_pdb(
                 if os.path.exists(confidence_file_summary):
                     with open(confidence_file_summary) as f:
                         confidence_data = json.load(f)
-                        iptm = confidence_data.get("iptm", float("-inf"))
+                        # Handle None values (APO predictions have no interface, so iptm may be None)
+                        _iptm = confidence_data.get("iptm")
+                        iptm = _iptm if _iptm is not None else float("-inf")
                 
                 # Try loading full confidence data for pLDDT
                 if os.path.exists(confidence_file):
                     with open(confidence_file) as f:
                         confidence_data = json.load(f)
-                        plddt = np.mean(confidence_data.get("atom_plddts", [0.0]))
+                        _plddts = confidence_data.get("atom_plddts")
+                        plddt = np.mean(_plddts) if _plddts else float("-inf")
 
                 # Only filter by threshold when high_iptm mode is enabled
                 if high_iptm and iptm < i_ptm_cutoff:
