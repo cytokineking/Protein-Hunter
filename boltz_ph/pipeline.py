@@ -2236,6 +2236,7 @@ def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutd
         shutdown_event: Multiprocessing event to signal shutdown
     """
     import copy
+    import sys
     
     # CRITICAL: Set CUDA_VISIBLE_DEVICES for this worker process
     # This ensures all child processes (LigandMPNN, etc.) use the correct GPU
@@ -2244,10 +2245,21 @@ def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutd
     # Set GPU for this worker
     worker_args = copy.deepcopy(args)
     worker_args.gpu_id = 0  # Now always 0 since CUDA_VISIBLE_DEVICES restricts to one GPU
+    
+    # Create per-worker log file for detailed output
+    save_dir = args.save_dir if args.save_dir else f"./results_{args.name}"
+    os.makedirs(save_dir, exist_ok=True)
+    log_path = os.path.join(save_dir, f"worker_gpu{gpu_id}.log")
+    log_file = open(log_path, "w", buffering=1)  # Line-buffered for real-time updates
+    
+    # Redirect stdout/stderr to log file (captures all output including subprocesses)
+    sys.stdout = log_file
+    sys.stderr = log_file
 
     try:
         # Initialize model on this GPU
         print(f"[GPU {gpu_id}] Initializing worker...")
+        print(f"[GPU {gpu_id}] Log file: {log_path}")
         hunter = ProteinHunter_Boltz(worker_args)
         
         # Build base data (done once per worker)
@@ -2266,24 +2278,22 @@ def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutd
                 print(f"[GPU {gpu_id}] Received shutdown signal, finishing...")
                 break
             
+            print(f"\n{'='*60}")
             print(f"[GPU {gpu_id}] Starting design {design_idx}")
+            print(f"{'='*60}")
             
             try:
                 result = hunter.run_single_design(design_idx, base_data, pocket_conditioning)
                 result["gpu_id"] = gpu_id
                 result_queue.put(result)
                 
-                status = "✓" if result.get("has_valid_pdb") else "✗"
-                accepted = result.get("accepted")
-                if accepted is True:
-                    status = "✓✓ ACCEPTED"
-                elif accepted is False and result.get("has_valid_pdb"):
-                    status = f"✗ {result.get('rejection_reason', 'rejected')[:50]}"
-                
-                print(f"[GPU {gpu_id}] Design {design_idx} complete: {status}")
+                # Log completion to worker log
+                print(f"\n[GPU {gpu_id}] Design {design_idx} complete")
                 
             except Exception as e:
                 print(f"[GPU {gpu_id}] Error on design {design_idx}: {e}")
+                import traceback
+                traceback.print_exc()
                 result_queue.put({
                     "design_idx": design_idx,
                     "gpu_id": gpu_id,
@@ -2296,6 +2306,8 @@ def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutd
         print(f"[GPU {gpu_id}] Worker initialization failed: {e}")
         import traceback
         traceback.print_exc()
+    finally:
+        log_file.close()
 
 
 class MultiGPUOrchestrator:
@@ -2354,6 +2366,66 @@ class MultiGPUOrchestrator:
             pass
         return 0
     
+    def _print_design_result(self, result: dict) -> None:
+        """Print detailed design result summary to terminal."""
+        gpu_id = result.get("gpu_id", "?")
+        design_idx = result.get("design_idx", "?")
+        
+        print(f"\n[GPU {gpu_id}] Design {design_idx} complete:")
+        
+        # Check for errors first
+        if result.get("error"):
+            print(f"  └─ ✗ ERROR: {result['error']}")
+            return
+        
+        # Get metrics from run_metrics
+        metrics = result.get("run_metrics", {})
+        best_cycle = metrics.get("best_cycle")
+        best_iptm = metrics.get("best_iptm", 0)
+        best_plddt = metrics.get("best_plddt", 0)
+        best_ipsae = metrics.get("best_ipsae", 0)
+        alanine_count = metrics.get("best_alanine_count", 0)
+        binder_len = len(metrics.get("best_seq", "")) or 1
+        alanine_pct = (alanine_count / binder_len * 100) if binder_len > 0 else 0
+        
+        has_valid_pdb = result.get("has_valid_pdb", False)
+        
+        if not has_valid_pdb:
+            print(f"  └─ ✗ FAILED: no cycle passed criteria (Ala≤20%, ipTM≥{self.args.high_iptm_threshold}, pLDDT≥{self.args.high_plddt_threshold})")
+            return
+        
+        # Print best design stats
+        print(f"  ├─ Best: cycle {best_cycle}, ipTM={best_iptm:.3f}, pLDDT={best_plddt:.2f}, ipSAE={best_ipsae:.3f}, Ala={alanine_pct:.0f}%")
+        
+        # Check disposition
+        accepted = result.get("accepted")
+        rejection_reason = result.get("rejection_reason", "")
+        validation_result = result.get("validation_result")
+        
+        if accepted is None:
+            # No validation was run (AF3 disabled)
+            print(f"  └─ ✓ Saved (no validation)")
+        elif rejection_reason and not validation_result:
+            # Rejected before validation (thresholds not met)
+            print(f"  └─ ✗ SKIPPED validation: {rejection_reason}")
+        elif validation_result:
+            # AF3 validation was run
+            af3_iptm = validation_result.get("af3_iptm", 0)
+            af3_ipsae = validation_result.get("af3_ipsae", 0)
+            interface_dG = validation_result.get("interface_dG", 0)
+            interface_hbonds = validation_result.get("interface_hbonds", 0)
+            
+            print(f"  ├─ AF3: iptm={af3_iptm:.3f}, ipsae={af3_ipsae:.3f}, dG={interface_dG:.1f}, hbonds={interface_hbonds}")
+            
+            if accepted:
+                print(f"  └─ ✓✓ ACCEPTED")
+            else:
+                print(f"  └─ ✗ REJECTED: {rejection_reason}")
+        elif accepted is False:
+            print(f"  └─ ✗ REJECTED: {rejection_reason}")
+        else:
+            print(f"  └─ ? Unknown status")
+    
     def run(self):
         """
         Run the multi-GPU design pipeline.
@@ -2368,7 +2440,9 @@ class MultiGPUOrchestrator:
         if self.args.num_accepted:
             print(f"Target accepted: {self.args.num_accepted}")
         print(f"Output: {self.save_dir}")
+        print(f"Worker logs: {self.save_dir}/worker_gpu*.log")
         print(f"{'='*70}\n")
+        print("Starting workers... (detailed logs in worker_gpu*.log files)\n")
         
         # Create shared queues and shutdown event
         manager = Manager()
@@ -2409,6 +2483,7 @@ class MultiGPUOrchestrator:
         
         # Main loop: monitor results and queue more work
         all_results = []
+        rejected_count = 0
         try:
             while completed_count < target_designs and accepted_count < target_accepted:
                 if in_flight == 0:
@@ -2422,17 +2497,25 @@ class MultiGPUOrchestrator:
                 in_flight -= 1
                 all_results.append(result)
                 
+                # Print detailed result summary
+                self._print_design_result(result)
+                
                 if result.get("has_valid_pdb"):
                     completed_count += 1
                 
                 if result.get("accepted"):
                     accepted_count += 1
+                elif result.get("has_valid_pdb") or result.get("error"):
+                    rejected_count += 1
                 
                 # Progress update
-                progress_parts = [f"{completed_count}/{target_designs} designs"]
+                progress_parts = [f"{completed_count}/{int(target_designs)} designs"]
                 if self.args.num_accepted:
-                    progress_parts.append(f"{accepted_count}/{target_accepted} accepted")
-                print(f"   Progress: {', '.join(progress_parts)}")
+                    progress_parts.append(f"{accepted_count}/{int(target_accepted)} accepted")
+                progress_parts.append(f"{rejected_count} rejected")
+                print(f"{'─'*70}")
+                print(f"Progress: {' | '.join(progress_parts)}")
+                print(f"{'─'*70}\n")
                 
                 # Queue more work if needed
                 if completed_count < target_designs and accepted_count < target_accepted:
@@ -2489,9 +2572,11 @@ class MultiGPUOrchestrator:
         
         print(f"\nOutput structure:")
         print(f"  {self.save_dir}/")
+        print(f"  ├── worker_gpu*.log       # Detailed per-worker logs")
         print(f"  ├── designs/              # All cycle PDBs + design_stats.csv")
         print(f"  ├── best_designs/         # Best per design + best_designs.csv")
         if self.args.use_alphafold3_validation:
             print(f"  ├── af3_validation/       # AF3 structures + metrics")
             print(f"  ├── accepted_designs/     # Passed filters")
             print(f"  └── rejected/             # Failed filters")
+        print(f"\nTo view detailed logs: tail -f {self.save_dir}/worker_gpu*.log")
