@@ -2383,11 +2383,11 @@ class MultiGPUOrchestrator:
         gpu_id = result.get("gpu_id", "?")
         design_idx = result.get("design_idx", "?")
         
-        print(f"\n[GPU {gpu_id}] Design {design_idx} complete:")
+        print(f"\n[GPU {gpu_id}] Design {design_idx} complete:", flush=True)
         
         # Check for errors first
         if result.get("error"):
-            print(f"  └─ ✗ ERROR: {result['error']}")
+            print(f"  └─ ✗ ERROR: {result['error']}", flush=True)
             return
         
         # Get metrics from run_metrics
@@ -2404,11 +2404,11 @@ class MultiGPUOrchestrator:
         has_valid_pdb = result.get("has_valid_pdb", False)
         
         if not has_valid_pdb:
-            print(f"  └─ ✗ FAILED: no cycle passed criteria (Ala≤20%, ipTM≥{self.args.high_iptm_threshold}, pLDDT≥{self.args.high_plddt_threshold})")
+            print(f"  └─ ✗ FAILED: no cycle passed criteria (Ala≤20%, ipTM≥{self.args.high_iptm_threshold}, pLDDT≥{self.args.high_plddt_threshold})", flush=True)
             return
         
         # Print best design stats
-        print(f"  ├─ Best: cycle {best_cycle}, ipTM={best_iptm:.3f}, pLDDT={best_plddt:.2f}, ipSAE={best_ipsae:.3f}, Ala={alanine_pct:.0f}%")
+        print(f"  ├─ Best: cycle {best_cycle}, ipTM={best_iptm:.3f}, pLDDT={best_plddt:.2f}, ipSAE={best_ipsae:.3f}, Ala={alanine_pct:.0f}%", flush=True)
         
         # Check disposition
         accepted = result.get("accepted")
@@ -2417,10 +2417,10 @@ class MultiGPUOrchestrator:
         
         if accepted is None:
             # No validation was run (AF3 disabled)
-            print(f"  └─ ✓ Saved (no validation)")
+            print(f"  └─ ✓ Saved (no validation)", flush=True)
         elif rejection_reason and not validation_result:
             # Rejected before validation (thresholds not met)
-            print(f"  └─ ✗ SKIPPED validation: {rejection_reason}")
+            print(f"  └─ ✗ SKIPPED validation: {rejection_reason}", flush=True)
         elif validation_result:
             # AF3 validation was run
             af3_iptm = validation_result.get("af3_iptm", 0)
@@ -2428,16 +2428,16 @@ class MultiGPUOrchestrator:
             interface_dG = validation_result.get("interface_dG", 0)
             interface_hbonds = validation_result.get("interface_hbonds", 0)
             
-            print(f"  ├─ AF3: iptm={af3_iptm:.3f}, ipsae={af3_ipsae:.3f}, dG={interface_dG:.1f}, hbonds={interface_hbonds}")
+            print(f"  ├─ AF3: iptm={af3_iptm:.3f}, ipsae={af3_ipsae:.3f}, dG={interface_dG:.1f}, hbonds={interface_hbonds}", flush=True)
             
             if accepted:
-                print(f"  └─ ✓✓ ACCEPTED")
+                print(f"  └─ ✓✓ ACCEPTED", flush=True)
             else:
-                print(f"  └─ ✗ REJECTED: {rejection_reason}")
+                print(f"  └─ ✗ REJECTED: {rejection_reason}", flush=True)
         elif accepted is False:
-            print(f"  └─ ✗ REJECTED: {rejection_reason}")
+            print(f"  └─ ✗ REJECTED: {rejection_reason}", flush=True)
         else:
-            print(f"  └─ ? Unknown status")
+            print(f"  └─ ? Unknown status", flush=True)
     
     def run(self):
         """
