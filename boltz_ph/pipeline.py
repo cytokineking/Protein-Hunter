@@ -688,17 +688,31 @@ class ProteinHunter_Boltz:
             save_pdb(structure, output["coords"], plddts, pdb_filename)
 
             contact_check_okay = True
-            if a.contact_residues.strip() and not a.no_contact_filter:
+            # Use constraints directly - the single source of truth for contact residues
+            # This avoids index alignment issues between a.contact_residues and protein_chain_ids
+            contacts = data_cp.get("constraints", [{}])[0].get("pocket", {}).get("contacts", [])
+            if contacts and not a.no_contact_filter:
                 try:
-                    binds = all([binder_binds_contacts(
-                        pdb_filename,
-                        self.binder_chain,
-                        protein_chain_ids[i],
-                        contact_res,
-                        cutoff=a.contact_cutoff,
-                    )
-                    for i, contact_res in enumerate(a.contact_residues.split("|"))
-                ])
+                    # Build chain → residues mapping from constraints (already canonical numbering)
+                    chain_to_res = defaultdict(list)
+                    for chain_id, res in contacts:
+                        chain_to_res[chain_id].append(int(res))
+                    
+                    # Check each chain's contacts
+                    binds = True
+                    for chain_id, residues in chain_to_res.items():
+                        unique_res = sorted(set(residues))
+                        residues_str = ",".join(str(r) for r in unique_res)
+                        if not binder_binds_contacts(
+                            pdb_filename,
+                            self.binder_chain,
+                            chain_id,
+                            residues_str,
+                            cutoff=a.contact_cutoff,
+                        ):
+                            binds = False
+                            break
+                    
                     if not binds:
                         print(
                             "❌ Binder does NOT contact required residues after cycle 0. Retrying..."
