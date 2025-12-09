@@ -58,6 +58,8 @@ UNIFIED_DESIGN_COLUMNS = [
     "design_id", "design_num", "cycle",
     # Binder info
     "binder_sequence", "binder_length", "cyclic", "alanine_count", "alanine_pct",
+    # Target info
+    "target_seqs", "contact_residues", "contact_residues_auth", "template_first_residue",
     # Boltz design metrics (prefixed for clarity)
     "boltz_iptm", "boltz_ipsae", "boltz_plddt", "boltz_iplddt",
     # AF3 validation metrics

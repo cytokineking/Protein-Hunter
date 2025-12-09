@@ -107,6 +107,12 @@ def parse_args():
         type=str,
         help="Specify which target chain residues must contact the binder (currently only supports protein contacts). For more than two chains, separate by |, e.g., '1,2,5,10 | 3,5,10'."
     )
+    parser.add_argument(
+        "--use_auth_numbering",
+        action="store_true",
+        default=False,
+        help="Interpret --contact_residues in auth/PDB numbering instead of canonical 1-indexed positions. Residues will be automatically converted to canonical positions for Boltz."
+    )
 
     parser.add_argument(
         "--no_contact_filter",
@@ -176,6 +182,15 @@ def main():
     
     # Validate stopping condition arguments
     validate_args(args)
+    
+    # Smart MSA mode: skip MSAs when template provided without AF3 validation
+    # - Template provided + no AF3 validation: skip MSAs (Boltz uses template, no AF3 needs)
+    # - Template provided + AF3 validation: compute MSAs (AF3 needs them)
+    # - No template: compute MSAs (Boltz needs them)
+    if args.template_path and args.msa_mode == "mmseqs" and not args.use_alphafold3_validation:
+        print("Note: Template provided without AF3 validation - switching to --msa_mode single")
+        print("      (Boltz uses template structure; MSAs not needed)\n")
+        args.msa_mode = "single"
     
     # Pretty print each argument in a row for better visualization
     print_args(args)

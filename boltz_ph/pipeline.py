@@ -21,20 +21,25 @@ from utils.csv_utils import append_to_csv_safe, update_csv_row
 
 
 from boltz_ph.model_utils import (
+    analyze_template_structure,
     binder_binds_contacts,
     clean_memory,
+    Colors,
     design_sequence,
+    format_gap_error,
     get_boltz_model,
     get_cif,
     load_canonicals,
     plot_from_pdb,
     plot_run_metrics,
+    print_target_analysis,
     process_msa,
     run_prediction,
     sample_seq,
     save_pdb,
     shallow_copy_tensor_dict,
     smart_split,
+    validate_hotspots,
 )
 
 
@@ -58,16 +63,111 @@ class InputDataBuilder:
         os.makedirs(self.designs_dir, exist_ok=True)
         # Keep for backward compatibility with MSA generation
         self.protein_hunter_save_dir = self.designs_dir
+        
+        # Template analysis results (populated by _analyze_templates)
+        self._template_analysis = {}
+        self._auto_extracted_seqs = []
+        
+        # Hotspot traceability (populated by _validate_and_convert_hotspots)
+        self.contact_residues_canonical = ""
+        self.contact_residues_auth = ""  # Original auth values if --use_auth_numbering
+        self.template_first_residues = {}  # chain_id -> first auth residue
 
+    def _analyze_templates(self) -> dict:
+        """
+        Analyze templates for sequence extraction, gap detection, and auth→canonical mapping.
+        
+        Returns:
+            Dict mapping chain_id to analysis results from analyze_template_structure()
+        
+        Raises:
+            SystemExit: If gaps are detected and --protein_seqs not provided
+        """
+        a = self.args
+        
+        if not a.template_path:
+            return {}
+        
+        template_path_list = smart_split(a.template_path)
+        template_cif_chain_id_list = (
+            smart_split(a.template_cif_chain_id)
+            if a.template_cif_chain_id
+            else []
+        )
+        
+        all_analysis = {}
+        auto_seqs = []
+        
+        for i, template_path in enumerate(template_path_list):
+            if not template_path:
+                auto_seqs.append("")
+                continue
+            
+            # Get the actual file path (handles PDB codes, downloads, etc.)
+            template_file = get_cif(template_path)
+            
+            # Determine the chain to analyze
+            cif_chain = template_cif_chain_id_list[i] if i < len(template_cif_chain_id_list) else ""
+            if not cif_chain:
+                # Default to first chain - will be overridden if user provides
+                cif_chain = "A"
+            
+            try:
+                analysis = analyze_template_structure(template_file, [cif_chain])
+                chain_analysis = analysis.get(cif_chain, {})
+                
+                # Check for gaps
+                if chain_analysis.get('has_gaps', False):
+                    if not a.protein_seqs:
+                        # Gaps detected and no --protein_seqs provided - error
+                        error_msg = format_gap_error(cif_chain, chain_analysis)
+                        print(error_msg)
+                        sys.exit(1)
+                    else:
+                        # User provided sequences, just warn
+                        print(f"⚠ Warning: Gaps detected in chain {cif_chain}, using provided --protein_seqs")
+                
+                # Store analysis keyed by internal chain ID (B, C, D, etc.)
+                internal_chain_id = chr(ord('B') + i)
+                all_analysis[internal_chain_id] = {
+                    **chain_analysis,
+                    'template_file': template_file,
+                    'template_cif_chain': cif_chain,
+                }
+                
+                # Auto-extract sequence
+                auto_seqs.append(chain_analysis.get('sequence', ''))
+                
+            except Exception as e:
+                print(f"⚠ Warning: Could not analyze template {template_path}: {e}")
+                auto_seqs.append("")
+        
+        self._template_analysis = all_analysis
+        self._auto_extracted_seqs = auto_seqs
+        return all_analysis
 
     def _process_sequence_inputs(self):
         """
         Parses and groups protein sequences and MSAs from command line arguments.
         Ensures protein_seqs_list and protein_msas_list are aligned and padded.
+        
+        Now supports auto-extraction from templates when --protein_seqs is not provided.
         """
         a = self.args
         
-        protein_seqs_list = smart_split(a.protein_seqs) if a.protein_seqs else []
+        # First analyze templates to potentially auto-extract sequences
+        if not self._template_analysis:
+            self._analyze_templates()
+        
+        # Determine sequences: user-provided takes precedence over auto-extracted
+        if a.protein_seqs:
+            protein_seqs_list = smart_split(a.protein_seqs)
+        elif self._auto_extracted_seqs:
+            protein_seqs_list = self._auto_extracted_seqs
+            if protein_seqs_list and any(s for s in protein_seqs_list):
+                print(f"✓ Auto-extracted {len([s for s in protein_seqs_list if s])} sequence(s) from template(s)")
+        else:
+            protein_seqs_list = []
 
         # Handle special "empty" case: --protein_msas "empty" applies to all seqs
         if a.msa_mode == "single":
@@ -78,6 +178,111 @@ class InputDataBuilder:
             raise ValueError(f"Invalid msa_mode: {a.msa_mode}")
 
         return protein_seqs_list, protein_msas_list
+
+    def _validate_and_convert_hotspots(self, protein_chain_ids: list[str]) -> tuple[str, dict[str, list[int]]]:
+        """
+        Validate hotspots and convert from auth to canonical numbering if needed.
+        
+        Args:
+            protein_chain_ids: List of internal protein chain IDs (e.g., ['B', 'C'])
+        
+        Returns:
+            Tuple of:
+            - contact_residues_canonical: Converted contact_residues string for Boltz
+            - hotspots_per_chain: Dict mapping chain_id to list of canonical hotspot positions
+        
+        Raises:
+            SystemExit: If hotspot validation fails
+        """
+        a = self.args
+        
+        if not a.contact_residues or not a.contact_residues.strip():
+            self.contact_residues_canonical = ""
+            self.contact_residues_auth = ""
+            return "", {}
+        
+        residues_chains = a.contact_residues.split("|")
+        converted_chains = []
+        auth_chains = []  # Store original auth values
+        hotspots_per_chain = {}
+        
+        use_auth = getattr(a, 'use_auth_numbering', False)
+        
+        # Store template first residues for CSV output
+        for chain_id, analysis in self._template_analysis.items():
+            auth_range = analysis.get('auth_range', (1, 1))
+            self.template_first_residues[chain_id] = auth_range[0]
+        
+        for i, residues_str in enumerate(residues_chains):
+            residues_str = residues_str.strip()
+            if not residues_str:
+                converted_chains.append("")
+                auth_chains.append("")
+                continue
+            
+            chain_id = protein_chain_ids[i] if i < len(protein_chain_ids) else chr(ord('B') + i)
+            positions = [int(r.strip()) for r in residues_str.split(",") if r.strip()]
+            
+            if not positions:
+                converted_chains.append("")
+                auth_chains.append("")
+                continue
+            
+            # Get chain analysis if available
+            chain_analysis = self._template_analysis.get(chain_id, {})
+            seq_length = len(chain_analysis.get('sequence', ''))
+            auth_residue_set = chain_analysis.get('auth_residues', set())
+            auth_range = chain_analysis.get('auth_range', (1, seq_length))
+            auth_to_can = chain_analysis.get('auth_to_canonical', {})
+            can_to_auth = chain_analysis.get('canonical_to_auth', {})
+            
+            if use_auth and chain_analysis:
+                # Validate in auth numbering
+                is_valid, error_msg = validate_hotspots(
+                    positions,
+                    seq_length,
+                    chain_id,
+                    use_auth_numbering=True,
+                    auth_residue_set=auth_residue_set,
+                    auth_range=auth_range,
+                )
+                
+                if not is_valid:
+                    print(error_msg)
+                    sys.exit(1)
+                
+                # Convert auth to canonical
+                canonical_positions = [auth_to_can.get(p, p) for p in positions]
+                hotspots_per_chain[chain_id] = canonical_positions
+                converted_chains.append(",".join(str(p) for p in canonical_positions))
+                auth_chains.append(",".join(str(p) for p in positions))  # Store original auth
+            else:
+                # Validate in canonical numbering
+                if seq_length > 0:
+                    is_valid, error_msg = validate_hotspots(
+                        positions,
+                        seq_length,
+                        chain_id,
+                        use_auth_numbering=False,
+                    )
+                    
+                    if not is_valid:
+                        print(error_msg)
+                        sys.exit(1)
+                
+                hotspots_per_chain[chain_id] = positions
+                converted_chains.append(",".join(str(p) for p in positions))
+                # If not using auth numbering, auth_chains stays empty or we can compute it
+                if can_to_auth:
+                    auth_positions = [can_to_auth.get(p, p) for p in positions]
+                    auth_chains.append(",".join(str(p) for p in auth_positions))
+                else:
+                    auth_chains.append("")
+        
+        self.contact_residues_canonical = "|".join(converted_chains)
+        self.contact_residues_auth = "|".join(auth_chains) if use_auth else ""
+        
+        return self.contact_residues_canonical, hotspots_per_chain
 
 
     def build(self):
@@ -140,7 +345,9 @@ class InputDataBuilder:
         if a.nucleic_seq:
             nucleic_chain_id = chr(ord('B') + next_chain_idx)
             next_chain_idx += 1
-        # --- END NEW ---
+
+        # Validate and convert hotspots (auth → canonical if needed)
+        contact_residues_canonical, hotspots_per_chain = self._validate_and_convert_hotspots(protein_chain_ids)
 
         # Step 1: Determine canonical MSA for each unique target sequence
         seq_to_indices = defaultdict(list)
@@ -215,11 +422,11 @@ class InputDataBuilder:
         if templates:
             data["templates"] = templates
 
-        # Step 6: Add constraints (pocket conditioning)
-        pocket_conditioning = bool(a.contact_residues and a.contact_residues.strip())
+        # Step 6: Add constraints (pocket conditioning) - use converted canonical positions
+        pocket_conditioning = bool(contact_residues_canonical and contact_residues_canonical.strip())
         if pocket_conditioning:
             contacts = []
-            residues_chains = a.contact_residues.split("|")
+            residues_chains = contact_residues_canonical.split("|")
             for i, residues_chain in enumerate(residues_chains):
                 residues = residues_chain.split(",")
                 contacts.extend([
@@ -229,6 +436,17 @@ class InputDataBuilder:
                 ])
             constraints = [{"pocket": {"binder": "A", "contacts": contacts}}]
             data["constraints"] = constraints
+
+        # Step 7: Print target sequence visualization (if we have template analysis)
+        if self._template_analysis and protein_seqs_list:
+            use_auth = getattr(a, 'use_auth_numbering', False)
+            template_source = f"template ({a.template_path})" if a.template_path else ""
+            print_target_analysis(
+                self._template_analysis,
+                hotspots_per_chain,
+                use_auth,
+                template_source,
+            )
 
         return data, pocket_conditioning
 
@@ -514,7 +732,9 @@ class ProteinHunter_Boltz:
             "alanine_count": 0,
             "alanine_pct": 0.0,
             "target_seqs": a.protein_seqs or "",
-            "contact_residues": a.contact_residues or "",
+            "contact_residues": self.data_builder.contact_residues_canonical or a.contact_residues or "",
+            "contact_residues_auth": self.data_builder.contact_residues_auth or "",
+            "template_first_residue": ",".join(f"{k}:{v}" for k, v in self.data_builder.template_first_residues.items()) if self.data_builder.template_first_residues else "",
             "msa_mode": a.msa_mode,
             # Fields for AF3 reconstruction
             "ligand_smiles": a.ligand_smiles or "",
@@ -655,7 +875,9 @@ class ProteinHunter_Boltz:
                 "alanine_count": alanine_count,
                 "alanine_pct": round(alanine_percentage * 100, 2),
                 "target_seqs": a.protein_seqs or "",
-                "contact_residues": a.contact_residues or "",
+                "contact_residues": self.data_builder.contact_residues_canonical or a.contact_residues or "",
+                "contact_residues_auth": self.data_builder.contact_residues_auth or "",
+                "template_first_residue": ",".join(f"{k}:{v}" for k, v in self.data_builder.template_first_residues.items()) if self.data_builder.template_first_residues else "",
                 "msa_mode": a.msa_mode,
                 # Fields for AF3 reconstruction
                 "ligand_smiles": a.ligand_smiles or "",
@@ -1768,7 +1990,9 @@ class ProteinHunter_Boltz:
             "alanine_count": alanine_count,
             "alanine_pct": round(alanine_pct, 2),
             "target_seqs": a.protein_seqs or "",
-            "contact_residues": a.contact_residues or "",
+            "contact_residues": self.data_builder.contact_residues_canonical or a.contact_residues or "",
+            "contact_residues_auth": self.data_builder.contact_residues_auth or "",
+            "template_first_residue": ",".join(f"{k}:{v}" for k, v in self.data_builder.template_first_residues.items()) if self.data_builder.template_first_residues else "",
             "msa_mode": a.msa_mode,
             # Fields for AF3 reconstruction
             "ligand_smiles": a.ligand_smiles or "",

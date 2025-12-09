@@ -433,27 +433,53 @@ def get_batch(
     return batch, structure
 
 def process_msa(chain_id: str, sequence: str, msa_dir: Path) -> Path:
-    """Process MSA for a single chain using MMseqs2 and return path to .npz file."""
+    """Process MSA for a single chain using MMseqs2 and return path to .npz file.
+    
+    Implements file-based caching: if the A3M file already exists and its first
+    sequence matches the query, skip the ColabFold API call entirely.
+    """
     msa_chain_dir = msa_dir / f"{chain_id}"
     env_dir = msa_chain_dir.with_name(f"{msa_chain_dir.name}_env")
     env_dir.mkdir(exist_ok=True)
 
-    # Run MSA
-    unpaired_msa = run_mmseqs2(
-        [sequence],
-        str(msa_chain_dir),
-        use_env=True,
-        use_pairing=False,
-        host_url="https://api.colabfold.com",
-        pairing_strategy="greedy",
-    )
-
-    # Save MSA results (.a3m)
     msa_a3m_path = env_dir / "msa.a3m"
-    msa_a3m_path.write_text(unpaired_msa[0])
+    msa_npz_path = env_dir / "msa.npz"
+    
+    # Check if cached A3M exists and matches current sequence
+    cache_valid = False
+    if msa_a3m_path.exists():
+        try:
+            cached_content = msa_a3m_path.read_text()
+            # A3M format: first line is ">query", second line is the sequence
+            lines = cached_content.strip().split('\n')
+            if len(lines) >= 2:
+                cached_seq = lines[1].strip().replace('-', '')  # Remove gaps
+                if cached_seq == sequence:
+                    cache_valid = True
+                    print(f"  ✓ Using cached MSA for chain {chain_id}")
+        except Exception:
+            pass  # Cache invalid, will recompute
+    
+    if not cache_valid:
+        # Run MSA via ColabFold API
+        print(f"  Fetching MSA for chain {chain_id} from ColabFold...")
+        unpaired_msa = run_mmseqs2(
+            [sequence],
+            str(msa_chain_dir),
+            use_env=True,
+            use_pairing=False,
+            host_url="https://api.colabfold.com",
+            pairing_strategy="greedy",
+        )
+
+        # Save MSA results (.a3m)
+        msa_a3m_path.write_text(unpaired_msa[0])
+        
+        # Invalidate NPZ cache since A3M changed
+        if msa_npz_path.exists():
+            msa_npz_path.unlink()
 
     # Process MSA (.a3m) into Boltz .npz format
-    msa_npz_path = env_dir / "msa.npz"
     if not msa_npz_path.exists():
         msa = parse_a3m(
             msa_a3m_path,
@@ -743,3 +769,578 @@ def plot_run_metrics(
     plot_filename = f"{name}_run_{run_id}_design_cycle_results.png"
     plt.savefig(f"{run_save_dir}/{plot_filename}", dpi=300)
     plt.show(block=False)
+
+
+# =============================================================================
+# TEMPLATE ANALYSIS UTILITIES
+# =============================================================================
+
+class Colors:
+    """ANSI escape codes with TTY detection fallback."""
+    _enabled = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+    
+    RED = '\033[91m' if _enabled else ''
+    GREEN = '\033[92m' if _enabled else ''
+    YELLOW = '\033[93m' if _enabled else ''
+    BLUE = '\033[94m' if _enabled else ''
+    MAGENTA = '\033[95m' if _enabled else ''
+    CYAN = '\033[96m' if _enabled else ''
+    WHITE = '\033[97m' if _enabled else ''
+    BOLD = '\033[1m' if _enabled else ''
+    RESET = '\033[0m' if _enabled else ''
+    
+    @classmethod
+    def red(cls, text: str) -> str:
+        return f"{cls.RED}{text}{cls.RESET}"
+    
+    @classmethod
+    def green(cls, text: str) -> str:
+        return f"{cls.GREEN}{text}{cls.RESET}"
+    
+    @classmethod
+    def yellow(cls, text: str) -> str:
+        return f"{cls.YELLOW}{text}{cls.RESET}"
+    
+    @classmethod
+    def cyan(cls, text: str) -> str:
+        return f"{cls.CYAN}{text}{cls.RESET}"
+    
+    @classmethod
+    def bold(cls, text: str) -> str:
+        return f"{cls.BOLD}{text}{cls.RESET}"
+
+
+# Standard 3-letter to 1-letter amino acid code mapping
+THREE_TO_ONE = {
+    'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
+    'GLN': 'Q', 'GLU': 'E', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
+    'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
+    'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V',
+    # Common modified residues
+    'MSE': 'M',  # Selenomethionine
+    'CSE': 'C',  # Selenocysteine
+    'SEC': 'U',  # Selenocysteine (official)
+    'PYL': 'O',  # Pyrrolysine
+}
+
+
+def analyze_template_structure(
+    template_path: str, 
+    chain_ids: list[str]
+) -> dict[str, dict]:
+    """
+    Analyze PDB/CIF template for sequence extraction, gap detection, 
+    and auth→canonical residue mapping.
+    
+    Args:
+        template_path: Path to PDB or CIF file
+        chain_ids: List of chain IDs to analyze (e.g., ['A'] or ['A', 'B'])
+    
+    Returns:
+        Dictionary mapping chain_id to chain analysis dict:
+        {
+            'sequence': str,              # Extracted 1-letter sequence
+            'has_gaps': bool,             # True if gaps detected
+            'gaps': List[Tuple[int,int]], # List of (start, end) gap ranges in auth numbering
+            'auth_to_canonical': Dict[int, int],  # auth_resnum -> canonical_position (1-indexed)
+            'canonical_to_auth': Dict[int, int],  # canonical_position -> auth_resnum
+            'auth_range': Tuple[int, int],        # (min_auth, max_auth)
+            'auth_residues': Set[int],            # Set of all auth residue numbers
+            'resolved_count': int,                # Number of resolved residues
+            'is_cif': bool,                       # True if CIF format
+            'file_chain_id': str,                 # Chain ID in the file (for CIF)
+        }
+    
+    Raises:
+        ValueError: If chain not found or critical parsing errors occur
+    """
+    is_cif = template_path.lower().endswith('.cif')
+    result = {}
+    
+    if is_cif:
+        result = _analyze_cif_template(template_path, chain_ids)
+    else:
+        result = _analyze_pdb_template(template_path, chain_ids)
+    
+    return result
+
+
+def _analyze_cif_template(template_path: str, chain_ids: list[str]) -> dict[str, dict]:
+    """Analyze CIF template using gemmi for full sequence extraction."""
+    doc = gemmi.cif.read(template_path)
+    block = doc.sole_block()
+    result = {}
+    
+    for chain_id in chain_ids:
+        # Try to get full sequence from _entity_poly_seq (CIF has complete sequence)
+        entity_poly_seq = block.find(['_entity_poly_seq.entity_id', 
+                                       '_entity_poly_seq.num',
+                                       '_entity_poly_seq.mon_id'])
+        
+        # Get entity_id for this chain from _struct_asym
+        struct_asym = block.find(['_struct_asym.id', '_struct_asym.entity_id'])
+        entity_id_for_chain = None
+        for row in struct_asym:
+            if row[0] == chain_id:
+                entity_id_for_chain = row[1]
+                break
+        
+        if entity_poly_seq and entity_id_for_chain:
+            # Extract full sequence from _entity_poly_seq
+            seq_residues = []
+            for row in entity_poly_seq:
+                if row[0] == entity_id_for_chain:
+                    mon_id = row[2]
+                    one_letter = THREE_TO_ONE.get(mon_id, 'X')
+                    seq_residues.append((int(row[1]), one_letter))
+            
+            seq_residues.sort(key=lambda x: x[0])
+            full_sequence = ''.join([r[1] for r in seq_residues])
+            
+            # Now get resolved residues for auth→canonical mapping
+            structure = gemmi.read_structure(template_path)
+            model = structure[0]  # First model
+            
+            auth_to_canonical = {}
+            canonical_to_auth = {}
+            auth_residues = set()
+            
+            for chain in model:
+                if chain.name == chain_id:
+                    for i, residue in enumerate(chain):
+                        auth_num = residue.seqid.num
+                        # CIF canonical is 1-indexed from sequence position
+                        # For CIF files with full sequence, we map auth to canonical
+                        canonical_pos = i + 1
+                        auth_to_canonical[auth_num] = canonical_pos
+                        canonical_to_auth[canonical_pos] = auth_num
+                        auth_residues.add(auth_num)
+                    break
+            
+            auth_range = (min(auth_residues), max(auth_residues)) if auth_residues else (0, 0)
+            
+            result[chain_id] = {
+                'sequence': full_sequence,
+                'has_gaps': False,  # CIF files have complete sequence by definition
+                'gaps': [],
+                'auth_to_canonical': auth_to_canonical,
+                'canonical_to_auth': canonical_to_auth,
+                'auth_range': auth_range,
+                'auth_residues': auth_residues,
+                'resolved_count': len(auth_residues),
+                'is_cif': True,
+                'file_chain_id': chain_id,
+            }
+        else:
+            # Fallback to structure parsing like PDB
+            result.update(_analyze_pdb_template(template_path, [chain_id]))
+            if chain_id in result:
+                result[chain_id]['is_cif'] = True
+    
+    return result
+
+
+def _analyze_pdb_template(template_path: str, chain_ids: list[str]) -> dict[str, dict]:
+    """Analyze PDB template for sequence extraction and gap detection."""
+    try:
+        structure = gemmi.read_structure(template_path)
+    except Exception as e:
+        raise ValueError(f"Could not parse structure file: {template_path}: {e}")
+    
+    model = structure[0]  # First model
+    result = {}
+    
+    for chain_id in chain_ids:
+        chain = None
+        for c in model:
+            if c.name == chain_id:
+                chain = c
+                break
+        
+        if chain is None:
+            raise ValueError(f"Chain '{chain_id}' not found in {template_path}")
+        
+        # Extract residues with auth numbering
+        residues = []
+        for residue in chain:
+            # Skip non-amino acid residues (water, ligands, etc.)
+            if not residue.is_amino_acid():
+                continue
+            
+            auth_num = residue.seqid.num
+            res_name = residue.name
+            one_letter = THREE_TO_ONE.get(res_name, 'X')
+            residues.append((auth_num, one_letter, res_name))
+        
+        if not residues:
+            raise ValueError(f"No amino acid residues found in chain '{chain_id}'")
+        
+        # Sort by auth numbering
+        residues.sort(key=lambda x: x[0])
+        
+        # Build auth→canonical mapping and detect gaps
+        auth_nums = [r[0] for r in residues]
+        auth_residues = set(auth_nums)
+        auth_range = (min(auth_nums), max(auth_nums))
+        
+        # Check for gaps (missing residues between min and max)
+        gaps = []
+        expected_range = set(range(auth_range[0], auth_range[1] + 1))
+        missing = expected_range - auth_residues
+        
+        if missing:
+            # Group consecutive missing residues into ranges
+            missing_sorted = sorted(missing)
+            gap_start = missing_sorted[0]
+            gap_end = gap_start
+            
+            for m in missing_sorted[1:]:
+                if m == gap_end + 1:
+                    gap_end = m
+                else:
+                    gaps.append((gap_start, gap_end))
+                    gap_start = m
+                    gap_end = m
+            gaps.append((gap_start, gap_end))
+        
+        # Build auth→canonical mapping (1-indexed canonical)
+        auth_to_canonical = {}
+        canonical_to_auth = {}
+        sequence_chars = []
+        
+        for i, (auth_num, one_letter, _) in enumerate(residues):
+            canonical_pos = i + 1  # 1-indexed
+            auth_to_canonical[auth_num] = canonical_pos
+            canonical_to_auth[canonical_pos] = auth_num
+            sequence_chars.append(one_letter)
+        
+        result[chain_id] = {
+            'sequence': ''.join(sequence_chars),
+            'has_gaps': len(gaps) > 0,
+            'gaps': gaps,
+            'auth_to_canonical': auth_to_canonical,
+            'canonical_to_auth': canonical_to_auth,
+            'auth_range': auth_range,
+            'auth_residues': auth_residues,
+            'resolved_count': len(residues),
+            'is_cif': False,
+            'file_chain_id': chain_id,
+        }
+    
+    return result
+
+
+def validate_hotspots(
+    hotspot_positions: list[int],
+    sequence_length: int,
+    chain_id: str,
+    use_auth_numbering: bool = False,
+    auth_residue_set: set[int] | None = None,
+    auth_range: tuple[int, int] | None = None,
+) -> tuple[bool, str | None]:
+    """
+    Validate all hotspot positions exist in target chain.
+    
+    Args:
+        hotspot_positions: List of residue positions (auth or canonical)
+        sequence_length: Length of the target sequence
+        chain_id: Chain identifier for error messages
+        use_auth_numbering: True if positions are in auth/PDB numbering
+        auth_residue_set: Set of valid auth residue numbers (required if use_auth_numbering)
+        auth_range: Tuple of (min_auth, max_auth) for error messages
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+        - is_valid: True if all hotspots are valid
+        - error_message: Formatted error string if invalid, None if valid
+    """
+    if not hotspot_positions:
+        return True, None
+    
+    invalid_positions = []
+    
+    if use_auth_numbering:
+        if auth_residue_set is None:
+            return False, "Internal error: auth_residue_set required for auth numbering validation"
+        
+        for pos in hotspot_positions:
+            if pos not in auth_residue_set:
+                invalid_positions.append(pos)
+        
+        if invalid_positions:
+            range_str = f"{auth_range[0]}-{auth_range[1]}" if auth_range else "unknown"
+            error_msg = f"""
+═══════════════════════════════════════════════════════════════
+❌ ERROR: Hotspot residue not found in chain
+═══════════════════════════════════════════════════════════════
+
+Chain {chain_id}:
+  Auth residue range: {range_str}
+
+Invalid hotspot(s):
+"""
+            for pos in invalid_positions:
+                error_msg += f"  • Auth residue {pos} not found (valid range: {range_str})\n"
+            
+            error_msg += """
+Hint: Check that your hotspot residue numbers match the
+      numbering in your PDB/CIF file.
+═══════════════════════════════════════════════════════════════
+"""
+            return False, error_msg
+    else:
+        # Canonical numbering validation
+        for pos in hotspot_positions:
+            if pos < 1 or pos > sequence_length:
+                invalid_positions.append(pos)
+        
+        if invalid_positions:
+            error_msg = f"""
+═══════════════════════════════════════════════════════════════
+❌ ERROR: Hotspot position out of range
+═══════════════════════════════════════════════════════════════
+
+Chain {chain_id}:
+  Sequence length: {sequence_length} residues
+  Valid position range: 1-{sequence_length}
+
+Invalid hotspot(s):
+"""
+            for pos in invalid_positions:
+                error_msg += f"  • Position {pos} out of range (max: {sequence_length})\n"
+            
+            error_msg += """
+Hint: Canonical positions are 1-indexed.
+      If using PDB residue numbers, add --use_auth_numbering.
+═══════════════════════════════════════════════════════════════
+"""
+            return False, error_msg
+    
+    return True, None
+
+
+def collapse_to_ranges(positions: list[int]) -> list[tuple[int, int]]:
+    """
+    Collapse consecutive positions into ranges for display.
+    
+    Examples:
+        [1,2,3,4,5,72,99,100,101] → [(1,5), (72,72), (99,101)]
+        [5,10,15] → [(5,5), (10,10), (15,15)]
+    
+    Args:
+        positions: List of integer positions (will be sorted)
+    
+    Returns:
+        List of (start, end) tuples representing ranges
+    """
+    if not positions:
+        return []
+    
+    sorted_pos = sorted(set(positions))
+    ranges = []
+    start = sorted_pos[0]
+    end = start
+    
+    for pos in sorted_pos[1:]:
+        if pos == end + 1:
+            end = pos
+        else:
+            ranges.append((start, end))
+            start = pos
+            end = pos
+    
+    ranges.append((start, end))
+    return ranges
+
+
+def format_ranges(ranges: list[tuple[int, int]]) -> str:
+    """
+    Format collapsed ranges for display.
+    
+    Examples:
+        [(1,5), (72,72), (99,101)] → "[1..5, 72, 99..101]"
+    """
+    parts = []
+    for start, end in ranges:
+        if start == end:
+            parts.append(str(start))
+        else:
+            parts.append(f"{start}..{end}")
+    return "[" + ", ".join(parts) + "]"
+
+
+def print_target_analysis(
+    chains_analysis: dict[str, dict],
+    hotspots_per_chain: dict[str, list[int]],
+    use_auth_numbering: bool,
+    template_source: str = "",
+) -> None:
+    """
+    Print formatted target sequence analysis with hotspot visualization.
+    
+    Args:
+        chains_analysis: Output from analyze_template_structure()
+        hotspots_per_chain: Dict mapping chain_id to list of hotspot positions
+        use_auth_numbering: True if hotspots are in auth numbering
+        template_source: Source description (e.g., "template (file.pdb, chain A)")
+    """
+    c = Colors
+    
+    print(f"\n{c.bold('═' * 79)}")
+    print(f"{c.bold('🎯 TARGET SEQUENCE ANALYSIS')}")
+    print(f"{c.bold('═' * 79)}\n")
+    
+    for chain_id, analysis in chains_analysis.items():
+        seq = analysis['sequence']
+        seq_len = len(seq)
+        auth_range = analysis.get('auth_range', (1, seq_len))
+        auth_to_can = analysis.get('auth_to_canonical', {})
+        can_to_auth = analysis.get('canonical_to_auth', {})
+        
+        hotspots = hotspots_per_chain.get(chain_id, [])
+        
+        # Convert hotspots to canonical if needed
+        if use_auth_numbering and hotspots:
+            canonical_hotspots = [auth_to_can.get(h, h) for h in hotspots if h in auth_to_can]
+            auth_hotspots = hotspots
+        else:
+            canonical_hotspots = hotspots
+            auth_hotspots = [can_to_auth.get(h, h) for h in hotspots if h in can_to_auth]
+        
+        # Print chain header
+        print(f"{c.bold(f'Chain {chain_id}')} - {seq_len} residues")
+        if template_source:
+            print(f"├─ Source: {template_source}")
+        print(f"├─ Auth numbering: {auth_range[0]}-{auth_range[1]}")
+        
+        if hotspots:
+            auth_ranges = format_ranges(collapse_to_ranges(auth_hotspots))
+            can_ranges = format_ranges(collapse_to_ranges(canonical_hotspots))
+            print(f"└─ Hotspots: auth {auth_ranges} → canonical {can_ranges}")
+        else:
+            print(f"└─ Hotspots: none specified")
+        
+        # Print hotspot detail table
+        if canonical_hotspots:
+            print(f"\n┌{'─'*10}┬{'─'*10}┬{'─'*9}┬{'─'*29}┐")
+            print(f"│ {'Canonical':^8} │ {'Auth':^8} │ {'Residue':^7} │ {'Context':^27} │")
+            print(f"├{'─'*10}┼{'─'*10}┼{'─'*9}┼{'─'*29}┤")
+            
+            for can_pos in sorted(set(canonical_hotspots)):
+                if can_pos < 1 or can_pos > seq_len:
+                    continue
+                    
+                auth_pos = can_to_auth.get(can_pos, '?')
+                residue = seq[can_pos - 1]  # 0-indexed
+                
+                # Build context (5 residues on each side)
+                start = max(0, can_pos - 6)
+                end = min(seq_len, can_pos + 5)
+                context = seq[start:end]
+                
+                # Highlight the hotspot residue in context
+                highlight_pos = can_pos - 1 - start
+                context_highlighted = (
+                    context[:highlight_pos] + 
+                    c.red(context[highlight_pos]) + 
+                    context[highlight_pos + 1:]
+                )
+                
+                # Pad context with dots
+                left_dots = "..." if start > 0 else "   "
+                right_dots = "..." if end < seq_len else "   "
+                context_display = f"{left_dots}{context_highlighted}{right_dots}"
+                
+                print(f"│ {can_pos:^8} │ {auth_pos:^8} │ {c.red(residue):^7} │ {context_display:<27} │")
+            
+            print(f"└{'─'*10}┴{'─'*10}┴{'─'*9}┴{'─'*29}┘")
+        
+        # Print sequence with hotspots highlighted
+        print(f"\nSequence (hotspots in {c.red('RED')}):")
+        
+        # Calculate line width and format
+        line_width = 60
+        hotspot_set = set(canonical_hotspots)
+        
+        for i in range(0, seq_len, line_width):
+            chunk = seq[i:i + line_width]
+            chunk_end = min(i + line_width, seq_len)
+            
+            # Canonical positions for this line
+            can_start = i + 1
+            can_end = chunk_end
+            
+            # Auth positions for this line (approximate)
+            auth_start = can_to_auth.get(can_start, auth_range[0] + i)
+            auth_end = can_to_auth.get(can_end, auth_range[0] + chunk_end - 1)
+            
+            # Print position headers
+            print(f"Canon Auth{' ' * (line_width - 12)}Canon Auth")
+            
+            # Build highlighted sequence and marker line
+            highlighted_seq = ""
+            marker_line = ""
+            
+            for j, aa in enumerate(chunk):
+                can_pos = i + j + 1
+                if can_pos in hotspot_set:
+                    highlighted_seq += c.red(aa)
+                    marker_line += "*"
+                else:
+                    highlighted_seq += aa
+                    marker_line += " "
+            
+            # Print sequence line
+            print(f"{can_start:5} {auth_start:5}  {highlighted_seq}  {can_end:5} {auth_end:5}")
+            
+            # Print marker line if there are hotspots
+            if "*" in marker_line:
+                print(f"             {marker_line}")
+            
+            print()
+        
+        print()
+    
+    print(f"{c.bold('═' * 79)}")
+    print(f"{c.green('✓ Ready to proceed with design')}")
+    print(f"{c.bold('═' * 79)}\n")
+
+
+def format_gap_error(chain_id: str, analysis: dict) -> str:
+    """
+    Format a gap detection error message for PDB files.
+    
+    Args:
+        chain_id: The chain identifier
+        analysis: Chain analysis dict from analyze_template_structure()
+    
+    Returns:
+        Formatted error message string
+    """
+    gaps = analysis.get('gaps', [])
+    resolved = analysis.get('resolved_count', 0)
+    auth_range = analysis.get('auth_range', (0, 0))
+    
+    error_msg = f"""
+═══════════════════════════════════════════════════════════════
+❌ ERROR: Structure has gaps - cannot auto-extract sequences
+═══════════════════════════════════════════════════════════════
+
+Chain {chain_id}:
+  Resolved residues: {resolved}
+  Range: {auth_range[0]} - {auth_range[1]}
+  Gaps detected:
+"""
+    
+    for gap_start, gap_end in gaps:
+        gap_size = gap_end - gap_start + 1
+        if gap_start == gap_end:
+            error_msg += f"    • Missing residue {gap_start}\n"
+        else:
+            error_msg += f"    • Missing residues {gap_start}-{gap_end} ({gap_size} residues)\n"
+    
+    error_msg += """
+⚠️  Please provide --protein_seqs with full sequence.
+═══════════════════════════════════════════════════════════════
+"""
+    return error_msg

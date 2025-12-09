@@ -909,8 +909,7 @@ def parse_mmcif(  # noqa: C901, PLR0915, PLR0912
             }
 
             if not entity.full_sequence:
-                print(f"[Warning] Entity {entity.name} has no full_sequence; reconstructing from residues...")
-
+                # Reconstruct sequence from residues (common for PDB files without _entity_poly_seq)
                 sequence = [
                     res.name
                     for res in raw_chain

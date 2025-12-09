@@ -86,6 +86,66 @@ def initialize_cache() -> str:
 
 
 @app.function(
+    image=image,
+    timeout=600,
+    volumes={"/cache": cache_volume},
+)
+def precompute_msas(sequences: list) -> dict:
+    """
+    Pre-compute MSAs for target sequences using ColabFold.
+    
+    This function should be called ONCE before dispatching design tasks
+    to avoid hitting rate limits when multiple designs run in parallel.
+    
+    Args:
+        sequences: List of unique protein sequences to compute MSAs for
+    
+    Returns:
+        Dict mapping sequence -> a3m_content (A3M formatted MSA string)
+    """
+    import tempfile
+    from pathlib import Path
+    import sys
+    
+    sys.path.insert(0, "/root/protein_hunter")
+    from boltz_ph.model_utils import process_msa
+    
+    work_dir = Path(tempfile.mkdtemp())
+    results = {}
+    
+    print(f"Pre-computing MSAs for {len(sequences)} unique sequence(s)...")
+    
+    for i, seq in enumerate(sequences):
+        if not seq:
+            continue
+        
+        # Use a hash of the sequence for the chain ID (since we might have duplicates)
+        chain_id = f"seq_{i}"
+        
+        print(f"  [{i+1}/{len(sequences)}] Sequence length: {len(seq)}")
+        
+        try:
+            msa_path = process_msa(chain_id, seq, work_dir)
+            
+            # Read A3M content
+            msa_npz = Path(msa_path)
+            msa_a3m = msa_npz.parent / "msa.a3m"
+            
+            if msa_a3m.exists():
+                msa_content = msa_a3m.read_text()
+                results[seq] = msa_content
+                num_seqs = msa_content.count('>')
+                print(f"    ✓ MSA: {len(msa_content)} chars, {num_seqs} sequences")
+            else:
+                print(f"    ✗ A3M file not found")
+        except Exception as e:
+            print(f"    ✗ Error: {e}")
+    
+    print(f"\nPre-computed {len(results)}/{len(sequences)} MSAs successfully")
+    return results
+
+
+@app.function(
     image=image,  # Use base image for upload
     volumes={"/af3_weights": af3_weights_volume},
     timeout=600,

@@ -56,7 +56,7 @@ from modal_boltz_ph.validation_af3 import (
     run_af3_apo_A100_80GB,
 )
 from modal_boltz_ph.scoring_pyrosetta import run_pyrosetta_single
-from modal_boltz_ph.cache import initialize_cache, _upload_af3_weights_impl
+from modal_boltz_ph.cache import initialize_cache, _upload_af3_weights_impl, precompute_msas
 from modal_boltz_ph.sync import (
     _sync_worker,
     _stream_best_design,
@@ -64,6 +64,14 @@ from modal_boltz_ph.sync import (
     _stream_final_result,
 )
 from modal_boltz_ph.tests import test_af3_image, _test_gpu
+from modal_boltz_ph.helpers import (
+    analyze_template_structure,
+    validate_hotspots,
+    convert_auth_to_canonical,
+    print_target_analysis,
+    print_gap_error,
+    collapse_to_ranges,
+)
 
 
 # =============================================================================
@@ -94,6 +102,8 @@ UNIFIED_DESIGN_COLUMNS = [
     "apo_holo_rmsd", "i_pae", "rg",
     # Acceptance status
     "accepted", "rejection_reason",
+    # Hotspot/template traceability
+    "contact_residues", "contact_residues_auth", "template_first_residue",
 ]
 
 
@@ -187,6 +197,7 @@ def run_pipeline(
     num_designs: int = 50,
     num_cycles: int = 5,
     contact_residues: Optional[str] = None,
+    use_auth_numbering: str = "false",  # NEW: Interpret hotspots in auth/PDB numbering
     temperature: float = 0.1,
     omit_aa: str = "C",
     alanine_bias: str = "true",
@@ -229,6 +240,15 @@ def run_pipeline(
             --num-designs 5 \\
             --num-cycles 7
         
+        # With template (auto-extracts sequence if no gaps)
+        modal run modal_boltz_ph_cli.py::run_pipeline \\
+            --name "CD33_binder" \\
+            --template-path "CD33_69R.pdb" \\
+            --template-cif-chain-id "B" \\
+            --contact-residues "69" \\
+            --use-auth-numbering \\
+            --num-designs 10
+        
         # With AF3 validation (PyRosetta runs automatically for protein targets)
         modal run modal_boltz_ph_cli.py::run_pipeline \\
             --name "PDL1_validated" \\
@@ -236,7 +256,7 @@ def run_pipeline(
             --num-designs 3 \\
             --use-alphafold3-validation
         
-        # With hotspots
+        # With hotspots (canonical numbering - default)
         modal run modal_boltz_ph_cli.py::run_pipeline \\
             --name "PDL1_hotspot" \\
             --protein-seqs "AFTVTVPK..." \\
@@ -249,11 +269,29 @@ def run_pipeline(
             --ligand-ccd "SAM" \\
             --num-designs 5
         
-        # Disable alanine bias (rare)
+        # Multi-chain pMHC target (hotspots on peptide chain C)
         modal run modal_boltz_ph_cli.py::run_pipeline \\
-            --name "test" \\
-            --protein-seqs "AFTVTVPK..." \\
-            --alanine-bias=false
+            --name "pMHC_TCRm" \\
+            --template-path "pmhc_complex.pdb" \\
+            --template-cif-chain-id "A,B,C" \\
+            --contact-residues "||1,2,3,4,5,6,7,8,9" \\
+            --use-auth-numbering \\
+            --num-designs 20
+    
+    Hotspot Numbering:
+        --contact-residues "69,72,115"     # Canonical (1-indexed, default)
+        --contact-residues "69,72,115" --use-auth-numbering  # PDB/auth numbering
+        
+        For multi-chain targets, use | separator:
+        --contact-residues "54,56|115"     # Chain B: 54,56; Chain C: 115
+        --contact-residues "||1,2,3"       # Only chain C (third chain)
+    
+    Template Auto-Extraction:
+        When --template-path is provided without --protein-seqs:
+        - CIF: Extracts full sequence from _entity_poly_seq
+        - PDB: Parses residues; errors if gaps detected
+        
+        If gaps are detected, you must provide --protein-seqs with the full sequence.
     
     AF3 Validation:
         First upload weights: modal run modal_boltz_ph_cli.py::upload_af3_weights --weights-path ~/AF3/af3.bin.zst
@@ -273,6 +311,7 @@ def run_pipeline(
     exclude_p = str2bool(exclude_p)
     alanine_bias = str2bool(alanine_bias)
     no_contact_filter = str2bool(no_contact_filter)
+    use_auth_numbering = str2bool(use_auth_numbering)
     randomly_kill_helix_feature = str2bool(randomly_kill_helix_feature)
     grad_enabled = str2bool(grad_enabled)
     logmd = str2bool(logmd)
@@ -280,10 +319,165 @@ def run_pipeline(
     use_alphafold3_validation = str2bool(use_alphafold3_validation)
     use_msa_for_af3 = str2bool(use_msa_for_af3)
     
+    # Smart MSA mode default based on template and AF3 validation
+    # - Template provided + no AF3 validation: skip MSAs (Boltz has template, no AF3 needs)
+    # - Template provided + AF3 validation: compute MSAs (AF3 needs them)
+    # - No template: compute MSAs (Boltz needs them)
+    if template_path and msa_mode == "mmseqs" and not use_alphafold3_validation:
+        print("Note: Template provided without AF3 validation - switching to --msa-mode single")
+        print("      (Boltz uses template structure; MSAs not needed)\n")
+        msa_mode = "single"
+    
     stream = not no_stream
     run_id = f"{name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    # Validate inputs
+    # ===========================================================================
+    # TEMPLATE ANALYSIS AND SEQUENCE AUTO-EXTRACTION
+    # ===========================================================================
+    
+    template_content = ""
+    template_analysis = None
+    contact_residues_canonical = contact_residues  # Will be converted if using auth numbering
+    contact_residues_auth = None  # Store original auth values for CSV output
+    
+    if template_path:
+        template_file = Path(template_path)
+        if not template_file.exists():
+            print(f"Error: Template file not found: {template_path}")
+            return
+        
+        # Parse template chain IDs
+        template_chains = [c.strip() for c in (template_cif_chain_id or "").split(",") if c.strip()]
+        if not template_chains:
+            print("Error: --template-cif-chain-id is required when using --template-path")
+            return
+        
+        # Analyze template structure
+        template_bytes = template_file.read_bytes()
+        template_analysis = analyze_template_structure(
+            template_bytes,
+            template_chains,
+            filename=template_file.name,
+        )
+        
+        if not template_analysis["success"]:
+            print(f"\n{template_analysis['error']}")
+            return
+        
+        # Check for gaps in each chain
+        has_any_gaps = False
+        for chain_id, chain_data in template_analysis["chains"].items():
+            if chain_data["has_gaps"]:
+                has_any_gaps = True
+                if not protein_seqs:
+                    # Cannot auto-extract - error with guidance
+                    print(f"\n{print_gap_error(chain_id, chain_data)}")
+                    return
+        
+        # Auto-extract sequences if not provided
+        if not protein_seqs:
+            if has_any_gaps:
+                # Should not reach here (handled above), but be safe
+                print("Error: Template has gaps. Please provide --protein-seqs with full sequence.")
+                return
+            
+            # Build protein_seqs from extracted sequences
+            extracted_seqs = []
+            for chain_id in template_chains:
+                chain_data = template_analysis["chains"].get(chain_id)
+                if chain_data:
+                    extracted_seqs.append(chain_data["sequence"])
+                    print(f"Auto-extracted chain {chain_id}: {len(chain_data['sequence'])} residues")
+                else:
+                    print(f"Warning: No data for chain {chain_id}")
+            
+            if extracted_seqs:
+                protein_seqs = ":".join(extracted_seqs)
+                print(f"✓ Auto-extracted {len(extracted_seqs)} chain(s) from template")
+        
+        # Validate and convert hotspots
+        if contact_residues:
+            contact_lists = contact_residues.split("|")
+            converted_lists = []
+            
+            for i, res_str in enumerate(contact_lists):
+                if not res_str.strip():
+                    converted_lists.append("")
+                    continue
+                
+                # Parse positions
+                positions = [int(x.strip()) for x in res_str.split(",") if x.strip()]
+                if not positions:
+                    converted_lists.append("")
+                    continue
+                
+                # Get chain data
+                chain_id = template_chains[i] if i < len(template_chains) else template_chains[0]
+                chain_data = template_analysis["chains"].get(chain_id)
+                
+                if not chain_data:
+                    print(f"Error: Chain {chain_id} not found in template analysis")
+                    return
+                
+                # Validate hotspots
+                if use_auth_numbering:
+                    auth_set = set(chain_data["auth_residues"])
+                    is_valid, error_msg = validate_hotspots(
+                        positions,
+                        len(chain_data["sequence"]),
+                        chain_id,
+                        use_auth_numbering=True,
+                        auth_residue_set=auth_set,
+                        auth_range=chain_data["auth_range"],
+                    )
+                    if not is_valid:
+                        print(f"\n{error_msg}")
+                        return
+                    
+                    # Convert to canonical
+                    canonical_positions = convert_auth_to_canonical(
+                        positions,
+                        chain_data["auth_to_canonical"],
+                    )
+                    converted_lists.append(",".join(str(p) for p in canonical_positions))
+                else:
+                    # Canonical numbering - validate range
+                    is_valid, error_msg = validate_hotspots(
+                        positions,
+                        len(chain_data["sequence"]),
+                        chain_id,
+                        use_auth_numbering=False,
+                    )
+                    if not is_valid:
+                        print(f"\n{error_msg}")
+                        return
+                    
+                    converted_lists.append(res_str)
+            
+            # Store original auth values and converted canonical values
+            if use_auth_numbering:
+                contact_residues_auth = contact_residues
+                contact_residues_canonical = "|".join(converted_lists)
+                print(f"✓ Converted hotspots: auth → canonical")
+            else:
+                contact_residues_canonical = contact_residues
+        
+        # Print target analysis visualization
+        print_target_analysis(
+            template_analysis["chains"],
+            contact_residues,
+            use_auth_numbering,
+            template_filename=template_file.name,
+        )
+        
+        # Encode template for upload
+        template_content = base64.b64encode(template_bytes).decode('utf-8')
+    
+    # ===========================================================================
+    # INPUT VALIDATION
+    # ===========================================================================
+    
+    # Validate inputs - protein_seqs may have been auto-extracted above
     if not any([protein_seqs, ligand_ccd, ligand_smiles, nucleic_seq]):
         print("Error: Must provide at least one target (--protein-seqs, --ligand-ccd, --ligand-smiles, or --nucleic-seq)")
         return
@@ -295,16 +489,6 @@ def run_pipeline(
         target_type = "small_molecule"
     else:
         target_type = "protein"
-    
-    # Read and encode template file if provided
-    template_content = ""
-    if template_path:
-        template_file = Path(template_path)
-        if template_file.exists():
-            template_content = base64.b64encode(template_file.read_bytes()).decode('utf-8')
-            print(f"Loaded template: {template_path} ({len(template_content)} bytes encoded)")
-        else:
-            print(f"Warning: Template file not found: {template_path}")
     
     # Setup output directory
     output_path = Path(output_dir) if output_dir else Path(f"./results_{name}")
@@ -325,11 +509,42 @@ def run_pipeline(
     if template_path:
         print(f"Template: {template_path}")
         print(f"Template chains: {template_cif_chain_id}")
-    if contact_residues:
-        print(f"Hotspots: {contact_residues}")
+    if contact_residues_canonical:
+        if use_auth_numbering and contact_residues_auth:
+            print(f"Hotspots (auth): {contact_residues_auth}")
+            print(f"Hotspots (canonical): {contact_residues_canonical}")
+        else:
+            print(f"Hotspots: {contact_residues_canonical}")
     print(f"MSA mode: {msa_mode}")
     print(f"Alanine bias: {alanine_bias}")
     print(f"{'='*70}\n")
+    
+    # Build template metadata for CSV output
+    template_first_residues = {}
+    if template_analysis:
+        for chain_id, chain_data in template_analysis["chains"].items():
+            template_first_residues[chain_id] = chain_data["first_auth_residue"]
+    
+    # ===========================================================================
+    # PRE-COMPUTE MSAs (once, before dispatching parallel design tasks)
+    # ===========================================================================
+    precomputed_msas = {}
+    if msa_mode == "mmseqs" and protein_seqs:
+        # Get unique sequences to avoid redundant API calls
+        protein_seqs_list = protein_seqs.split(":") if protein_seqs else []
+        unique_seqs = list(set(seq for seq in protein_seqs_list if seq))
+        
+        if unique_seqs:
+            print(f"Pre-computing MSAs for {len(unique_seqs)} unique target sequence(s)...")
+            print("This avoids rate limiting when running parallel designs.\n")
+            
+            try:
+                precomputed_msas = precompute_msas.remote(unique_seqs)
+                print(f"✓ Pre-computed {len(precomputed_msas)} MSA(s)\n")
+            except Exception as e:
+                print(f"⚠ MSA pre-computation failed: {e}")
+                print("  Falling back to per-design MSA fetching (may hit rate limits)\n")
+                precomputed_msas = {}
     
     # Build tasks
     tasks = []
@@ -357,7 +572,8 @@ def run_pipeline(
             "exclude_P": exclude_p,
             # Design
             "num_cycles": num_cycles,
-            "contact_residues": contact_residues or "",
+            "contact_residues": contact_residues_canonical or "",  # Use canonical positions
+            "contact_residues_auth": contact_residues_auth or "",  # Original auth values (for traceability)
             "temperature": temperature,
             "omit_AA": omit_aa,
             "alanine_bias": alanine_bias,
@@ -376,6 +592,10 @@ def run_pipeline(
             "negative_helix_constant": negative_helix_constant,
             "grad_enabled": grad_enabled,
             "logmd": logmd,
+            # Template metadata (for CSV output)
+            "template_first_residues": template_first_residues,
+            # Pre-computed MSAs (to avoid rate limiting)
+            "precomputed_msas": precomputed_msas,
         }
         tasks.append(task)
     
@@ -707,6 +927,11 @@ def run_pipeline(
         alanine_count = best_cycle_data.get("alanine_count", 0) if best_cycle_data else 0
         alanine_pct = (alanine_count / binder_length * 100) if binder_length > 0 else 0.0
         
+        # Build template_first_residue string for CSV
+        tfr_str = ""
+        if template_first_residues:
+            tfr_str = ",".join(f"{k}:{v}" for k, v in template_first_residues.items())
+        
         # Build unified row with boltz_ prefix for design-stage metrics
         best_rows.append({
             # Identity
@@ -744,6 +969,10 @@ def run_pipeline(
             # Acceptance status
             "accepted": r.get("accepted"),
             "rejection_reason": r.get("rejection_reason"),
+            # Hotspot/template traceability
+            "contact_residues": contact_residues_canonical or "",
+            "contact_residues_auth": contact_residues_auth or "",
+            "template_first_residue": tfr_str,
         })
     
     # Helper function to reorder columns using unified schema

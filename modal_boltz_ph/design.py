@@ -80,6 +80,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
     template_content = task_dict.get("template_content", "")  # Base64-encoded PDB content
     template_chain_ids = task_dict.get("template_chain_ids", "")  # Chain IDs from template file
     msa_mode = task_dict.get("msa_mode", "single")
+    precomputed_msas = task_dict.get("precomputed_msas", {})  # Pre-computed MSAs (seq -> a3m_content)
     
     # Binder parameters
     starting_seq = task_dict.get("seq", "")
@@ -201,6 +202,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
             contact_residues=contact_residues,
             template_content=template_content,
             template_chain_ids=template_chain_ids,
+            precomputed_msas=precomputed_msas,
         )
         
         # Store MSAs in result for AF3 validation
@@ -540,6 +542,7 @@ def _build_input_data(
     contact_residues: str,
     template_content: str = "",
     template_chain_ids: str = "",
+    precomputed_msas: dict = None,
 ) -> tuple:
     """
     Build the input data dictionary for Boltz prediction.
@@ -556,15 +559,18 @@ def _build_input_data(
         contact_residues: Contact residue specification
         template_content: Base64-encoded PDB/CIF file content (if using template)
         template_chain_ids: Comma-separated chain IDs from template file
+        precomputed_msas: Dict mapping sequence -> a3m_content (pre-computed MSAs to avoid re-fetching)
     
     Returns:
         Tuple of (data_dict, target_msas) where target_msas is {chain_id: a3m_content}
     """
     import base64
     from boltz_ph.model_utils import process_msa
+    from boltz.data.parse.a3m import parse_a3m
     
     sequences = []
     target_msas = {}  # Store MSA content for AF3 reuse
+    precomputed_msas = precomputed_msas or {}
     
     # Parse protein sequences
     protein_seqs_list = protein_seqs.split(":") if protein_seqs else []
@@ -594,26 +600,46 @@ def _build_input_data(
         
         # Determine MSA value based on mode
         if msa_mode == "mmseqs":
-            # Use cached MSA if same sequence was already processed
-            if seq in seq_to_msa_path:
+            # Check for pre-computed MSA first (avoids hitting ColabFold API)
+            if seq in precomputed_msas:
+                print(f"  Using pre-computed MSA for chain {chain_id}")
+                msa_content = precomputed_msas[seq]
+                target_msas[chain_id] = msa_content
+                
+                # Write A3M to work_dir and convert to NPZ for Boltz
+                msa_chain_dir = work_dir / f"{chain_id}_env"
+                msa_chain_dir.mkdir(exist_ok=True)
+                msa_a3m_path = msa_chain_dir / "msa.a3m"
+                msa_a3m_path.write_text(msa_content)
+                
+                # Convert to NPZ format
+                msa_npz_path = msa_chain_dir / "msa.npz"
+                if not msa_npz_path.exists():
+                    msa = parse_a3m(msa_a3m_path, taxonomy=None, max_seqs=4096)
+                    msa.dump(msa_npz_path)
+                
+                msa_value = str(msa_npz_path)
+                print(f"    MSA for chain {chain_id}: {len(msa_content)} chars, {msa_content.count('>')} sequences")
+            # Use cached MSA if same sequence was already processed in this run
+            elif seq in seq_to_msa_path:
                 msa_path = seq_to_msa_path[seq]
                 msa_value = str(msa_path)
             else:
+                # Fetch from ColabFold API
                 print(f"  Generating MSA for chain {chain_id}...")
                 msa_path = process_msa(chain_id, seq, work_dir)
                 seq_to_msa_path[seq] = msa_path
                 msa_value = str(msa_path)
-            
-            # Read A3M text file for AF3 reuse (not the .npz binary)
-            # The A3M file is stored alongside the NPZ file
-            msa_npz = Path(msa_path)
-            msa_a3m = msa_npz.parent / "msa.a3m"
-            if msa_a3m.exists():
-                msa_content = msa_a3m.read_text()
-                target_msas[chain_id] = msa_content
-                print(f"    MSA for chain {chain_id}: {len(msa_content)} chars, {msa_content.count('>')} sequences")
-            else:
-                print(f"    Warning: A3M file not found at {msa_a3m}")
+                
+                # Read A3M text file for AF3 reuse (not the .npz binary)
+                msa_npz = Path(msa_path)
+                msa_a3m = msa_npz.parent / "msa.a3m"
+                if msa_a3m.exists():
+                    msa_content = msa_a3m.read_text()
+                    target_msas[chain_id] = msa_content
+                    print(f"    MSA for chain {chain_id}: {len(msa_content)} chars, {msa_content.count('>')} sequences")
+                else:
+                    print(f"    Warning: A3M file not found at {msa_a3m}")
         else:
             msa_value = "empty"
         
