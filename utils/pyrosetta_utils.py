@@ -256,7 +256,9 @@ def score_interface(pdb_file, pdb_file_collapsed, binder_chain="B", target_chain
     interface_dG = iam.get_interface_dG()
     interface_dSASA = iam.get_interface_delta_sasa()
     interface_packstat = iam.get_interface_packstat()
-    interface_dG_SASA_ratio = interfacescore.dG_dSASA_ratio * 100
+    # Guard against None from PyRosetta (can happen with malformed structures)
+    _dG_ratio = interfacescore.dG_dSASA_ratio
+    interface_dG_SASA_ratio = (_dG_ratio * 100) if _dG_ratio is not None else 0.0
     
     # 4. Buried Unsaturated Hbonds (BUNS)
     buns_filter = XmlObjects.static_get_filter(
@@ -286,8 +288,9 @@ def score_interface(pdb_file, pdb_file_collapsed, binder_chain="B", target_chain
     bsasa.set_residue_selector(chain_design)
     binder_sasa = bsasa.calculate(pose)
 
+    # Guard against None from PyRosetta (can happen with malformed structures)
     interface_binder_fraction = (
-        (interface_dSASA / binder_sasa) * 100 if binder_sasa > 0 else 0
+        (interface_dSASA / binder_sasa) * 100 if binder_sasa is not None and binder_sasa > 0 else 0
     )
 
     # 8. Surface Hydrophobicity (on the binder chain)

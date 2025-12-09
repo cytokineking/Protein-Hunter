@@ -17,7 +17,7 @@ from boltz_ph.constants import CHAIN_TO_NUMBER, UNIFIED_DESIGN_COLUMNS
 from utils.metrics import get_CA_and_sequence # Used implicitly in design.py
 from utils.convert import calculate_holo_apo_rmsd, convert_cif_files_to_pdb
 from utils.ipsae_utils import calculate_ipsae_from_boltz_output
-from utils.csv_utils import append_to_csv_safe
+from utils.csv_utils import append_to_csv_safe, update_csv_row
 
 
 from boltz_ph.model_utils import (
@@ -712,14 +712,12 @@ class ProteinHunter_Boltz:
             run_metrics["best_alanine_count"] = best_alanine_count
             run_metrics["best_pdb_filename"] = best_pdb_filename
         else:
-            # Use 0.0 instead of NaN so early filter comparisons work correctly
-            # (0.0 < threshold will properly skip validation for failed designs)
-            run_metrics["best_iptm"] = 0.0
+            run_metrics["best_iptm"] = float("nan")
             run_metrics["best_cycle"] = None
-            run_metrics["best_plddt"] = 0.0
-            run_metrics["best_iplddt"] = 0.0
+            run_metrics["best_plddt"] = float("nan")
+            run_metrics["best_iplddt"] = float("nan")
             run_metrics["best_seq"] = None
-            run_metrics["best_ipsae"] = 0.0
+            run_metrics["best_ipsae"] = float("nan")
             run_metrics["best_alanine_count"] = None
             run_metrics["best_pdb_filename"] = None
 
@@ -727,38 +725,6 @@ class ProteinHunter_Boltz:
             plot_run_metrics(self.designs_dir, a.name, run_id, a.num_cycles, run_metrics)
 
         return run_metrics
-
-    def _save_summary_metrics(self, all_run_metrics):
-        """Saves all run metrics to a single CSV file."""
-        a = self.args
-        columns = ["run_id"]
-        # Columns for cycle 0 through num_cycles
-        for i in range(a.num_cycles + 1):
-            columns.extend(
-                [
-                    f"cycle_{i}_iptm",
-                    f"cycle_{i}_ipsae",
-                    f"cycle_{i}_plddt",
-                    f"cycle_{i}_iplddt",
-                    f"cycle_{i}_alanine",
-                    f"cycle_{i}_seq",
-                ]
-            )
-        # Best metric columns
-        columns.extend(["best_iptm", "best_cycle", "best_plddt", "best_seq"])
-
-        summary_csv = os.path.join(self.save_dir, "summary_all_runs.csv")
-        df = pd.DataFrame(all_run_metrics)
-        
-        # Ensure all expected columns are present (filling missing with NaN)
-        for col in columns:
-            if col not in df.columns:
-                df[col] = float("nan")
-        
-        # Filter to columns in the correct order (and existing ones)
-        df = df[[c for c in columns if c in df.columns]]
-        df.to_csv(summary_csv, index=False)
-        print(f"\n✅ All run/cycle metrics saved to {summary_csv}")
 
     def _run_batch_validation_on_existing_designs(self):
         """
@@ -1568,8 +1534,24 @@ class ProteinHunter_Boltz:
         return len(list(accepted_dir.glob("*_relaxed.pdb")))
 
     def _get_next_design_index(self) -> int:
-        """Determine next design index based on existing artifacts."""
-        return self._count_completed_designs()
+        """Determine next design index from design_stats.csv (all attempts).
+        
+        Uses design_stats.csv as the source of truth since it records all design
+        attempts, including those that fail (e.g., all cycles >20% alanine).
+        This prevents filename collisions and CSV duplicates.
+        """
+        csv_path = Path(self.designs_dir) / "design_stats.csv"
+        if not csv_path.exists():
+            return 0
+        
+        try:
+            df = pd.read_csv(csv_path)
+            if "design_num" in df.columns and len(df) > 0:
+                return int(df["design_num"].max()) + 1
+        except Exception:
+            pass
+        
+        return 0
 
     def _should_continue(self) -> bool:
         """
@@ -1633,13 +1615,15 @@ class ProteinHunter_Boltz:
             run_metrics = self._run_design_cycle(data_cp, run_id, pocket_conditioning)
             all_run_metrics.append(run_metrics)
             
-            # 4. Save best design incrementally
-            saved = self._save_single_best_design(run_metrics)
-            if saved:
+            # 4. Save best design incrementally (always saves to best_designs.csv for audit trail)
+            design_id, has_valid_pdb = self._save_single_best_design(run_metrics)
+            if has_valid_pdb:
                 print(f"  ✓ Saved best design {design_idx} to best_designs/")
+            else:
+                print(f"  ✗ Design {design_idx} failed: all cycles had >20% alanine")
             
             # 5. Run validation for THIS design (design-by-design execution)
-            if self.args.use_alphafold3_validation and saved:
+            if self.args.use_alphafold3_validation and has_valid_pdb:
                 # Check if design meets minimum Boltz thresholds before expensive AF3 validation
                 boltz_iptm = run_metrics.get("best_iptm", 0.0)
                 boltz_plddt = run_metrics.get("best_plddt", 0.0)
@@ -1649,18 +1633,29 @@ class ProteinHunter_Boltz:
                 meets_threshold = iptm_ok and plddt_ok
                 
                 if not meets_threshold:
-                    # Skip validation entirely - don't record to accepted/rejected CSVs
+                    # Skip validation - update best_designs.csv with rejection reason
                     failure_reasons = []
                     if not iptm_ok:
-                        failure_reasons.append(f"boltz_iptm ({boltz_iptm:.3f} < {self.args.high_iptm_threshold})")
+                        failure_reasons.append(f"boltz_iptm < {self.args.high_iptm_threshold}")
                     if not plddt_ok:
-                        failure_reasons.append(f"boltz_plddt ({boltz_plddt:.2f} < {self.args.high_plddt_threshold})")
-                    print(f"  ⏭ Skipping validation: {'; '.join(failure_reasons)}")
+                        failure_reasons.append(f"boltz_plddt < {self.args.high_plddt_threshold}")
+                    rejection_reason = "; ".join(failure_reasons)
+                    
+                    # Update the design status in best_designs.csv
+                    self._update_design_status(design_id, False, rejection_reason)
+                    print(f"  ⏭ Skipping validation: {rejection_reason}")
                     continue  # Move to next design
                 
                 # Run full AF3 + PyRosetta validation
                 validation_result = self._run_single_design_validation(run_metrics)
                 self._save_design_result(validation_result)
+                
+                # Update best_designs.csv with final validation result
+                self._update_design_status(
+                    design_id,
+                    validation_result.get("accepted", False),
+                    validation_result.get("rejection_reason", "")
+                )
                 
                 # Print validation summary for this design
                 if validation_result.get("accepted"):
@@ -1706,39 +1701,57 @@ class ProteinHunter_Boltz:
             print(f"      ├── rejected_stats.csv")
             print(f"      └── *_relaxed.pdb")
 
-    def _save_single_best_design(self, metrics: dict) -> bool:
+    def _save_single_best_design(self, metrics: dict) -> tuple[str, bool]:
         """
-        Save a single design's best cycle to best_designs/ folder incrementally.
+        Save a single design to best_designs/ folder with acceptance tracking.
         
-        This enables resumable execution by saving progress after each design.
+        Always saves to best_designs.csv (even failed designs) for complete audit trail.
+        This enables resumable execution and tracks rejection reasons.
         
         Args:
             metrics: Output from _run_design_cycle() for one design
         
         Returns:
-            True if design was saved successfully, False if no valid best design
+            Tuple of (design_id, has_valid_pdb):
+            - design_id: The unique identifier for this design
+            - has_valid_pdb: True if a valid PDB was saved, False if design failed
         """
         a = self.args
         best_dir = os.path.join(self.save_dir, "best_designs")
         os.makedirs(best_dir, exist_ok=True)
         
-        best_pdb = metrics.get("best_pdb_filename")
-        if not best_pdb or not os.path.exists(best_pdb):
-            return False
-        
-        # Copy PDB to best_designs/
         design_idx = int(metrics.get("run_id", 0))
-        best_cycle = metrics.get("best_cycle", 0)
-        design_id = f"{a.name}_d{design_idx}_c{best_cycle}"
-        dest_pdb = os.path.join(best_dir, f"{design_id}.pdb")
-        shutil.copy(best_pdb, dest_pdb)
+        best_pdb = metrics.get("best_pdb_filename")
+        has_valid_pdb = best_pdb and os.path.exists(best_pdb)
+        
+        if has_valid_pdb:
+            # Valid design - copy PDB and mark as pending validation
+            best_cycle = metrics.get("best_cycle", 0)
+            design_id = f"{a.name}_d{design_idx}_c{best_cycle}"
+            dest_pdb = os.path.join(best_dir, f"{design_id}.pdb")
+            shutil.copy(best_pdb, dest_pdb)
+            
+            seq = metrics.get("best_seq", "")
+            binder_length = len(seq) if seq else 0
+            alanine_count = metrics.get("best_alanine_count", 0)
+            alanine_pct = (alanine_count / binder_length * 100) if binder_length > 0 else 0.0
+            
+            # Pending validation - accepted will be updated later
+            accepted = None
+            rejection_reason = ""
+        else:
+            # All cycles failed (e.g., all >20% alanine) - record as rejected
+            design_id = f"{a.name}_d{design_idx}_failed"
+            seq = ""
+            binder_length = 0
+            alanine_count = 0
+            alanine_pct = 0.0
+            best_cycle = None
+            
+            accepted = False
+            rejection_reason = "alanine_pct > 20% (all cycles)"
         
         # Build row for best_designs.csv
-        seq = metrics.get("best_seq", "")
-        binder_length = len(seq) if seq else 0
-        alanine_count = metrics.get("best_alanine_count", 0)
-        alanine_pct = (alanine_count / binder_length * 100) if binder_length > 0 else 0.0
-        
         row = {
             "design_id": design_id,
             "design_num": design_idx,
@@ -1746,10 +1759,10 @@ class ProteinHunter_Boltz:
             "binder_sequence": seq,
             "binder_length": binder_length,
             "cyclic": a.cyclic,
-            "boltz_iptm": metrics.get("best_iptm", 0.0),
-            "boltz_ipsae": metrics.get("best_ipsae", 0.0),
-            "boltz_plddt": metrics.get("best_plddt", 0.0),
-            "boltz_iplddt": metrics.get("best_iplddt", 0.0),
+            "boltz_iptm": metrics.get("best_iptm", 0.0) if has_valid_pdb else float("nan"),
+            "boltz_ipsae": metrics.get("best_ipsae", 0.0) if has_valid_pdb else float("nan"),
+            "boltz_plddt": metrics.get("best_plddt", 0.0) if has_valid_pdb else float("nan"),
+            "boltz_iplddt": metrics.get("best_iplddt", 0.0) if has_valid_pdb else float("nan"),
             "alanine_count": alanine_count,
             "alanine_pct": round(alanine_pct, 2),
             "target_seqs": a.protein_seqs or "",
@@ -1762,67 +1775,36 @@ class ProteinHunter_Boltz:
             "nucleic_type": a.nucleic_type or "",
             "template_path": a.template_path or "",
             "template_mapping": a.template_cif_chain_id or "",
+            # Acceptance tracking
+            "accepted": accepted,
+            "rejection_reason": rejection_reason,
         }
         
         # Append to CSV incrementally
         csv_path = Path(best_dir) / "best_designs.csv"
         append_to_csv_safe(csv_path, row)
         
-        return True
+        return design_id, has_valid_pdb
 
-    def _save_best_designs(self, all_run_metrics):
-        """Copy best cycle PDBs to best_designs/ folder and create best_designs.csv."""
-        a = self.args
-        best_dir = os.path.join(self.save_dir, "best_designs")
-        os.makedirs(best_dir, exist_ok=True)
-
-        best_rows = []
-        for metrics in all_run_metrics:
-            best_pdb = metrics.get("best_pdb_filename")
-            if best_pdb and os.path.exists(best_pdb):
-                # Copy PDB to best_designs/
-                design_idx = int(metrics.get("run_id", 0))
-                best_cycle = metrics.get("best_cycle", 0)
-                design_id = f"{a.name}_d{design_idx}_c{best_cycle}"
-                dest_pdb = os.path.join(best_dir, f"{design_id}.pdb")
-                shutil.copy(best_pdb, dest_pdb)
-
-                # Build row for best_designs.csv
-                seq = metrics.get("best_seq", "")
-                binder_length = len(seq) if seq else 0
-                alanine_count = metrics.get("best_alanine_count", 0)
-                alanine_pct = (alanine_count / binder_length * 100) if binder_length > 0 else 0.0
-
-                best_rows.append({
-                    "design_id": design_id,
-                    "design_num": design_idx,
-                    "cycle": best_cycle,
-                    "binder_sequence": seq,
-                    "binder_length": binder_length,
-                    "cyclic": a.cyclic,
-                    "boltz_iptm": metrics.get("best_iptm", 0.0),
-                    "boltz_ipsae": metrics.get("best_ipsae", 0.0),
-                    "boltz_plddt": metrics.get("best_plddt", 0.0),
-                    "boltz_iplddt": metrics.get("best_iplddt", 0.0),
-                    "alanine_count": alanine_count,
-                    "alanine_pct": round(alanine_pct, 2),
-                    "target_seqs": a.protein_seqs or "",
-                    "contact_residues": a.contact_residues or "",
-                    "msa_mode": a.msa_mode,
-                    # Fields for AF3 reconstruction
-                    "ligand_smiles": a.ligand_smiles or "",
-                    "ligand_ccd": a.ligand_ccd or "",
-                    "nucleic_seq": a.nucleic_seq or "",
-                    "nucleic_type": a.nucleic_type or "",
-                    "template_path": a.template_path or "",
-                    "template_mapping": a.template_cif_chain_id or "",
-                })
-
-        if best_rows:
-            best_df = pd.DataFrame(best_rows)
-            best_df = _reorder_columns(best_df)
-            best_df.to_csv(os.path.join(best_dir, "best_designs.csv"), index=False)
-            print(f"\n✅ Saved {len(best_rows)} best designs to {best_dir}/")
+    def _update_design_status(self, design_id: str, accepted: bool, rejection_reason: str) -> None:
+        """
+        Update acceptance status for a design in best_designs.csv.
+        
+        Called after validation completes or when pre-validation thresholds fail.
+        Uses update_csv_row for thread-safe in-place update.
+        
+        Args:
+            design_id: The unique identifier for the design (e.g., "mydesign_d0_c2")
+            accepted: True if design passed all filters, False if rejected
+            rejection_reason: Human-readable reason for rejection (empty string if accepted)
+        """
+        csv_path = Path(self.save_dir) / "best_designs" / "best_designs.csv"
+        update_csv_row(
+            csv_path,
+            key_col="design_id",
+            key_val=design_id,
+            update_data={"accepted": accepted, "rejection_reason": rejection_reason}
+        )
 
     def _print_summary(self, all_run_metrics):
         """Print summary of all runs."""
