@@ -66,10 +66,31 @@ PLACEHOLDER_VALUES = {
 # LOGGING UTILITIES
 # =============================================================================
 
+# Module-level verbose flag (simpler approach for Modal remote functions)
+_VERBOSE = False
+
+
+def configure_verbose(verbose: bool = False):
+    """
+    Configure verbose logging for the scoring module.
+    
+    Call this at the start of your entrypoint to control verbosity.
+    When verbose=False (default), only warnings/errors are shown.
+    When verbose=True, detailed timing and progress messages are shown.
+    """
+    global _VERBOSE
+    _VERBOSE = verbose
+
+
 def vprint(msg: str):
-    """Verbose print with timestamp."""
-    timestamp = time.strftime("%H:%M:%S")
-    print(f"[{timestamp}] {msg}", flush=True)
+    """
+    Verbose print - only shown when verbose mode is enabled.
+    
+    Uses a simple flag-based approach that works across Modal remote functions.
+    """
+    if _VERBOSE:
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[{timestamp}] {msg}", flush=True)
 
 
 # =============================================================================
@@ -624,6 +645,282 @@ def hotspot_residues(
 # OPENMM RELAXATION
 # =============================================================================
 
+# Cache a single OpenMM ForceField instance to avoid repeated XML parsing
+_OPENMM_FORCEFIELD_SINGLETON = None
+
+
+def _get_openmm_forcefield():
+    """Get or create singleton ForceField instance."""
+    global _OPENMM_FORCEFIELD_SINGLETON
+    if _OPENMM_FORCEFIELD_SINGLETON is None:
+        from openmm import app
+        _OPENMM_FORCEFIELD_SINGLETON = app.ForceField("amber14-all.xml", "implicit/obc2.xml")
+    return _OPENMM_FORCEFIELD_SINGLETON
+
+
+def _k_kj_per_nm2(k_kcal_A2: float) -> float:
+    """Convert force constant from kcal/mol/Å² to kJ/mol/nm²."""
+    return k_kcal_A2 * 4.184 * 100.0
+
+
+def _create_lj_repulsive_force(system, lj_rep_base_k_kj_mol: float, lj_rep_ramp_factors: Tuple[float, ...],
+                                original_sigmas: List[float], nonbonded_force_index: int):
+    """
+    Create a custom LJ-like repulsive force for clash resolution.
+    
+    This adds a (σ/r)^12 repulsive term that can be ramped up during relaxation
+    to help resolve steric clashes more aggressively than the standard Amber nonbonded terms.
+    
+    Returns:
+        Tuple of (CustomNonbondedForce or None, global_parameter_index or -1)
+    """
+    import openmm
+    from openmm import unit
+    
+    lj_rep_custom_force = None
+    k_rep_lj_param_index = -1
+
+    if lj_rep_base_k_kj_mol > 0 and original_sigmas and lj_rep_ramp_factors:
+        lj_rep_custom_force = openmm.CustomNonbondedForce(
+            "k_rep_lj * (((sigma_particle1 + sigma_particle2) * 0.5 / r)^12)"
+        )
+        
+        initial_k_rep_val = lj_rep_base_k_kj_mol * lj_rep_ramp_factors[0]
+        k_rep_lj_param_index = lj_rep_custom_force.addGlobalParameter("k_rep_lj", float(initial_k_rep_val))
+        lj_rep_custom_force.addPerParticleParameter("sigma_particle")
+
+        for sigma_val_nm in original_sigmas:
+            lj_rep_custom_force.addParticle([sigma_val_nm])
+
+        # Match cutoff and exclusions from existing NonbondedForce
+        if nonbonded_force_index != -1:
+            existing_nb_force = system.getForce(nonbonded_force_index)
+            nb_method = existing_nb_force.getNonbondedMethod()
+            
+            if nb_method in [openmm.NonbondedForce.CutoffPeriodic, openmm.NonbondedForce.CutoffNonPeriodic]:
+                if nb_method == openmm.NonbondedForce.CutoffPeriodic:
+                    lj_rep_custom_force.setNonbondedMethod(openmm.CustomNonbondedForce.CutoffPeriodic)
+                else:
+                    lj_rep_custom_force.setNonbondedMethod(openmm.CustomNonbondedForce.CutoffNonPeriodic)
+                lj_rep_custom_force.setCutoffDistance(existing_nb_force.getCutoffDistance())
+                if nb_method == openmm.NonbondedForce.CutoffPeriodic:
+                    lj_rep_custom_force.setUseSwitchingFunction(existing_nb_force.getUseSwitchingFunction())
+                    if existing_nb_force.getUseSwitchingFunction():
+                        lj_rep_custom_force.setSwitchingDistance(existing_nb_force.getSwitchingDistance())
+            elif nb_method == openmm.NonbondedForce.NoCutoff:
+                lj_rep_custom_force.setNonbondedMethod(openmm.CustomNonbondedForce.NoCutoff)
+            
+            # Copy exclusions (bonded pairs)
+            for ex_idx in range(existing_nb_force.getNumExceptions()):
+                p1, p2, chargeProd, sigmaEx, epsilonEx = existing_nb_force.getExceptionParameters(ex_idx)
+                lj_rep_custom_force.addExclusion(p1, p2)
+        else:
+            lj_rep_custom_force.setNonbondedMethod(openmm.CustomNonbondedForce.NoCutoff)
+
+        lj_rep_custom_force.setForceGroup(2)
+        system.addForce(lj_rep_custom_force)
+    
+    return lj_rep_custom_force, k_rep_lj_param_index
+
+
+def _create_backbone_restraint_force(system, fixer, restraint_k_kcal_mol_A2: float):
+    """
+    Create backbone heavy-atom harmonic restraints.
+    
+    Returns:
+        Tuple of (CustomExternalForce or None, global_parameter_index or -1)
+    """
+    import openmm
+    from openmm import unit
+    
+    restraint_force = None
+    k_restraint_param_index = -1
+
+    if restraint_k_kcal_mol_A2 > 0:
+        restraint_force = openmm.CustomExternalForce(
+            "0.5 * k_restraint * ((x-x0)*(x-x0) + (y-y0)*(y-y0) + (z-z0)*(z-z0))"
+        )
+        k_restraint_param_index = restraint_force.addGlobalParameter(
+            "k_restraint", _k_kj_per_nm2(restraint_k_kcal_mol_A2)
+        )
+        restraint_force.addPerParticleParameter("x0")
+        restraint_force.addPerParticleParameter("y0")
+        restraint_force.addPerParticleParameter("z0")
+
+        initial_positions = fixer.positions
+        num_bb_restrained = 0
+        BACKBONE_ATOM_NAMES = {"N", "CA", "C", "O"}
+        
+        for atom in fixer.topology.atoms():
+            if atom.name in BACKBONE_ATOM_NAMES:
+                xyz_vec = initial_positions[atom.index].value_in_unit(unit.nanometer)
+                restraint_force.addParticle(atom.index, [xyz_vec[0], xyz_vec[1], xyz_vec[2]])
+                num_bb_restrained += 1
+        
+        if num_bb_restrained > 0:
+            restraint_force.setForceGroup(1)
+            system.addForce(restraint_force)
+        else:
+            restraint_force = None
+            k_restraint_param_index = -1
+            
+    return restraint_force, k_restraint_param_index
+
+
+def _add_hydrogens_and_minimize(pdb_in_path: str, pdb_out_path: str, platform_order: Optional[List[str]] = None,
+                                 force_tolerance_kj_mol_nm: float = 0.1, max_iterations: int = 500):
+    """
+    Add hydrogens with PDBFixer and run a short OpenMM minimization.
+    
+    Returns:
+        Tuple of (platform_used or None, elapsed_seconds)
+    """
+    import openmm
+    from openmm import app, unit, Platform
+    from pdbfixer import PDBFixer
+    
+    t0 = time.time()
+    try:
+        fixer = PDBFixer(filename=pdb_in_path)
+        fixer.findMissingResidues()
+        fixer.findNonstandardResidues()
+        fixer.replaceNonstandardResidues()
+        fixer.removeHeterogens(keepWater=False)
+        fixer.findMissingAtoms()
+        fixer.addMissingAtoms()
+        fixer.addMissingHydrogens(7.0)
+
+        forcefield = _get_openmm_forcefield()
+        system = forcefield.createSystem(
+            fixer.topology,
+            nonbondedMethod=app.CutoffNonPeriodic,
+            nonbondedCutoff=1.0 * unit.nanometer,
+            constraints=app.HBonds
+        )
+
+        integrator = openmm.LangevinMiddleIntegrator(
+            300 * unit.kelvin,
+            1.0 / unit.picosecond,
+            0.002 * unit.picoseconds
+        )
+
+        # Platform selection
+        plat_used = None
+        sim = None
+        if platform_order is None:
+            platform_order = ["CUDA", "OpenCL", "CPU"]
+            
+        for p_name in platform_order:
+            try:
+                platform_obj = Platform.getPlatformByName(p_name)
+                props = {}
+                if p_name == "CUDA":
+                    props = {"CudaPrecision": "mixed"}
+                elif p_name == "OpenCL":
+                    props = {"OpenCLPrecision": "single"}
+                sim = app.Simulation(fixer.topology, system, integrator, platform_obj, props)
+                plat_used = p_name
+                break
+            except Exception:
+                sim = None
+                continue
+                
+        if sim is None:
+            raise RuntimeError("No suitable OpenMM platform for post-FASPR minimization")
+
+        sim.context.setPositions(fixer.positions)
+        tol = force_tolerance_kj_mol_nm * unit.kilojoule_per_mole / unit.nanometer
+        sim.minimizeEnergy(tolerance=tol, maxIterations=max_iterations)
+        positions = sim.context.getState(getPositions=True).getPositions()
+        
+        with open(pdb_out_path, "w") as outf:
+            app.PDBFile.writeFile(sim.topology, positions, outf, keepIds=True)
+            
+        # Cleanup
+        del sim, integrator, system, fixer
+        gc.collect()
+        
+        return plat_used, time.time() - t0
+        
+    except Exception as e:
+        vprint(f"[OpenMM-PostFASPR] WARN: Failed post-FASPR H-add/min: {e}")
+        try:
+            shutil.copy(pdb_in_path, pdb_out_path)
+        except Exception:
+            pass
+        return None, time.time() - t0
+
+
+def _biopython_align_all_ca(reference_pdb: str, mobile_pdb: str):
+    """
+    Align mobile_pdb to reference_pdb using all CA atoms and overwrite mobile_pdb.
+    
+    Based on FreeBindCraft's biopython_align_all_ca implementation.
+    """
+    from Bio.PDB import PDBParser, PDBIO, Superimposer
+    
+    parser = PDBParser(QUIET=True)
+    ref_struct = parser.get_structure("reference", reference_pdb)
+    mob_struct = parser.get_structure("mobile", mobile_pdb)
+    
+    # Collect CA atoms from both structures
+    ref_cas = []
+    mob_cas = []
+    
+    for ref_model, mob_model in zip(ref_struct, mob_struct):
+        for ref_chain, mob_chain in zip(ref_model, mob_model):
+            for ref_res, mob_res in zip(ref_chain, mob_chain):
+                if "CA" in ref_res and "CA" in mob_res:
+                    ref_cas.append(ref_res["CA"])
+                    mob_cas.append(mob_res["CA"])
+    
+    if len(ref_cas) < 3:
+        vprint("[Align] WARNING: Not enough CA atoms for alignment")
+        return
+    
+    # Superimpose
+    sup = Superimposer()
+    sup.set_atoms(ref_cas, mob_cas)
+    sup.apply(mob_struct.get_atoms())
+    
+    # Save aligned structure
+    io = PDBIO()
+    io.set_structure(mob_struct)
+    io.save(mobile_pdb)
+    
+    vprint(f"[Align] Aligned mobile to reference, RMSD={sup.rms:.2f} Å")
+
+
+def _run_faspr(input_pdb_path: str, output_pdb_path: str, timeout: int = 900) -> bool:
+    """
+    Run FASPR on an input PDB and write repacked output.
+    
+    FASPR requires 'dun2010bbdep.bin' to be colocated with the executable.
+    
+    Returns:
+        True on success, False otherwise.
+    """
+    faspr_bin, faspr_dir = _resolve_faspr_binary()
+    if not faspr_bin or not faspr_dir:
+        vprint("[FASPR] WARN: FASPR binary not found; skipping repack")
+        return False
+
+    cmd = [faspr_bin, "-i", os.path.abspath(input_pdb_path), "-o", os.path.abspath(output_pdb_path)]
+
+    try:
+        vprint(f"[FASPR] Running: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, cwd=faspr_dir, check=True, capture_output=True, text=True, timeout=timeout)
+        if os.path.isfile(output_pdb_path) and os.path.getsize(output_pdb_path) > 0:
+            return True
+    except subprocess.TimeoutExpired:
+        vprint(f"[FASPR] ERROR: Timeout running FASPR on {os.path.basename(input_pdb_path)}")
+    except subprocess.CalledProcessError as e:
+        vprint(f"[FASPR] ERROR: FASPR failed: rc={e.returncode} stderr={getattr(e, 'stderr', '')}")
+    except Exception as e:
+        vprint(f"[FASPR] ERROR: {e}")
+    return False
+
+
 def openmm_relax(
     pdb_file_path: str,
     output_pdb_path: str,
@@ -631,19 +928,39 @@ def openmm_relax(
     max_iterations: int = 1000,
     restraint_k: float = 3.0,
     restraint_ramp_factors: Tuple[float, ...] = (1.0, 0.4, 0.0),
+    md_steps_per_shake: int = 1000,
+    lj_rep_base_k_kj_mol: float = 10.0,
+    lj_rep_ramp_factors: Tuple[float, ...] = (0.0, 1.5, 3.0),
+    ramp_force_tolerance: float = 2.0,
+    final_force_tolerance: float = 0.1,
     use_faspr: bool = True,
+    post_faspr_minimize: bool = True,
 ) -> Tuple[Optional[str], float]:
     """
     Relax a PDB structure using OpenMM with GPU acceleration.
+    
+    This implementation is aligned with FreeBindCraft's openmm_relax, featuring:
+    - LJ clash-repulsion force for better steric clash resolution
+    - MD "shakes" between minimization stages (first two stages only)
+    - Chunked minimization with early stopping
+    - Alignment to original structure and B-factor restoration
+    - FASPR side-chain repacking with post-minimization
+    - Connectivity records (SSBOND/CONECT) restoration
 
     Args:
         pdb_file_path: Input PDB file path
         output_pdb_path: Output relaxed PDB file path
         use_gpu: Whether to use GPU (CUDA/OpenCL) or CPU
-        max_iterations: Maximum minimization iterations per stage
-        restraint_k: Backbone restraint force constant (kcal/mol/A^2)
+        max_iterations: Maximum minimization iterations per stage (0 for unlimited)
+        restraint_k: Backbone restraint force constant (kcal/mol/Å²)
         restraint_ramp_factors: Restraint strength multipliers for each stage
+        md_steps_per_shake: MD steps for each shake (applied to first two stages only)
+        lj_rep_base_k_kj_mol: Base strength for extra LJ repulsion (kJ/mol)
+        lj_rep_ramp_factors: LJ repulsion ramp factors (soft → hard)
+        ramp_force_tolerance: Force tolerance for ramp stages (kJ/mol/nm)
+        final_force_tolerance: Force tolerance for final stage (kJ/mol/nm)
         use_faspr: Whether to run FASPR side-chain repacking after relaxation
+        post_faspr_minimize: Whether to run short minimization after FASPR
 
     Returns:
         Tuple of (platform_name_used, elapsed_seconds)
@@ -652,15 +969,20 @@ def openmm_relax(
     from openmm import app, unit, Platform
     from pdbfixer import PDBFixer
     from Bio.PDB import PDBParser, PDBIO, Polypeptide
+    from itertools import zip_longest
 
     t0 = time.time()
     basename = os.path.basename(pdb_file_path)
     vprint(f"[OpenMM-Relax] Starting relaxation for {basename}")
 
     platform_used = None
+    best_energy = float("inf") * unit.kilojoule_per_mole
+    best_positions = None
 
     try:
-        # Store original B-factors
+        # =================================================================
+        # 1. Store original B-factors (per residue CA or first atom)
+        # =================================================================
         original_bfactors = {}
         parser = PDBParser(QUIET=True)
         try:
@@ -670,12 +992,21 @@ def openmm_relax(
                     for residue in chain:
                         if Polypeptide.is_aa(residue, standard=True):
                             ca = residue["CA"] if "CA" in residue else None
+                            b_factor = None
                             if ca:
-                                original_bfactors[(chain.id, residue.id)] = ca.get_bfactor()
+                                b_factor = ca.get_bfactor()
+                            else:
+                                first_atom = next(residue.get_atoms(), None)
+                                if first_atom:
+                                    b_factor = first_atom.get_bfactor()
+                            if b_factor is not None:
+                                original_bfactors[(chain.id, residue.id)] = b_factor
         except Exception:
             pass
 
-        # PDBFixer preparation
+        # =================================================================
+        # 2. PDBFixer preparation
+        # =================================================================
         t_prep = time.time()
         fixer = PDBFixer(filename=pdb_file_path)
         fixer.findMissingResidues()
@@ -687,8 +1018,10 @@ def openmm_relax(
         fixer.addMissingHydrogens(7.0)
         vprint(f"[OpenMM-Relax] PDBFixer completed in {time.time() - t_prep:.2f}s")
 
-        # Create system with Amber14 force field and OBC2 implicit solvent
-        forcefield = app.ForceField("amber14-all.xml", "implicit/obc2.xml")
+        # =================================================================
+        # 3. Create OpenMM system with forces
+        # =================================================================
+        forcefield = _get_openmm_forcefield()
         system = forcefield.createSystem(
             fixer.topology,
             nonbondedMethod=app.CutoffNonPeriodic,
@@ -696,144 +1029,268 @@ def openmm_relax(
             constraints=app.HBonds,
         )
 
-        # Add backbone restraints
-        restraint_force = None
-        if restraint_k > 0:
-            # Convert kcal/mol/A^2 to kJ/mol/nm^2
-            k_kj_nm2 = restraint_k * 4.184 * 100.0
+        # Extract original sigmas from NonbondedForce for the custom LJ repulsion
+        original_sigmas = []
+        nonbonded_force_index = -1
+        for i_force_idx in range(system.getNumForces()):
+            force_item = system.getForce(i_force_idx)
+            if isinstance(force_item, openmm.NonbondedForce):
+                nonbonded_force_index = i_force_idx
+                for p_idx in range(force_item.getNumParticles()):
+                    charge, sigma, epsilon = force_item.getParticleParameters(p_idx)
+                    original_sigmas.append(sigma.value_in_unit(unit.nanometer))
+                break
 
-            restraint_force = openmm.CustomExternalForce(
-                "0.5 * k * ((x-x0)^2 + (y-y0)^2 + (z-z0)^2)"
-            )
-            restraint_force.addGlobalParameter("k", k_kj_nm2)
-            restraint_force.addPerParticleParameter("x0")
-            restraint_force.addPerParticleParameter("y0")
-            restraint_force.addPerParticleParameter("z0")
+        # Add custom LJ-like repulsive force (ramped)
+        lj_rep_custom_force, k_rep_lj_param_index = _create_lj_repulsive_force(
+            system, lj_rep_base_k_kj_mol, lj_rep_ramp_factors, original_sigmas, nonbonded_force_index
+        )
+        del original_sigmas  # Free memory
 
-            backbone_atoms = {"N", "CA", "C", "O"}
-            for atom in fixer.topology.atoms():
-                if atom.name in backbone_atoms:
-                    pos = fixer.positions[atom.index].value_in_unit(unit.nanometer)
-                    restraint_force.addParticle(atom.index, [pos[0], pos[1], pos[2]])
+        # Add backbone heavy-atom harmonic restraints
+        restraint_force, k_restraint_param_index = _create_backbone_restraint_force(
+            system, fixer, restraint_k
+        )
 
-            system.addForce(restraint_force)
-
-        # Create integrator
+        # =================================================================
+        # 4. Create integrator and simulation
+        # =================================================================
         integrator = openmm.LangevinMiddleIntegrator(
             300 * unit.kelvin,
             1.0 / unit.picosecond,
             0.002 * unit.picoseconds,
         )
 
-        # Platform selection: try CUDA first, then OpenCL, then CPU
         simulation = None
         if use_gpu:
             platform_order = ["CUDA", "OpenCL", "CPU"]
         else:
             platform_order = ["CPU"]
 
-        for platform_name in platform_order:
-            try:
-                platform = Platform.getPlatformByName(platform_name)
-                props = {}
-                if platform_name == "CUDA":
-                    props = {"CudaPrecision": "mixed"}
-                elif platform_name == "OpenCL":
-                    props = {"OpenCLPrecision": "single"}
-
-                simulation = app.Simulation(fixer.topology, system, integrator, platform, props)
-                platform_used = platform_name
-                vprint(f"[OpenMM-Relax] Using platform: {platform_used}")
+        last_exception = None
+        for p_name in platform_order:
+            if simulation:
                 break
-            except Exception as e:
-                vprint(f"[OpenMM-Relax] Platform {platform_name} failed: {e}")
-                continue
+            # Retry up to 3 times per platform
+            for attempt_idx in range(1, 4):
+                simulation = None
+                try:
+                    platform = Platform.getPlatformByName(p_name)
+                    props = {}
+                    if p_name == "CUDA":
+                        props = {"CudaPrecision": "mixed"}
+                    elif p_name == "OpenCL":
+                        props = {"OpenCLPrecision": "single"}
+
+                    simulation = app.Simulation(fixer.topology, system, integrator, platform, props)
+                    platform_used = p_name
+                    vprint(f"[OpenMM-Relax] Using platform: {platform_used}")
+                    break
+                except Exception as e:
+                    last_exception = e
+                    if attempt_idx < 3:
+                        vprint(f"[OpenMM-Relax] Platform {p_name} attempt {attempt_idx} failed; retrying...")
+                        time.sleep(1.0)
+                    else:
+                        vprint(f"[OpenMM-Relax] Platform {p_name} failed after {attempt_idx} attempts")
+                    continue
 
         if simulation is None:
+            if last_exception is not None:
+                raise last_exception
             raise RuntimeError("No suitable OpenMM platform found")
 
         simulation.context.setPositions(fixer.positions)
 
-        # Multi-stage minimization with restraint ramping
-        best_energy = float("inf") * unit.kilojoule_per_mole
-        best_positions = None
+        # =================================================================
+        # 5. Optional pre-minimization step (stabilize before main ramp)
+        # =================================================================
+        if restraint_k > 0 or lj_rep_base_k_kj_mol > 0:
+            t_init_min = time.time()
+            
+            # Set LJ repulsion to zero for initial minimization
+            # Use setGlobalParameterDefaultValue + updateParametersInContext for proper force update
+            if lj_rep_custom_force is not None and k_rep_lj_param_index != -1 and lj_rep_base_k_kj_mol > 0:
+                lj_rep_custom_force.setGlobalParameterDefaultValue(k_rep_lj_param_index, 0.0)
+                lj_rep_custom_force.updateParametersInContext(simulation.context)
+            
+            # Set restraints to full strength
+            if restraint_force is not None and k_restraint_param_index != -1:
+                restraint_force.setGlobalParameterDefaultValue(k_restraint_param_index, _k_kj_per_nm2(restraint_k))
+                restraint_force.updateParametersInContext(simulation.context)
+            
+            simulation.minimizeEnergy(
+                tolerance=ramp_force_tolerance * unit.kilojoule_per_mole / unit.nanometer,
+                maxIterations=max_iterations
+            )
+            vprint(f"[OpenMM-Relax] Pre-minimization completed in {time.time() - t_init_min:.2f}s")
 
-        for stage_idx, ramp_factor in enumerate(restraint_ramp_factors):
+        # =================================================================
+        # 6. Staged relaxation with restraint ramping, LJ ramping, and MD shakes
+        # =================================================================
+        effective_restraint_factors = restraint_ramp_factors if restraint_k > 0 and restraint_ramp_factors else [0.0]
+        effective_lj_rep_factors = lj_rep_ramp_factors if lj_rep_base_k_kj_mol > 0 and lj_rep_ramp_factors else [0.0]
+        
+        ramp_pairs = list(zip_longest(effective_restraint_factors, effective_lj_rep_factors, fillvalue=0.0))
+        num_stages = len(ramp_pairs)
+
+        for stage_idx, (k_factor_restraint, k_factor_lj_rep) in enumerate(ramp_pairs):
             stage_num = stage_idx + 1
             t_stage = time.time()
 
-            # Update restraint strength
-            if restraint_force is not None and restraint_k > 0:
-                current_k = restraint_k * ramp_factor * 4.184 * 100.0
-                simulation.context.setParameter("k", current_k)
+            # Set LJ repulsive ramp for current stage
+            # Use setGlobalParameterDefaultValue + updateParametersInContext for proper force update
+            if lj_rep_custom_force is not None and k_rep_lj_param_index != -1 and lj_rep_base_k_kj_mol > 0:
+                current_lj_rep_k = lj_rep_base_k_kj_mol * k_factor_lj_rep
+                lj_rep_custom_force.setGlobalParameterDefaultValue(k_rep_lj_param_index, current_lj_rep_k)
+                lj_rep_custom_force.updateParametersInContext(simulation.context)
 
-            # Minimization
-            tolerance = 0.1 if stage_idx == len(restraint_ramp_factors) - 1 else 2.0
-            simulation.minimizeEnergy(
-                tolerance=tolerance * unit.kilojoule_per_mole / unit.nanometer,
-                maxIterations=max_iterations,
-            )
+            # Set restraint strength for current stage
+            if restraint_force is not None and k_restraint_param_index != -1 and restraint_k > 0:
+                current_restraint_k = _k_kj_per_nm2(restraint_k * k_factor_restraint)
+                restraint_force.setGlobalParameterDefaultValue(k_restraint_param_index, current_restraint_k)
+                restraint_force.updateParametersInContext(simulation.context)
 
-            # Get energy and update best
-            state = simulation.context.getState(getEnergy=True, getPositions=True)
-            energy = state.getPotentialEnergy()
+            # MD shake only for first two stages (speed-performance tradeoff)
+            if md_steps_per_shake > 0 and stage_idx < 2:
+                t_md = time.time()
+                simulation.context.setVelocitiesToTemperature(300 * unit.kelvin)
+                simulation.step(md_steps_per_shake)
+                vprint(f"[OpenMM-Relax] Stage {stage_num}: MD shake ({md_steps_per_shake} steps) in {time.time() - t_md:.2f}s")
 
-            if energy < best_energy:
-                best_energy = energy
-                best_positions = state.getPositions(asNumpy=True)
+            # Chunked minimization with early stopping
+            current_tolerance = final_force_tolerance if stage_idx == num_stages - 1 else ramp_force_tolerance
+            force_tolerance_qty = current_tolerance * unit.kilojoule_per_mole / unit.nanometer
+            
+            per_call_max_iterations = 200 if (max_iterations == 0 or max_iterations > 200) else max_iterations
+            remaining_iterations = max_iterations
+            small_improvement_streak = 0
+            last_energy = simulation.context.getState(getEnergy=True).getPotentialEnergy()
 
-            stage_time = time.time() - t_stage
-            energy_val = energy.value_in_unit(unit.kilojoule_per_mole)
-            vprint(f"[OpenMM-Relax] Stage {stage_num}/{len(restraint_ramp_factors)}: "
-                   f"E={energy_val:.1f} kJ/mol, k_factor={ramp_factor:.1f} ({stage_time:.2f}s)")
+            while True:
+                simulation.minimizeEnergy(tolerance=force_tolerance_qty, maxIterations=per_call_max_iterations)
+                current_energy = simulation.context.getState(getEnergy=True).getPotentialEnergy()
+
+                # Check improvement magnitude
+                try:
+                    energy_improvement = last_energy - current_energy
+                    if energy_improvement < (0.1 * unit.kilojoule_per_mole):
+                        small_improvement_streak += 1
+                    else:
+                        small_improvement_streak = 0
+                except Exception:
+                    small_improvement_streak = 3
+
+                last_energy = current_energy
+
+                # Decrement remaining iterations if bounded
+                if max_iterations > 0:
+                    remaining_iterations -= per_call_max_iterations
+                    if remaining_iterations <= 0:
+                        break
+
+                # Early stop if improvement is consistently negligible
+                if small_improvement_streak >= 3:
+                    break
+
+            stage_final_energy = last_energy
+            energy_val = stage_final_energy.value_in_unit(unit.kilojoule_per_mole)
+            
+            vprint(f"[OpenMM-Relax] Stage {stage_num}/{num_stages}: E={energy_val:.1f} kJ/mol, "
+                   f"k_restraint_factor={k_factor_restraint:.1f}, k_lj_rep_factor={k_factor_lj_rep:.1f} "
+                   f"({time.time() - t_stage:.2f}s)")
+
+            # Accept-to-best bookkeeping
+            if stage_final_energy < best_energy:
+                best_energy = stage_final_energy
+                best_positions = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)
 
         # Use best positions
         if best_positions is not None:
             simulation.context.setPositions(best_positions)
 
-        # Save relaxed structure
+        # =================================================================
+        # 7. Save relaxed structure
+        # =================================================================
         positions = simulation.context.getState(getPositions=True).getPositions()
         with open(output_pdb_path, "w") as f:
             app.PDBFile.writeFile(simulation.topology, positions, f, keepIds=True)
+        vprint(f"[OpenMM-Relax] OpenMM relaxation completed, saved to: {output_pdb_path}")
 
-        # FASPR side-chain repacking
+        # =================================================================
+        # 8. FASPR side-chain repacking with post-minimization
+        # =================================================================
         if use_faspr:
-            faspr_bin, faspr_dir = _resolve_faspr_binary()
-            if faspr_bin and faspr_dir:
-                t_faspr = time.time()
+            t_faspr = time.time()
+            tmp_dir = tempfile.mkdtemp(prefix="faspr_")
+            tmp_heavy = os.path.join(tmp_dir, "input_heavy.pdb")
+            tmp_faspr_out = os.path.join(tmp_dir, "faspr_out.pdb")
+
+            try:
+                # Prepare heavy-atom PDB (strip hydrogens for FASPR)
                 try:
-                    # Create temp file for FASPR output
-                    tmp_faspr = tempfile.NamedTemporaryFile(suffix=".pdb", delete=False)
-                    tmp_faspr.close()
+                    fixer_heavy = PDBFixer(filename=output_pdb_path)
+                    fixer_heavy.findMissingResidues()
+                    fixer_heavy.findNonstandardResidues()
+                    fixer_heavy.replaceNonstandardResidues()
+                    fixer_heavy.removeHeterogens(keepWater=False)
+                    fixer_heavy.findMissingAtoms()
+                    fixer_heavy.addMissingAtoms()
+                    # Intentionally DO NOT add hydrogens here
+                    with open(tmp_heavy, "w") as ftmp:
+                        app.PDBFile.writeFile(fixer_heavy.topology, fixer_heavy.positions, ftmp, keepIds=True)
+                except Exception:
+                    shutil.copy(output_pdb_path, tmp_heavy)
 
-                    cmd = [faspr_bin, "-i", output_pdb_path, "-o", tmp_faspr.name]
-                    proc = subprocess.run(
-                        cmd,
-                        cwd=faspr_dir,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=300,
-                    )
+                faspr_success = _run_faspr(tmp_heavy, tmp_faspr_out)
 
-                    if os.path.isfile(tmp_faspr.name) and os.path.getsize(tmp_faspr.name) > 0:
-                        # Re-add hydrogens after FASPR
-                        fixer2 = PDBFixer(filename=tmp_faspr.name)
-                        fixer2.addMissingHydrogens(7.0)
-                        with open(output_pdb_path, "w") as f:
-                            app.PDBFile.writeFile(fixer2.topology, fixer2.positions, f, keepIds=True)
+                if faspr_success:
+                    if post_faspr_minimize:
+                        # Add hydrogens and short standardized minimization
+                        _, post_min_time = _add_hydrogens_and_minimize(
+                            tmp_faspr_out, output_pdb_path,
+                            platform_order=["CUDA", "OpenCL", "CPU"],
+                            force_tolerance_kj_mol_nm=final_force_tolerance,
+                            max_iterations=300
+                        )
+                        vprint(f"[FASPR] Repacking + post-min completed in {time.time() - t_faspr:.2f}s")
+                    else:
+                        # Just re-add hydrogens without minimization
+                        try:
+                            fixer2 = PDBFixer(filename=tmp_faspr_out)
+                            fixer2.findMissingResidues()
+                            fixer2.findNonstandardResidues()
+                            fixer2.replaceNonstandardResidues()
+                            fixer2.removeHeterogens(keepWater=False)
+                            fixer2.findMissingAtoms()
+                            fixer2.addMissingAtoms()
+                            fixer2.addMissingHydrogens(7.0)
+                            with open(output_pdb_path, "w") as f2:
+                                app.PDBFile.writeFile(fixer2.topology, fixer2.positions, f2, keepIds=True)
+                        except Exception:
+                            shutil.copy(tmp_faspr_out, output_pdb_path)
                         vprint(f"[FASPR] Repacking completed in {time.time() - t_faspr:.2f}s")
+            finally:
+                try:
+                    shutil.rmtree(tmp_dir)
+                except Exception:
+                    pass
 
-                    os.remove(tmp_faspr.name)
-                except Exception as e:
-                    vprint(f"[FASPR] Error: {e}")
-            else:
-                vprint("[FASPR] Binary not found, skipping repacking")
+        # =================================================================
+        # 9. Align to original structure
+        # =================================================================
+        try:
+            _biopython_align_all_ca(pdb_file_path, output_pdb_path)
+        except Exception as e:
+            vprint(f"[OpenMM-Relax] Alignment failed: {e}")
 
-        # Restore B-factors
+        # =================================================================
+        # 10. Restore B-factors
+        # =================================================================
         if original_bfactors:
             try:
                 relaxed_struct = parser.get_structure("relaxed", output_pdb_path)
+                modified = False
                 for model in relaxed_struct:
                     for chain in model:
                         for residue in chain:
@@ -841,24 +1298,72 @@ def openmm_relax(
                             if bfac is not None:
                                 for atom in residue:
                                     atom.set_bfactor(bfac)
-
-                io = PDBIO()
-                io.set_structure(relaxed_struct)
-                io.save(output_pdb_path)
+                                modified = True
+                if modified:
+                    io = PDBIO()
+                    io.set_structure(relaxed_struct)
+                    io.save(output_pdb_path)
             except Exception:
                 pass
 
-        # Clean PDB (remove non-ATOM lines)
+        # =================================================================
+        # 11. Restore connectivity records (SSBOND/CONECT/LINK)
+        # =================================================================
+        try:
+            tmp_conn = tempfile.NamedTemporaryFile(suffix=".pdb", delete=False)
+            tmp_conn.close()
+            tmp_conn_path = tmp_conn.name
+            
+            # Run PDBFixer to regenerate connectivity
+            fx_conn = PDBFixer(filename=output_pdb_path)
+            with open(tmp_conn_path, "w") as fd:
+                app.PDBFile.writeFile(fx_conn.topology, fx_conn.positions, fd, keepIds=True)
+            
+            # Extract connectivity lines
+            conn_lines = []
+            with open(tmp_conn_path, "r") as fd:
+                for ln in fd:
+                    if ln.startswith(("SSBOND", "CONECT", "LINK")):
+                        conn_lines.append(ln)
+            
+            # Append unique connectivity lines to final output
+            if conn_lines:
+                with open(output_pdb_path, "r") as fin:
+                    lines = fin.readlines()
+                end_idx = next((i for i, line in enumerate(lines) if line.startswith("END")), None)
+                existing = set(line for line in lines if line.startswith(("SSBOND", "CONECT", "LINK")))
+                to_add = [line for line in conn_lines if line not in existing]
+                if to_add:
+                    if end_idx is not None:
+                        lines = lines[:end_idx] + to_add + lines[end_idx:]
+                    else:
+                        lines.extend(to_add)
+                    with open(output_pdb_path, "w") as fout:
+                        fout.writelines(lines)
+                    vprint(f"[OpenMM-Relax] Appended {len(to_add)} connectivity records")
+            
+            os.remove(tmp_conn_path)
+        except Exception as e:
+            vprint(f"[OpenMM-Relax] WARN: failed to append connectivity records: {e}")
+
+        # =================================================================
+        # 12. Clean PDB (keep ATOM, HETATM, TER, END, MODEL, connectivity)
+        # =================================================================
         try:
             with open(output_pdb_path) as f:
-                lines = [l for l in f if l.startswith(("ATOM", "HETATM", "TER", "END", "MODEL"))]
+                lines = [line for line in f if line.startswith(("ATOM", "HETATM", "TER", "END", "MODEL", "SSBOND", "CONECT", "LINK"))]
             with open(output_pdb_path, "w") as f:
                 f.writelines(lines)
         except Exception:
             pass
 
-        # Cleanup
-        del simulation, integrator, system, fixer
+        # =================================================================
+        # 13. Cleanup
+        # =================================================================
+        try:
+            del simulation, integrator, system, fixer, restraint_force, lj_rep_custom_force
+        except Exception:
+            pass
         gc.collect()
 
         elapsed = time.time() - t0
@@ -873,6 +1378,7 @@ def openmm_relax(
             shutil.copy(pdb_file_path, output_pdb_path)
         except Exception:
             pass
+        gc.collect()
         return None, time.time() - t0
 
 
@@ -981,14 +1487,19 @@ def _run_opensource_scoring_impl(
     apo_structure: Optional[str] = None,
     af3_confidence_json: Optional[str] = None,
     target_type: str = "protein",
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     """
     Core implementation for open-source scoring.
 
     Drop-in replacement for run_pyrosetta_single.
     """
+    # Configure verbose logging at the start of remote function
+    configure_verbose(verbose)
+    
     import numpy as np
-    from Bio.PDB import MMCIFParser, PDBParser, PDBIO, Selection
+    from Bio.PDB import PDBParser, Selection
+    from openmm.app import PDBxFile, PDBFile
 
     result = {
         "design_id": design_id,
@@ -1028,46 +1539,25 @@ def _run_opensource_scoring_impl(
     work_dir = Path(tempfile.mkdtemp())
 
     try:
-        # ========== CIF TO PDB CONVERSION ==========
+        # ========== CIF TO PDB CONVERSION (using OpenMM native parser) ==========
+        # Using OpenMM's PDBxFile instead of BioPython's MMCIFParser ensures
+        # internal consistency with the force field and avoids conversion artifacts
+        # that can cause NaN errors during relaxation.
         cif_file = work_dir / f"{design_id}.cif"
         cif_file.write_text(af3_structure)
 
         pdb_file = work_dir / f"{design_id}.pdb"
         try:
-            parser = MMCIFParser(QUIET=True)
-            structure = parser.get_structure(design_id, str(cif_file))
-
-            # Rename long chain IDs to single letters
-            next_chain_idx = 0
-            def int_to_chain(i):
-                if i < 26:
-                    return chr(ord("A") + i)
-                elif i < 52:
-                    return chr(ord("a") + i - 26)
-                else:
-                    return chr(ord("0") + i - 52)
-
-            for chain in structure.get_chains():
-                if len(chain.id) != 1:
-                    while True:
-                        c = int_to_chain(next_chain_idx)
-                        next_chain_idx += 1
-                        existing = set(ch.id for ch in structure.get_chains())
-                        if c not in existing:
-                            chain.id = c
-                            break
-
-            # Truncate long residue names
-            for model in structure:
-                for chain in model:
-                    for residue in chain:
-                        if len(residue.resname) > 3:
-                            residue.resname = residue.resname[:3]
-
-            io = PDBIO()
-            io.set_structure(structure)
-            io.save(str(pdb_file))
-            vprint(f"[Open-Score] Converted CIF to PDB for {design_id}")
+            # Parse CIF with OpenMM's native parser
+            pdbx = PDBxFile(str(cif_file))
+            topology = pdbx.getTopology()
+            positions = pdbx.getPositions()
+            
+            # Write PDB using OpenMM's writer (maintains internal consistency)
+            with open(str(pdb_file), 'w') as f:
+                PDBFile.writeFile(topology, positions, f)
+            
+            vprint(f"[Open-Score] Converted CIF to PDB using OpenMM native parser for {design_id}")
         except Exception as e:
             result["rejection_reason"] = f"CIF to PDB conversion failed: {e}"
             return result
@@ -1163,17 +1653,10 @@ def _run_opensource_scoring_impl(
                 apo_cif.write_text(apo_structure)
 
                 apo_pdb = work_dir / f"{design_id}_apo.pdb"
-                apo_parser = MMCIFParser(QUIET=True)
-                apo_struct = apo_parser.get_structure(f"{design_id}_apo", str(apo_cif))
-
-                # Rename chains
-                for chain in apo_struct.get_chains():
-                    if len(chain.id) != 1:
-                        chain.id = "A"
-
-                apo_io = PDBIO()
-                apo_io.set_structure(apo_struct)
-                apo_io.save(str(apo_pdb))
+                # Use OpenMM native parser for APO structure as well
+                apo_pdbx = PDBxFile(str(apo_cif))
+                with open(str(apo_pdb), 'w') as f:
+                    PDBFile.writeFile(apo_pdbx.getTopology(), apo_pdbx.getPositions(), f)
 
                 # Get CA coordinates
                 def get_ca_coords(pdb_path, chain_id):
@@ -1321,11 +1804,12 @@ def run_opensource_scoring_T4(
     apo_structure: Optional[str] = None,
     af3_confidence_json: Optional[str] = None,
     target_type: str = "protein",
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     """Run open-source scoring on T4 GPU."""
     return _run_opensource_scoring_impl(
         design_id, af3_structure, af3_iptm, af3_ptm, af3_plddt,
-        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type
+        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type, verbose
     )
 
 
@@ -1341,11 +1825,12 @@ def run_opensource_scoring_L4(
     apo_structure: Optional[str] = None,
     af3_confidence_json: Optional[str] = None,
     target_type: str = "protein",
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     """Run open-source scoring on L4 GPU."""
     return _run_opensource_scoring_impl(
         design_id, af3_structure, af3_iptm, af3_ptm, af3_plddt,
-        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type
+        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type, verbose
     )
 
 
@@ -1361,11 +1846,12 @@ def run_opensource_scoring_A10G(
     apo_structure: Optional[str] = None,
     af3_confidence_json: Optional[str] = None,
     target_type: str = "protein",
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     """Run open-source scoring on A10G GPU (default)."""
     return _run_opensource_scoring_impl(
         design_id, af3_structure, af3_iptm, af3_ptm, af3_plddt,
-        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type
+        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type, verbose
     )
 
 
@@ -1381,11 +1867,12 @@ def run_opensource_scoring_L40S(
     apo_structure: Optional[str] = None,
     af3_confidence_json: Optional[str] = None,
     target_type: str = "protein",
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     """Run open-source scoring on L40S GPU."""
     return _run_opensource_scoring_impl(
         design_id, af3_structure, af3_iptm, af3_ptm, af3_plddt,
-        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type
+        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type, verbose
     )
 
 
@@ -1401,11 +1888,12 @@ def run_opensource_scoring_A100_40GB(
     apo_structure: Optional[str] = None,
     af3_confidence_json: Optional[str] = None,
     target_type: str = "protein",
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     """Run open-source scoring on A100-40GB GPU."""
     return _run_opensource_scoring_impl(
         design_id, af3_structure, af3_iptm, af3_ptm, af3_plddt,
-        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type
+        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type, verbose
     )
 
 
@@ -1421,11 +1909,12 @@ def run_opensource_scoring_A100_80GB(
     apo_structure: Optional[str] = None,
     af3_confidence_json: Optional[str] = None,
     target_type: str = "protein",
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     """Run open-source scoring on A100-80GB GPU."""
     return _run_opensource_scoring_impl(
         design_id, af3_structure, af3_iptm, af3_ptm, af3_plddt,
-        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type
+        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type, verbose
     )
 
 
@@ -1441,11 +1930,12 @@ def run_opensource_scoring_H100(
     apo_structure: Optional[str] = None,
     af3_confidence_json: Optional[str] = None,
     target_type: str = "protein",
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     """Run open-source scoring on H100 GPU."""
     return _run_opensource_scoring_impl(
         design_id, af3_structure, af3_iptm, af3_ptm, af3_plddt,
-        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type
+        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type, verbose
     )
 
 
@@ -1461,11 +1951,12 @@ def run_opensource_scoring_B200(
     apo_structure: Optional[str] = None,
     af3_confidence_json: Optional[str] = None,
     target_type: str = "protein",
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     """Run open-source scoring on B200 GPU."""
     return _run_opensource_scoring_impl(
         design_id, af3_structure, af3_iptm, af3_ptm, af3_plddt,
-        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type
+        binder_chain, target_chain, apo_structure, af3_confidence_json, target_type, verbose
     )
 
 
@@ -1487,7 +1978,8 @@ def compare_sasa_methods(
     """
     import tempfile
     from pathlib import Path
-    from Bio.PDB import MMCIFParser, PDBParser, PDBIO
+    from Bio.PDB import PDBParser
+    from openmm.app import PDBxFile, PDBFile
     
     result = {
         "design_id": design_id,
@@ -1499,38 +1991,15 @@ def compare_sasa_methods(
     with tempfile.TemporaryDirectory() as work_dir:
         work_dir = Path(work_dir)
         
-        # Convert CIF to PDB
+        # Convert CIF to PDB using OpenMM native parser
         cif_file = work_dir / f"{design_id}.cif"
         cif_file.write_text(af3_structure)
         
         pdb_file = work_dir / f"{design_id}.pdb"
         try:
-            parser = MMCIFParser(QUIET=True)
-            structure = parser.get_structure(design_id, str(cif_file))
-            
-            # Rename long chain IDs
-            next_chain_idx = 0
-            def int_to_chain(i):
-                if i < 26:
-                    return chr(ord("A") + i)
-                elif i < 52:
-                    return chr(ord("a") + i - 26)
-                else:
-                    return chr(ord("0") + i - 52)
-            
-            for chain in structure.get_chains():
-                if len(chain.id) != 1:
-                    while True:
-                        c = int_to_chain(next_chain_idx)
-                        next_chain_idx += 1
-                        existing = set(ch.id for ch in structure.get_chains())
-                        if c not in existing:
-                            chain.id = c
-                            break
-            
-            io = PDBIO()
-            io.set_structure(structure)
-            io.save(str(pdb_file))
+            pdbx = PDBxFile(str(cif_file))
+            with open(str(pdb_file), 'w') as f:
+                PDBFile.writeFile(pdbx.getTopology(), pdbx.getPositions(), f)
         except Exception as e:
             result["error"] = f"CIF to PDB conversion failed: {e}"
             return result

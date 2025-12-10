@@ -37,8 +37,12 @@ from modal_boltz_ph.scoring_opensource import (
     OPENSOURCE_SCORING_GPU_FUNCTIONS,
     DEFAULT_OPENSOURCE_GPU,
     compare_sasa_methods,
+    configure_verbose as configure_opensource_verbose,
 )
-from modal_boltz_ph.scoring_pyrosetta import run_pyrosetta_single
+from modal_boltz_ph.scoring_pyrosetta import (
+    run_pyrosetta_single,
+    configure_verbose as configure_pyrosetta_verbose,
+)
 
 
 # =============================================================================
@@ -121,6 +125,7 @@ def test_scoring(
     binder_chain: str = "A",
     target_chain: str = "B",
     max_designs: int = 0,
+    verbose: bool = False,
 ):
     """
     Test scoring methods on existing AF3 structures.
@@ -138,13 +143,19 @@ def test_scoring(
         binder_chain: Chain ID of binder (default: A)
         target_chain: Chain ID of target (default: B)
         max_designs: Maximum designs to process (0 = all)
+        verbose: Enable detailed progress/timing output (default: False)
     
     Example:
         modal run modal_boltz_ph/test_scoring.py::test_scoring \\
             --input-dir ./modal_results/PDL1_open_test3/af3_validation \\
             --compare-pyrosetta true \\
-            --output-dir ./scoring_test_results
+            --output-dir ./scoring_test_results \\
+            --verbose
     """
+    # Configure verbose logging for both scoring modules
+    configure_opensource_verbose(verbose)
+    configure_pyrosetta_verbose(verbose)
+    
     print("\n" + "=" * 70)
     print("SCORING TEST HARNESS")
     print("=" * 70)
@@ -153,6 +164,7 @@ def test_scoring(
     print(f"Compare PyRosetta: {compare_pyrosetta}")
     print(f"Open-source GPU: {open_scoring_gpu}")
     print(f"Target type: {target_type}")
+    print(f"Verbose: {verbose}")
     print("=" * 70 + "\n")
     
     # Create output directories
@@ -234,6 +246,7 @@ def test_scoring(
                 apo_structure=None,  # No APO for this test
                 af3_confidence_json=None,  # No confidence data
                 target_type=target_type,
+                verbose=verbose,
             )
             opensource_time = time.time() - t0
             
@@ -440,6 +453,7 @@ def test_single(
         apo_structure=None,
         af3_confidence_json=None,
         target_type="protein",
+        verbose=True,  # Always verbose for debug_scoring
     )
     opensource_time = time.time() - t0
     

@@ -55,10 +55,14 @@ from modal_boltz_ph.validation_af3 import (
     run_af3_single_A100_80GB,
     run_af3_apo_A100_80GB,
 )
-from modal_boltz_ph.scoring_pyrosetta import run_pyrosetta_single
+from modal_boltz_ph.scoring_pyrosetta import (
+    run_pyrosetta_single,
+    configure_verbose as configure_pyrosetta_verbose,
+)
 from modal_boltz_ph.scoring_opensource import (
     OPENSOURCE_SCORING_GPU_FUNCTIONS,
     DEFAULT_OPENSOURCE_GPU,
+    configure_verbose as configure_opensource_verbose,
 )
 from modal_boltz_ph.cache import initialize_cache, _upload_af3_weights_impl, precompute_msas
 from modal_boltz_ph.sync import (
@@ -235,6 +239,8 @@ def run_pipeline(
     # Open-source scoring (PyRosetta-free alternative)
     use_open_scoring: str = "false",
     open_scoring_gpu: str = DEFAULT_OPENSOURCE_GPU,
+    # Verbosity
+    verbose: str = "false",
 ):
     """
     Run the Protein Hunter design pipeline on Modal.
@@ -341,6 +347,11 @@ def run_pipeline(
     use_alphafold3_validation = str2bool(use_alphafold3_validation)
     use_msa_for_af3 = str2bool(use_msa_for_af3)
     use_open_scoring = str2bool(use_open_scoring)
+    verbose = str2bool(verbose)
+    
+    # Configure verbose logging for scoring modules
+    configure_opensource_verbose(verbose)
+    configure_pyrosetta_verbose(verbose)
 
     # Smart MSA mode default based on template and AF3 validation
     # - Template provided + no AF3 validation: skip MSAs (Boltz has template, no AF3 needs)
@@ -825,6 +836,7 @@ def run_pipeline(
                         apo_structure,
                         af3_result.get("af3_confidence_json"),
                         target_type,
+                        verbose,  # Pass verbose flag to remote function
                     )
                     status_str = "ACCEPTED" if scoring_result.get("accepted") else f"REJECTED ({scoring_result.get('rejection_reason', 'unknown')})"
                     print(f"  [{design_id}] Open-source: SC={scoring_result.get('interface_sc', 0):.2f}, dSASA={scoring_result.get('interface_dSASA', 0):.1f} → {status_str}")

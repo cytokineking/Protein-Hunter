@@ -9,11 +9,43 @@ various quality metrics for binder evaluation.
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from modal_boltz_ph.app import app
 from modal_boltz_ph.images import pyrosetta_image
+
+
+# =============================================================================
+# LOGGING UTILITIES
+# =============================================================================
+
+# Module-level verbose flag (simpler approach for Modal remote functions)
+_VERBOSE = False
+
+
+def configure_verbose(verbose: bool = False):
+    """
+    Configure verbose logging for the PyRosetta scoring module.
+    
+    Call this at the start of your entrypoint to control verbosity.
+    When verbose=False (default), only warnings/errors are shown.
+    When verbose=True, detailed timing and progress messages are shown.
+    """
+    global _VERBOSE
+    _VERBOSE = verbose
+
+
+def vprint(msg: str):
+    """
+    Verbose print - only shown when verbose mode is enabled.
+    
+    Uses a simple flag-based approach that works across Modal remote functions.
+    """
+    if _VERBOSE:
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[{timestamp}] {msg}", flush=True)
 
 
 @app.function(image=pyrosetta_image, cpu=4, timeout=1800, max_containers=20)
@@ -212,7 +244,7 @@ def run_pyrosetta_single(
             io = PDBIO()
             io.set_structure(structure)
             io.save(str(pdb_file))
-            print(f"  Converted CIF to PDB for {design_id}")
+            vprint(f"[PyRosetta] Converted CIF to PDB for {design_id}")
         except Exception as e:
             result["rejection_reason"] = f"CIF to PDB conversion failed: {e}"
             return result
@@ -226,7 +258,7 @@ def run_pyrosetta_single(
         needs_collapse = len(total_chains) > 2
         
         if needs_collapse:
-            print(f"  Structure has {len(total_chains)} chains - will collapse for interface scoring only")
+            vprint(f"[PyRosetta] Structure has {len(total_chains)} chains - will collapse for interface scoring only")
         
         # ========================================
         # PYROSETTA INITIALIZATION
@@ -316,12 +348,12 @@ def run_pyrosetta_single(
             try:
                 structure = parser.get_structure("complex", pdb_path)
             except Exception as e:
-                print(f"[ERROR] Could not parse PDB: {e}")
+                vprint(f"[PyRosetta] ERROR: Could not parse PDB: {e}")
                 return {}
             
             model = structure[0]
             if binder_chain not in model:
-                print(f"[WARNING] Binder chain '{binder_chain}' not found.")
+                vprint(f"[PyRosetta] WARNING: Binder chain '{binder_chain}' not found.")
                 return {}
             
             binder_atoms = Selection.unfold_entities(model[binder_chain], "A")
@@ -382,7 +414,7 @@ def run_pyrosetta_single(
             collapsed_pdb = work_dir / f"{design_id}_collapsed.pdb"
             collapse_multiple_chains(str(relaxed_pdb_path), str(collapsed_pdb), binder_chain, "B")
             scoring_pose = pr.pose_from_file(str(collapsed_pdb))
-            print(f"  Collapsed {len(total_chains)} chains to 2 for interface scoring")
+            vprint(f"[PyRosetta] Collapsed {len(total_chains)} chains to 2 for interface scoring")
         else:
             scoring_pose = pose  # Use the relaxed pose directly
         
@@ -417,7 +449,7 @@ def run_pyrosetta_single(
             )
             result["interface_delta_unsat_hbonds"] = int(buns_filter.report_sm(scoring_pose))
         except Exception as e:
-            print(f"  BUNS calculation failed: {e}")
+            vprint(f"[PyRosetta] BUNS calculation failed: {e}")
             result["interface_delta_unsat_hbonds"] = 0
         
         # ========================================
@@ -478,7 +510,7 @@ def run_pyrosetta_single(
                 
                 result["surface_hydrophobicity"] = round(exp_apol_count / total_count, 3) if total_count > 0 else 0.0
         except Exception as e:
-            print(f"  Surface hydrophobicity calculation failed: {e}")
+            vprint(f"[PyRosetta] Surface hydrophobicity calculation failed: {e}")
             result["surface_hydrophobicity"] = 0.0
         
         # ========================================
@@ -498,7 +530,7 @@ def run_pyrosetta_single(
                     rg = np.sqrt(np.mean(np.sum((coords - centroid)**2, axis=1)))
                     result["rg"] = round(float(rg), 2)
         except Exception as e:
-            print(f"  Radius of gyration calculation failed: {e}")
+            vprint(f"[PyRosetta] Radius of gyration calculation failed: {e}")
             result["rg"] = None
         
         # ========================================
@@ -522,7 +554,7 @@ def run_pyrosetta_single(
                         interface_pae2 = np.mean(pae_matrix[binder_len:, :binder_len])
                         result["i_pae"] = round((interface_pae1 + interface_pae2) / 2, 2)
             except Exception as e:
-                print(f"  i_pae calculation failed: {e}")
+                vprint(f"[PyRosetta] i_pae calculation failed: {e}")
                 result["i_pae"] = None
         
         # ========================================
@@ -580,10 +612,10 @@ def run_pyrosetta_single(
                 if len(holo_coords) == len(apo_coords) and len(holo_coords) > 0:
                     result["apo_holo_rmsd"] = round(np_rmsd(holo_coords, apo_coords), 2)
                 else:
-                    print(f"  Warning: Chain length mismatch for RMSD: holo={len(holo_coords)}, apo={len(apo_coords)}")
+                    vprint(f"[PyRosetta] Warning: Chain length mismatch for RMSD: holo={len(holo_coords)}, apo={len(apo_coords)}")
                     result["apo_holo_rmsd"] = None
             except Exception as e:
-                print(f"  APO-HOLO RMSD calculation failed: {e}")
+                vprint(f"[PyRosetta] APO-HOLO RMSD calculation failed: {e}")
                 result["apo_holo_rmsd"] = None
         
         # ========================================
@@ -664,7 +696,7 @@ def run_pyrosetta_single(
     except Exception as e:
         import traceback
         result["rejection_reason"] = f"PyRosetta error: {str(e)[:200]}"
-        print(f"PyRosetta error for {design_id}: {traceback.format_exc()}")
+        vprint(f"[PyRosetta] Error for {design_id}: {traceback.format_exc()}")
     
     return result
 
