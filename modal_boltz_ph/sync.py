@@ -26,6 +26,8 @@ def _stream_result(
     binder_name: str,
     target_seqs: str = "",
     contact_residues: str = "",
+    contact_residues_auth: str = "",       # Hotspots in auth/PDB numbering (for traceability)
+    template_first_residue: str = "",      # Pre-formatted "A:69,B:1" string
     msa_mode: str = "empty",
     cyclic: bool = False,
     alanine_count: int = 0,
@@ -55,7 +57,9 @@ def _stream_result(
         pdb_file: Path to the PDB file
         binder_name: Name of the binder design
         target_seqs: Target protein sequences
-        contact_residues: Contact residue specification
+        contact_residues: Contact residue specification (canonical numbering)
+        contact_residues_auth: Contact residues in auth/PDB numbering (for traceability)
+        template_first_residue: First auth residue per chain ("A:69,B:1")
         msa_mode: MSA mode (empty or mmseqs)
         cyclic: Whether binder is cyclic
         alanine_count: Number of alanines in sequence
@@ -84,6 +88,8 @@ def _stream_result(
             "binder_name": binder_name,
             "target_seqs": target_seqs,
             "contact_residues": contact_residues,
+            "contact_residues_auth": contact_residues_auth,      # Auth/PDB numbering
+            "template_first_residue": template_first_residue,    # "A:69,B:1" format
             "msa_mode": msa_mode,
             "cyclic": cyclic,
             "alanine_count": alanine_count,
@@ -349,6 +355,8 @@ def _save_cycle_result(output_path: Path, result: Dict):
         # Job configuration (enables reproducibility without YAML files)
         "target_seqs": result.get("target_seqs", ""),
         "contact_residues": result.get("contact_residues", ""),
+        "contact_residues_auth": result.get("contact_residues_auth", ""),      # Auth/PDB numbering
+        "template_first_residue": result.get("template_first_residue", ""),    # "A:69,B:1" format
         "msa_mode": result.get("msa_mode", "empty"),
         # AF3 reconstruction fields
         "ligand_smiles": result.get("ligand_smiles", ""),
@@ -430,6 +438,10 @@ def _save_best_result(output_path: Path, result: Dict):
         "rg": None,
         "accepted": None,
         "rejection_reason": None,
+        # Hotspot/template traceability
+        "contact_residues": result.get("contact_residues", ""),
+        "contact_residues_auth": result.get("contact_residues_auth", ""),
+        "template_first_residue": result.get("template_first_residue", ""),
         "timestamp": dt.datetime.fromtimestamp(result.get("timestamp", time.time())).isoformat(),
     }
     append_to_csv_safe(csv_file, row)

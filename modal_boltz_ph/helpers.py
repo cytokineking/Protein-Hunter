@@ -125,6 +125,9 @@ def get_cif_alignment_json(
     This function is used for template integration in AF3 validation,
     matching the local pipeline's approach.
     
+    AF3 requires mmCIF format, so PDB files are converted automatically.
+    The mmCIF is also filtered to only include the relevant chain.
+    
     Args:
         query_seq: The query protein sequence to align against
         cif_path: Path to the template CIF/PDB file
@@ -136,12 +139,14 @@ def get_cif_alignment_json(
     Raises:
         ValueError: If chain not found or alignment fails
     """
+    import io
     from Bio.Align import PairwiseAligner
     from Bio.Data import IUPACData
-    from Bio.PDB import MMCIFParser, PDBParser
+    from Bio.PDB import MMCIFParser, PDBParser, MMCIFIO, Select
     
     # Determine parser based on file extension
-    if cif_path.lower().endswith('.cif'):
+    is_cif = cif_path.lower().endswith('.cif')
+    if is_cif:
         parser = MMCIFParser(QUIET=True)
     else:
         parser = PDBParser(QUIET=True)
@@ -155,6 +160,8 @@ def get_cif_alignment_json(
             raise ValueError(f"Chain {chain_id} not found in {cif_path}")
     else:
         chain = next(structure.get_chains())
+    
+    selected_chain_id = chain.id
     
     # Extract template sequence using 3-letter to 1-letter mapping
     three_to_one = IUPACData.protein_letters_3to1
@@ -188,15 +195,131 @@ def get_cif_alignment_json(
             query_indices.append(int(q_idx))
             template_indices.append(int(t_idx))
     
-    # Read mmCIF/PDB text
-    with open(cif_path) as f:
-        structure_text = f.read()
+    # Generate mmCIF format (convert PDB to mmCIF if needed)
+    # AF3 requires mmCIF format for templates
+    if is_cif:
+        # For CIF files, read and filter by chain
+        with open(cif_path) as f:
+            mmcif_text = f.read()
+        # Filter to selected chain only
+        mmcif_text = _filter_mmcif_by_chain(mmcif_text, selected_chain_id)
+    else:
+        # For PDB files, convert to mmCIF using Biopython
+        # Create a chain selector
+        class ChainSelect(Select):
+            def accept_chain(self, chain):
+                return chain.id == selected_chain_id
+        
+        mmcif_io = MMCIFIO()
+        mmcif_io.set_structure(structure)
+        
+        # Write to string buffer
+        output = io.StringIO()
+        mmcif_io.save(output, ChainSelect())
+        mmcif_text = output.getvalue()
+    
+    # AF3 requires templates to have a release date - add if missing
+    mmcif_text = _ensure_mmcif_release_date(mmcif_text)
     
     return {
-        "mmcif": structure_text,
+        "mmcif": mmcif_text,
         "queryIndices": query_indices,
         "templateIndices": template_indices,
     }
+
+
+def _ensure_mmcif_release_date(mmcif_text: str) -> str:
+    """
+    Ensure mmCIF has a release date required by AF3 templates.
+    
+    AF3 requires templates to have _pdbx_audit_revision_history.revision_date
+    in ISO-8601 format. If missing, adds a placeholder date.
+    """
+    # Check if release date already exists
+    if "_pdbx_audit_revision_history.revision_date" in mmcif_text:
+        return mmcif_text
+    
+    # Add the required audit revision history section after data_ line
+    # Use a generic historical date (before any designs would be created)
+    audit_block = """
+#
+loop_
+_pdbx_audit_revision_history.ordinal
+_pdbx_audit_revision_history.data_content_type
+_pdbx_audit_revision_history.major_revision
+_pdbx_audit_revision_history.minor_revision
+_pdbx_audit_revision_history.revision_date
+1 'Structure model' 1 0 2020-01-01
+#
+"""
+    
+    # Insert after the data_ line
+    lines = mmcif_text.split('\n')
+    result_lines = []
+    inserted = False
+    
+    for line in lines:
+        result_lines.append(line)
+        # Insert after data_ line
+        if line.startswith('data_') and not inserted:
+            result_lines.append(audit_block)
+            inserted = True
+    
+    # If no data_ line found, prepend with a generic data block
+    if not inserted:
+        return f"data_template\n{audit_block}\n{mmcif_text}"
+    
+    return '\n'.join(result_lines)
+
+
+def _filter_mmcif_by_chain(mmcif_text: str, chain_id: str) -> str:
+    """
+    Filter mmCIF text to only include data for the specified chain.
+    Keeps header information and filters atom_site and other relevant sections.
+    """
+    lines = mmcif_text.split('\n')
+    filtered_lines = []
+    in_atom_site = False
+    atom_site_columns = {}
+    chain_column_idx = None
+    
+    for line in lines:
+        # Keep all header and metadata lines
+        if line.startswith('data_') or line.startswith('_entry.') or \
+           line.startswith('_audit') or line.startswith('_database') or \
+           line.startswith('_entity') or line.startswith('_struct') or \
+           line.startswith('_exptl') or line.startswith('_cell') or \
+           line.startswith('_symmetry') or line.startswith('#'):
+            filtered_lines.append(line)
+            continue
+        
+        # Detect start of atom_site section
+        if line.startswith('_atom_site.'):
+            in_atom_site = True
+            filtered_lines.append(line)
+            # Parse column name
+            col_name = line.split('.')[1].split()[0]
+            atom_site_columns[col_name] = len(atom_site_columns)
+            if col_name == 'label_asym_id' or col_name == 'auth_asym_id':
+                chain_column_idx = len(atom_site_columns) - 1
+            continue
+        
+        # Filter atom_site data lines
+        if in_atom_site:
+            if line.startswith('ATOM') or line.startswith('HETATM'):
+                parts = line.split()
+                if chain_column_idx is not None and len(parts) > chain_column_idx:
+                    if parts[chain_column_idx] == chain_id:
+                        filtered_lines.append(line)
+            elif line.strip() == '' or line.startswith('_') or line.startswith('loop_'):
+                in_atom_site = False
+                filtered_lines.append(line)
+            else:
+                filtered_lines.append(line)
+        else:
+            filtered_lines.append(line)
+    
+    return '\n'.join(filtered_lines)
 
 
 # =============================================================================

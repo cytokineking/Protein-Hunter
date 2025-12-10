@@ -20,6 +20,13 @@ from modal_boltz_ph.app import app, cache_volume, results_dict
 from modal_boltz_ph.images import image
 
 
+def _format_tfr(tfr_dict: dict) -> str:
+    """Format template_first_residues dict as 'A:69,B:1' string."""
+    if not tfr_dict:
+        return ""
+    return ",".join(f"{k}:{v}" for k, v in tfr_dict.items())
+
+
 def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
     """
     Run a single design trajectory (all cycles) for one binder.
@@ -233,6 +240,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
         
         # Tracking variables
         best_iptm = float("-inf")
+        best_plddt = 0.0
         best_seq = None
         best_pdb_content = None
         best_cycle_idx = -1
@@ -355,6 +363,8 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                 binder_name=binder_name,
                 target_seqs=protein_seqs,
                 contact_residues=contact_residues,
+                contact_residues_auth=task_dict.get("contact_residues_auth", ""),
+                template_first_residue=_format_tfr(task_dict.get("template_first_residues", {})),
                 msa_mode=msa_mode,
                 cyclic=cyclic,
                 alanine_count=0,
@@ -472,6 +482,8 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                         binder_name=binder_name,
                         target_seqs=protein_seqs,
                         contact_residues=contact_residues,
+                        contact_residues_auth=task_dict.get("contact_residues_auth", ""),
+                        template_first_residue=_format_tfr(task_dict.get("template_first_residues", {})),
                         msa_mode=msa_mode,
                         cyclic=cyclic,
                         alanine_count=alanine_count,
@@ -487,6 +499,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
                 # Update best if acceptable (low alanine %)
                 if alanine_pct <= 0.20 and current_iptm > best_iptm:
                     best_iptm = current_iptm
+                    best_plddt = current_plddt
                     best_seq = seq
                     best_pdb_content = pdb_file.read_text()
                     best_cycle_idx = cycle + 1
@@ -508,11 +521,15 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
         # Finalize results
         result["status"] = "success"
         result["best_iptm"] = best_iptm if best_iptm > float("-inf") else 0.0
+        result["best_plddt"] = best_plddt
         result["best_cycle"] = best_cycle_idx
         result["best_seq"] = best_seq
         result["best_pdb"] = best_pdb_content
         
-        print(f"\n✓ Design {design_idx} complete: best ipTM={result['best_iptm']:.3f} at cycle {best_cycle_idx}")
+        if best_cycle_idx >= 0:
+            print(f"\n✓ Design {design_idx} complete: best ipTM={result['best_iptm']:.3f}, pLDDT={best_plddt:.2f} at cycle {best_cycle_idx}")
+        else:
+            print(f"\n✗ Design {design_idx} complete: no cycle passed alanine threshold (≤20%)")
         
     except Exception as e:
         result["status"] = "error"

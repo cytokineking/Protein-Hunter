@@ -346,11 +346,12 @@ def run_pipeline(
             print(f"Error: Template file not found: {template_path}")
             return
         
-        # Parse template chain IDs
+        # Parse template chain IDs - default to 'A' if not specified
         template_chains = [c.strip() for c in (template_cif_chain_id or "").split(",") if c.strip()]
         if not template_chains:
-            print("Error: --template-cif-chain-id is required when using --template-path")
-            return
+            print("⚠ Warning: No --template-cif-chain-id specified, defaulting to chain 'A'")
+            template_chains = ["A"]
+            template_cif_chain_id = "A"  # Update for downstream use
         
         # Analyze template structure
         template_bytes = template_file.read_bytes()
@@ -688,12 +689,48 @@ def run_pipeline(
         if not use_alphafold3_validation:
             return design_result
         
+        # Skip AF3 validation if no valid design was found (best_seq is None/empty)
+        if not best_seq:
+            print(f"  [{design_id}] Skipping AF3 validation: no valid design (all cycles had alanine >20%)")
+            return {
+                **design_result,
+                "design_id": design_id,
+                "accepted": False,
+                "rejection_reason": "no cycle passed alanine threshold (≤20%)",
+            }
+        
+        # Skip AF3 validation if Boltz metrics don't meet thresholds
+        boltz_iptm = design_result.get("best_iptm", 0.0)
+        boltz_plddt = design_result.get("best_plddt", 0.0)
+        
+        iptm_ok = boltz_iptm >= high_iptm_threshold
+        plddt_ok = boltz_plddt >= high_plddt_threshold
+        
+        if not (iptm_ok and plddt_ok):
+            failure_reasons = []
+            if not iptm_ok:
+                failure_reasons.append(f"ipTM {boltz_iptm:.3f} < {high_iptm_threshold}")
+            if not plddt_ok:
+                failure_reasons.append(f"pLDDT {boltz_plddt:.2f} < {high_plddt_threshold}")
+            rejection_reason = "; ".join(failure_reasons)
+            print(f"  [{design_id}] Skipping AF3 validation: {rejection_reason}")
+            return {
+                **design_result,
+                "design_id": design_id,
+                "accepted": False,
+                "rejection_reason": rejection_reason,
+            }
+        
         # ========== STAGE 2: AF3 VALIDATION ==========
         binder_seq = best_seq
         target_seq = task_input.get("protein_seqs", "")
         target_msas = design_result.get("target_msas", {}) if use_msa_for_af3 else {}
-        
+
         print(f"  [{design_id}] Starting AF3 validation...")
+        
+        # Get template info from task_input for AF3 validation
+        task_template_content = task_input.get("template_content", "")
+        task_template_chain_ids = task_input.get("template_chain_ids", "")
         
         try:
             af3_result = af3_fn.remote(
@@ -701,7 +738,8 @@ def run_pipeline(
                 "A", "B",  # binder_chain, starting target_chain
                 target_msas,  # Full dict of chain_id -> MSA content
                 "reuse" if use_msa_for_af3 else "none",
-                None, None  # template_path, template_chain_id
+                task_template_content if task_template_content else None,      # base64-encoded template
+                task_template_chain_ids if task_template_content else None     # chain IDs
             )
         except Exception as e:
             print(f"  [{design_id}] AF3 failed: {e}")
@@ -832,15 +870,20 @@ def run_pipeline(
                 all_results.append(result)
                 
                 # Print completion status
-                status = "✓" if result.get("status") == "success" else "✗"
                 design_idx = result.get("design_idx", "?")
                 
                 if use_alphafold3_validation and result.get("af3_iptm") is not None:
+                    # Full pipeline completed with AF3 validation
                     accepted = "✓ ACCEPTED" if result.get("accepted") else "✗ REJECTED"
-                    print(f"\n[{i+1}/{len(tasks)}] {status} Design {design_idx} COMPLETE: "
+                    print(f"\n[{i+1}/{len(tasks)}] Design {design_idx} COMPLETE: "
                           f"Boltz={result.get('best_iptm', 0):.3f}, AF3={result.get('af3_iptm', 0):.3f}, "
                           f"dG={result.get('interface_dG', 0):.1f} → {accepted}\n")
+                elif use_alphafold3_validation and result.get("rejection_reason"):
+                    # AF3 was skipped due to Boltz metrics not meeting threshold
+                    print(f"[{i+1}/{len(tasks)}] Design {design_idx}: ✗ REJECTED ({result.get('rejection_reason')})")
                 else:
+                    # Design-only mode or design error
+                    status = "✓" if result.get("status") == "success" else "✗"
                     print(f"[{i+1}/{len(tasks)}] {status} Design {design_idx}: ipTM={result.get('best_iptm', 0):.3f}")
     else:
         # Unlimited concurrency (design only mode)

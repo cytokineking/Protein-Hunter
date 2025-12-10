@@ -146,8 +146,8 @@ def _run_af3_single_impl(
     target_chain: str = "B",
     target_msas: Optional[Dict[str, str]] = None,
     af3_msa_mode: str = "none",
-    template_path: Optional[str] = None,
-    template_chain_id: Optional[str] = None,
+    template_content: Optional[str] = None,    # Base64-encoded template PDB/CIF
+    template_chain_ids: Optional[str] = None,  # Comma-separated chain IDs from template
 ) -> Dict[str, Any]:
     """
     Run AF3 validation on a SINGLE design (holo state).
@@ -163,8 +163,8 @@ def _run_af3_single_impl(
         target_chain: Starting chain ID for targets (default "B")
         target_msas: Dict mapping chain_id -> MSA content (A3M format)
         af3_msa_mode: MSA mode ("none", "reuse")
-        template_path: Optional path to template structure file
-        template_chain_id: Optional chain ID in template file
+        template_content: Base64-encoded template PDB/CIF content (optional)
+        template_chain_ids: Comma-separated chain IDs from template file (optional)
     
     Returns:
         Dict with af3_iptm, af3_ptm, af3_plddt, af3_structure, af3_confidence_json
@@ -181,6 +181,41 @@ def _run_af3_single_impl(
     total_target_length = sum(len(seq) for seq in target_seqs)
     
     target_msas = target_msas or {}
+    
+    # Process template if provided - build template JSON for each target chain
+    target_templates = {}  # chain_id -> template_json
+    if template_content and template_chain_ids:
+        import base64
+        
+        try:
+            # Decode and write template to temp file
+            template_bytes = base64.b64decode(template_content)
+            template_file = work_dir / "template.pdb"
+            template_file.write_bytes(template_bytes)
+            
+            # Parse chain IDs from template file
+            template_chains = [c.strip() for c in template_chain_ids.split(",") if c.strip()]
+            
+            # Build template for each target chain
+            for i, seq in enumerate(target_seqs):
+                if i >= len(template_chains):
+                    break
+                
+                chain_id = target_chain_ids[i]
+                template_chain = template_chains[i]
+                
+                try:
+                    template_json = get_cif_alignment_json(
+                        query_seq=seq,
+                        cif_path=str(template_file),
+                        chain_id=template_chain
+                    )
+                    target_templates[chain_id] = template_json
+                    print(f"  [{design_id}] Template aligned for chain {chain_id}")
+                except Exception as e:
+                    print(f"  [{design_id}] Warning: Template alignment failed for chain {chain_id}: {e}")
+        except Exception as e:
+            print(f"  [{design_id}] Warning: Could not process template for AF3: {e}")
     
     result = {
         "design_id": design_id,
@@ -220,11 +255,14 @@ def _run_af3_single_impl(
     
     # TARGET CHAINS: Handle each target chain separately
     for i, (chain_id, seq) in enumerate(zip(target_chain_ids, target_seqs)):
+        # Get template for this chain if available
+        chain_template = target_templates.get(chain_id)
+        
         target_entry = {
             "protein": {
                 "id": chain_id,
                 "sequence": seq,
-                "templates": [],  # TODO: Support per-chain templates
+                "templates": [chain_template] if chain_template else [],
             }
         }
         
@@ -446,13 +484,13 @@ def run_af3_single_H100(
     target_chain: str = "B",
     target_msas: Optional[Dict[str, str]] = None,
     af3_msa_mode: str = "none",
-    template_path: Optional[str] = None,
-    template_chain_id: Optional[str] = None
+    template_content: Optional[str] = None,
+    template_chain_ids: Optional[str] = None
 ) -> Dict[str, Any]:
     """Run AF3 validation on H100 GPU (80GB VRAM)."""
     return _run_af3_single_impl(
         design_id, binder_seq, target_seq, binder_chain, target_chain,
-        target_msas, af3_msa_mode, template_path, template_chain_id
+        target_msas, af3_msa_mode, template_content, template_chain_ids
     )
 
 @app.function(
@@ -470,13 +508,13 @@ def run_af3_single_A100_80GB(
     target_chain: str = "B",
     target_msas: Optional[Dict[str, str]] = None,
     af3_msa_mode: str = "none",
-    template_path: Optional[str] = None,
-    template_chain_id: Optional[str] = None
+    template_content: Optional[str] = None,
+    template_chain_ids: Optional[str] = None
 ) -> Dict[str, Any]:
     """Run AF3 validation on A100 80GB GPU."""
     return _run_af3_single_impl(
         design_id, binder_seq, target_seq, binder_chain, target_chain,
-        target_msas, af3_msa_mode, template_path, template_chain_id
+        target_msas, af3_msa_mode, template_content, template_chain_ids
     )
 
 @app.function(
@@ -494,13 +532,13 @@ def run_af3_single_A100_40GB(
     target_chain: str = "B",
     target_msas: Optional[Dict[str, str]] = None,
     af3_msa_mode: str = "none",
-    template_path: Optional[str] = None,
-    template_chain_id: Optional[str] = None
+    template_content: Optional[str] = None,
+    template_chain_ids: Optional[str] = None
 ) -> Dict[str, Any]:
     """Run AF3 validation on A100 40GB GPU."""
     return _run_af3_single_impl(
         design_id, binder_seq, target_seq, binder_chain, target_chain,
-        target_msas, af3_msa_mode, template_path, template_chain_id
+        target_msas, af3_msa_mode, template_content, template_chain_ids
     )
 
 

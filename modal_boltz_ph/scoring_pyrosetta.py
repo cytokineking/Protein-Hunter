@@ -218,17 +218,15 @@ def run_pyrosetta_single(
             return result
         
         # ========================================
-        # MULTI-CHAIN COLLAPSE
+        # CHECK CHAIN COUNT (for later collapse)
         # ========================================
         pdb_parser = PDBParser(QUIET=True)
         temp_structure = pdb_parser.get_structure("check", str(pdb_file))
         total_chains = [chain.id for model in temp_structure for chain in model]
+        needs_collapse = len(total_chains) > 2
         
-        if len(total_chains) > 2:
-            collapsed_pdb = work_dir / f"{design_id}_collapsed.pdb"
-            collapse_multiple_chains(str(pdb_file), str(collapsed_pdb), binder_chain, "B")
-            pdb_file = collapsed_pdb
-            print(f"  Collapsed {len(total_chains)} chains to 2 for interface analysis")
+        if needs_collapse:
+            print(f"  Structure has {len(total_chains)} chains - will collapse for interface scoring only")
         
         # ========================================
         # PYROSETTA INITIALIZATION
@@ -378,6 +376,16 @@ def run_pyrosetta_single(
         # ========================================
         # INTERFACE ANALYSIS
         # ========================================
+        # InterfaceAnalyzerMover requires exactly 2 chains.
+        # If >2 chains, create a collapsed version for scoring only.
+        if needs_collapse:
+            collapsed_pdb = work_dir / f"{design_id}_collapsed.pdb"
+            collapse_multiple_chains(str(relaxed_pdb_path), str(collapsed_pdb), binder_chain, "B")
+            scoring_pose = pr.pose_from_file(str(collapsed_pdb))
+            print(f"  Collapsed {len(total_chains)} chains to 2 for interface scoring")
+        else:
+            scoring_pose = pose  # Use the relaxed pose directly
+        
         interface_string = f"{binder_chain}_{target_chain}"
         
         iam = InterfaceAnalyzerMover()
@@ -389,7 +397,7 @@ def run_pyrosetta_single(
         iam.set_calc_hbond_sasaE(True)
         iam.set_compute_interface_sc(True)
         iam.set_pack_separated(True)
-        iam.apply(pose)
+        iam.apply(scoring_pose)
         
         # Get interface scores
         interface_data = iam.get_all_data()
@@ -407,7 +415,7 @@ def run_pyrosetta_single(
             buns_filter = XmlObjects.static_get_filter(
                 '<BuriedUnsatHbonds report_all_heavy_atom_unsats="true" scorefxn="scorefxn" ignore_surface_res="false" use_ddG_style="true" dalphaball_sasa="1" probe_radius="1.1" burial_cutoff_apo="0.2" confidence="0" />'
             )
-            result["interface_delta_unsat_hbonds"] = int(buns_filter.report_sm(pose))
+            result["interface_delta_unsat_hbonds"] = int(buns_filter.report_sm(scoring_pose))
         except Exception as e:
             print(f"  BUNS calculation failed: {e}")
             result["interface_delta_unsat_hbonds"] = 0
@@ -419,12 +427,12 @@ def run_pyrosetta_single(
         tem = pr.rosetta.core.simple_metrics.metrics.TotalEnergyMetric()
         tem.set_scorefunction(sfxn)
         tem.set_residue_selector(chain_selector)
-        result["binder_score"] = round(float(tem.calculate(pose)), 2)
+        result["binder_score"] = round(float(tem.calculate(scoring_pose)), 2)
         
         # Binder SASA
         bsasa = pr.rosetta.core.simple_metrics.metrics.SasaMetric()
         bsasa.set_residue_selector(chain_selector)
-        binder_sasa = float(bsasa.calculate(pose))
+        binder_sasa = float(bsasa.calculate(scoring_pose))
         result["binder_sasa"] = round(binder_sasa, 2)
         
         # Interface fraction
@@ -447,11 +455,11 @@ def run_pyrosetta_single(
         # ========================================
         binder_pose = None
         try:
-            for i in range(1, pose.num_chains() + 1):
-                chain_begin = pose.conformation().chain_begin(i)
-                chain_id = pose.pdb_info().chain(chain_begin)
+            for i in range(1, scoring_pose.num_chains() + 1):
+                chain_begin = scoring_pose.conformation().chain_begin(i)
+                chain_id = scoring_pose.pdb_info().chain(chain_begin)
                 if chain_id == binder_chain:
-                    binder_pose = pose.split_by_chain()[i]
+                    binder_pose = scoring_pose.split_by_chain()[i]
                     break
             
             if binder_pose is not None:
@@ -502,10 +510,10 @@ def run_pyrosetta_single(
                 pae_matrix = np.array(confidence.get('pae', []))
                 
                 if len(pae_matrix) > 0:
-                    # Get binder length
+                    # Get binder length from scoring_pose (2-chain structure matches PAE matrix)
                     binder_len = 0
-                    for resid in range(1, pose.total_residue() + 1):
-                        if pose.pdb_info().chain(resid) == binder_chain:
+                    for resid in range(1, scoring_pose.total_residue() + 1):
+                        if scoring_pose.pdb_info().chain(resid) == binder_chain:
                             binder_len += 1
                     
                     if binder_len > 0 and pae_matrix.shape[0] > binder_len:

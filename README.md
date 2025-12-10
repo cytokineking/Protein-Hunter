@@ -236,7 +236,6 @@ The template provides **explicit coordinates** that anchor the target structure 
 
 ```bash
 python boltz_ph/design.py \
-    --protein_seqs "YOUR_TARGET_SEQUENCE" \
     --template_path "7KPL" \
     --template_cif_chain_id "A" \
     --msa_mode single \
@@ -245,10 +244,19 @@ python boltz_ph/design.py \
 
 | Parameter | Description |
 |-----------|-------------|
-| `--protein_seqs` | Target sequence (must match template) |
+| `--protein_seqs` | Target sequence(s) — optional if template contains full sequence |
 | `--template_path` | PDB code, file path, or AlphaFold ID |
 | `--template_cif_chain_id` | Which chain in template to use |
 | `--msa_mode single` | Often used with templates (MSA optional) |
+
+**Sequence auto-extraction:** If you omit `--protein_seqs`, sequences are automatically extracted from the template structure. This works when the template contains the complete sequence you want to target.
+
+**When to provide `--protein_seqs`:**
+- Template has missing residues resulting in gaps (e.g., disordered termini not in PDB)
+- You want to model additional regions beyond what's in the template
+- Template sequence doesn't match the exact target you want
+
+When provided, Boltz uses template coordinates where available and predicts any regions not covered by the template.
 
 **Template path options:**
 
@@ -261,16 +269,11 @@ python boltz_ph/design.py \
 **Multi-chain templates:**
 
 ```bash
---protein_seqs "SEQ_B:SEQ_C" \
 --template_path "7KPL:7KPL" \
 --template_cif_chain_id "A:B"
+# Sequences auto-extracted, or provide explicitly:
+--protein_seqs "SEQ_B:SEQ_C"
 ```
-
-**Handling template gaps:**
-
-If your template has missing residues (unresolved loops), provide the **full sequence** in `--protein_seqs`. Boltz will:
-- Use template coordinates where available
-- Predict missing regions
 
 ---
 
@@ -1010,11 +1013,14 @@ The Modal CLI uses the same arguments as the local pipeline with these differenc
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--gpu` | str | `"H100"` | GPU type (see below) |
+| `--gpu` | str | `"H100"` | GPU type for Boltz design (see below) |
 | `--max-concurrent` | int | `0` | Max parallel GPUs (0 = unlimited) |
 | `--no-stream` | str | `"false"` | Disable real-time result streaming |
 | `--sync-interval` | float | `5.0` | Sync polling interval (seconds) |
 | `--output-dir` | str | `"./results_{name}"` | Local output directory |
+| `--use-alphafold3-validation` | str | `"false"` | Enable AF3 + PyRosetta validation |
+| `--af3-gpu` | str | `"A100-80GB"` | GPU type for AF3 validation |
+| `--use-msa-for-af3` | str | `"true"` | Reuse MSAs from design phase for AF3 |
 
 #### Available GPU Types
 
@@ -1052,24 +1058,39 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
 
 ### Template Structures on Modal
 
-Provide a local PDB file as a template structure. The file is automatically uploaded to Modal containers:
+Provide a local PDB file as a template structure. The file is automatically uploaded to Modal containers.
+
+**Sequence auto-extraction:** If you omit `--protein-seqs`, sequences are automatically extracted from the template chains. Provide `--protein-seqs` only if your template has missing residues resulting in gaps or you want to model additional residues beyond the template.
 
 ```bash
+# With explicit sequences
 modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "pMHC_binder" \
-    --protein-seqs "MHC_SEQ:BETA2M_SEQ:PEPTIDE_SEQ" \
+    --protein-seqs "MHC_SEQ:PEPTIDE_SEQ" \
     --template-path "/path/to/structure.pdb" \
-    --template-cif-chain-id "A,B,C" \
-    --contact-residues "||1,2,3,4,5,6,7,8,9" \
+    --template-cif-chain-id "A,B" \
+    --contact-residues "|7,8,9,10,11" \
+    --use-auth-numbering=true \
+    --num-designs 10 \
+    --gpu H100
+
+# Auto-extract sequences from template (no --protein-seqs needed)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "pMHC_binder" \
+    --template-path "/path/to/structure.pdb" \
+    --template-cif-chain-id "A,B" \
+    --contact-residues "|7,8,9,10,11" \
+    --use-auth-numbering=true \
     --num-designs 10 \
     --gpu H100
 ```
 
 **Template chain mapping:**
-- `--template-cif-chain-id "A,B,C"` maps:
+- `--template-cif-chain-id "A,B"` maps:
   - Template chain A → Target chain B (first sequence)
   - Template chain B → Target chain C (second sequence)
-  - Template chain C → Target chain D (third sequence)
+
+**Hotspot numbering:** Use `--use-auth-numbering=true` when your hotspot residue numbers match the PDB "author" numbering rather than 1-indexed canonical numbering.
 
 ### Modal Examples
 
@@ -1104,18 +1125,20 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
 #### Example 3: pMHC Binder with Template
 
 ```bash
+# Sequences auto-extracted from template; hotspots use PDB numbering
 modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "pMHC_TCRm" \
-    --protein-seqs "MHC_ALPHA_SEQ:BETA2M_SEQ:PEPTIDE_SEQ" \
     --template-path "./my_pmhc_structure.pdb" \
-    --template-cif-chain-id "A,B,C" \
-    --contact-residues "||1,2,3,4,5,6,7,8,9" \
+    --template-cif-chain-id "A,B" \
+    --contact-residues "|7,8,9,10,11,12,13,14,15,16" \
+    --use-auth-numbering=true \
     --num-designs 16 \
     --num-cycles 5 \
     --max-concurrent 8 \
     --min-protein-length 60 \
     --max-protein-length 120 \
     --high-iptm-threshold 0.8 \
+    --use-alphafold3-validation=true \
     --gpu H100 \
     --output-dir ./pMHC_results
 ```
@@ -1139,22 +1162,7 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
 
 Results are streamed to your local filesystem in real-time in the same structure as the local pipeline above. The folders are populated as each cycle completes across all parallel GPU workers. The .csv files are thread-safe and can be monitored during execution.
 
-### Running Without Streaming (Test Mode)
 
-For testing the local pipeline code on Modal without streaming or parallelization:
-
-```bash
-# Basic test (Boltz only) - uses PDL1 as default target
-modal run test_local_pipeline_modal.py --name my_test --num-designs 1 --num-cycles 2
-
-# Full pipeline with AF3 + PyRosetta validation (protein targets)
-modal run test_local_pipeline_modal.py \
-    --name full_test \
-    --protein-seqs "YOUR_TARGET_SEQUENCE" \
-    --num-designs 3 \
-    --num-cycles 5 \
-    --use-alphafold3-validation
-```
 
 This runs `boltz_ph/pipeline.py` directly on a single Modal GPU, useful for:
 - Testing local pipeline changes
