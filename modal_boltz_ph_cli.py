@@ -56,6 +56,10 @@ from modal_boltz_ph.validation_af3 import (
     run_af3_apo_A100_80GB,
 )
 from modal_boltz_ph.scoring_pyrosetta import run_pyrosetta_single
+from modal_boltz_ph.scoring_opensource import (
+    OPENSOURCE_SCORING_GPU_FUNCTIONS,
+    DEFAULT_OPENSOURCE_GPU,
+)
 from modal_boltz_ph.cache import initialize_cache, _upload_af3_weights_impl, precompute_msas
 from modal_boltz_ph.sync import (
     _sync_worker,
@@ -228,6 +232,9 @@ def run_pipeline(
     use_alphafold3_validation: str = "false",
     use_msa_for_af3: str = "true",
     af3_gpu: str = "A100-80GB",
+    # Open-source scoring (PyRosetta-free alternative)
+    use_open_scoring: str = "false",
+    open_scoring_gpu: str = DEFAULT_OPENSOURCE_GPU,
 ):
     """
     Run the Protein Hunter design pipeline on Modal.
@@ -296,12 +303,27 @@ def run_pipeline(
     AF3 Validation:
         First upload weights: modal run modal_boltz_ph_cli.py::upload_af3_weights --weights-path ~/AF3/af3.bin.zst
         Then use --use-alphafold3-validation flag
-        
+
         MSA reuse (default: True):
             --use-msa-for-af3=true   Reuse MSAs from design phase (recommended)
             --use-msa-for-af3=false  Query-only for all chains (faster, less accurate)
-        
+
         PyRosetta filtering runs automatically for protein targets when AF3 validation is enabled.
+
+    Open-Source Scoring (PyRosetta-free):
+        Use --use-open-scoring instead of PyRosetta for interface scoring.
+        This uses GPU-accelerated OpenMM relaxation + FreeSASA/sc-rs for scoring.
+
+        Example:
+            modal run modal_boltz_ph_cli.py::run_pipeline \\
+                --name "PDL1_open" \\
+                --protein-seqs "AFTVTVPK..." \\
+                --use-alphafold3-validation \\
+                --use-open-scoring \\
+                --open-scoring-gpu A10G
+
+        Note: Some metrics (binder_score, interface_dG, interface_hbonds, BUNS) use
+        placeholder values that pass filters. This matches FreeBindCraft's approach.
     """
     import base64
     import pandas as pd
@@ -318,7 +340,8 @@ def run_pipeline(
     no_stream = str2bool(no_stream)
     use_alphafold3_validation = str2bool(use_alphafold3_validation)
     use_msa_for_af3 = str2bool(use_msa_for_af3)
-    
+    use_open_scoring = str2bool(use_open_scoring)
+
     # Smart MSA mode default based on template and AF3 validation
     # - Template provided + no AF3 validation: skip MSAs (Boltz has template, no AF3 needs)
     # - Template provided + AF3 validation: compute MSAs (AF3 needs them)
@@ -518,6 +541,11 @@ def run_pipeline(
             print(f"Hotspots: {contact_residues_canonical}")
     print(f"MSA mode: {msa_mode}")
     print(f"Alanine bias: {alanine_bias}")
+    if use_alphafold3_validation:
+        scoring_mode = "Open-source (OpenMM + FreeSASA)" if use_open_scoring else "PyRosetta"
+        print(f"Scoring: {scoring_mode}")
+        if use_open_scoring:
+            print(f"Open scoring GPU: {open_scoring_gpu}")
     print(f"{'='*70}\n")
     
     # Build template metadata for CSV output
@@ -775,60 +803,87 @@ def run_pipeline(
                 # APO failure is non-fatal, continue without RMSD
                 print(f"  [{design_id}] APO prediction failed (non-fatal): {e}")
         
-        # ========== STAGE 4: PYROSETTA SCORING (protein targets only) ==========
-        pr_result = {"accepted": True}  # Default for non-protein targets
+        # ========== STAGE 4: INTERFACE SCORING (protein targets only) ==========
+        # Use open-source scoring (OpenMM + FreeSASA) or PyRosetta based on flag
+        scoring_result = {"accepted": True}  # Default for non-protein targets
         if target_type == "protein":
-            print(f"  [{design_id}] Running PyRosetta scoring...")
-            try:
-                pr_result = run_pyrosetta_single.remote(
-                    design_id,
-                    af3_result.get("af3_structure"),
-                    af3_result.get("af3_iptm", 0),
-                    af3_result.get("af3_ptm", 0),
-                    af3_result.get("af3_plddt", 0),
-                    "A", "B",  # binder_chain, target_chain
-                    apo_structure,
-                    af3_result.get("af3_confidence_json"),
-                    target_type,
+            if use_open_scoring:
+                # Open-source scoring (GPU-accelerated, PyRosetta-free)
+                scoring_fn = OPENSOURCE_SCORING_GPU_FUNCTIONS.get(
+                    open_scoring_gpu,
+                    OPENSOURCE_SCORING_GPU_FUNCTIONS[DEFAULT_OPENSOURCE_GPU]
                 )
-                status_str = "ACCEPTED" if pr_result.get("accepted") else f"REJECTED ({pr_result.get('rejection_reason', 'unknown')})"
-                print(f"  [{design_id}] PyRosetta: dG={pr_result.get('interface_dG', 0):.1f}, SC={pr_result.get('interface_sc', 0):.2f} → {status_str}")
-            except Exception as e:
-                print(f"  [{design_id}] PyRosetta failed: {e}")
-                pr_result = {"error": str(e), "accepted": False, "rejection_reason": f"PyRosetta error: {e}"}
+                print(f"  [{design_id}] Running open-source scoring ({open_scoring_gpu})...")
+                try:
+                    scoring_result = scoring_fn.remote(
+                        design_id,
+                        af3_result.get("af3_structure"),
+                        af3_result.get("af3_iptm", 0),
+                        af3_result.get("af3_ptm", 0),
+                        af3_result.get("af3_plddt", 0),
+                        "A", "B",  # binder_chain, target_chain
+                        apo_structure,
+                        af3_result.get("af3_confidence_json"),
+                        target_type,
+                    )
+                    status_str = "ACCEPTED" if scoring_result.get("accepted") else f"REJECTED ({scoring_result.get('rejection_reason', 'unknown')})"
+                    print(f"  [{design_id}] Open-source: SC={scoring_result.get('interface_sc', 0):.2f}, dSASA={scoring_result.get('interface_dSASA', 0):.1f} → {status_str}")
+                except Exception as e:
+                    print(f"  [{design_id}] Open-source scoring failed: {e}")
+                    scoring_result = {"error": str(e), "accepted": False, "rejection_reason": f"Open-source scoring error: {e}"}
+            else:
+                # PyRosetta scoring (CPU-based)
+                print(f"  [{design_id}] Running PyRosetta scoring...")
+                try:
+                    scoring_result = run_pyrosetta_single.remote(
+                        design_id,
+                        af3_result.get("af3_structure"),
+                        af3_result.get("af3_iptm", 0),
+                        af3_result.get("af3_ptm", 0),
+                        af3_result.get("af3_plddt", 0),
+                        "A", "B",  # binder_chain, target_chain
+                        apo_structure,
+                        af3_result.get("af3_confidence_json"),
+                        target_type,
+                    )
+                    status_str = "ACCEPTED" if scoring_result.get("accepted") else f"REJECTED ({scoring_result.get('rejection_reason', 'unknown')})"
+                    print(f"  [{design_id}] PyRosetta: dG={scoring_result.get('interface_dG', 0):.1f}, SC={scoring_result.get('interface_sc', 0):.2f} → {status_str}")
+                except Exception as e:
+                    print(f"  [{design_id}] PyRosetta failed: {e}")
+                    scoring_result = {"error": str(e), "accepted": False, "rejection_reason": f"PyRosetta error: {e}"}
         
-        # Stream final result (after PyRosetta scoring)
+        # Stream final result (after interface scoring)
         if stream and target_type == "protein":
             _stream_final_result(
                 run_id=run_id,
                 design_idx=design_idx,
                 design_id=design_id,
-                accepted=pr_result.get("accepted", False),
-                rejection_reason=pr_result.get("rejection_reason", ""),
+                accepted=scoring_result.get("accepted", False),
+                rejection_reason=scoring_result.get("rejection_reason", ""),
                 metrics={
-                    "interface_dG": pr_result.get("interface_dG", 0.0),
-                    "interface_sc": pr_result.get("interface_sc", 0.0),
-                    "interface_nres": pr_result.get("interface_nres", 0),
-                    "interface_dSASA": pr_result.get("interface_dSASA", 0.0),
-                    "interface_packstat": pr_result.get("interface_packstat", 0.0),
-                    "interface_dG_SASA_ratio": pr_result.get("interface_dG_SASA_ratio", 0.0),
-                    "interface_interface_hbonds": pr_result.get("interface_interface_hbonds", 0),
-                    "interface_delta_unsat_hbonds": pr_result.get("interface_delta_unsat_hbonds", 0),
-                    "interface_hydrophobicity": pr_result.get("interface_hydrophobicity", 0.0),
-                    "surface_hydrophobicity": pr_result.get("surface_hydrophobicity", 0.0),
-                    "binder_sasa": pr_result.get("binder_sasa", 0.0),
-                    "interface_fraction": pr_result.get("interface_fraction", 0.0),
-                    "interface_hbond_percentage": pr_result.get("interface_hbond_percentage", 0.0),
-                    "interface_delta_unsat_hbonds_percentage": pr_result.get("interface_delta_unsat_hbonds_percentage", 0.0),
-                    "apo_holo_rmsd": pr_result.get("apo_holo_rmsd"),
-                    "i_pae": pr_result.get("i_pae"),
-                    "rg": pr_result.get("rg"),
+                    "interface_dG": scoring_result.get("interface_dG", 0.0),
+                    "interface_sc": scoring_result.get("interface_sc", 0.0),
+                    "interface_nres": scoring_result.get("interface_nres", 0),
+                    "interface_dSASA": scoring_result.get("interface_dSASA", 0.0),
+                    "interface_packstat": scoring_result.get("interface_packstat", 0.0),
+                    "interface_dG_SASA_ratio": scoring_result.get("interface_dG_SASA_ratio", 0.0),
+                    "interface_interface_hbonds": scoring_result.get("interface_interface_hbonds", 0),
+                    "interface_delta_unsat_hbonds": scoring_result.get("interface_delta_unsat_hbonds", 0),
+                    "interface_hydrophobicity": scoring_result.get("interface_hydrophobicity", 0.0),
+                    "surface_hydrophobicity": scoring_result.get("surface_hydrophobicity", 0.0),
+                    "binder_sasa": scoring_result.get("binder_sasa", 0.0),
+                    "interface_fraction": scoring_result.get("interface_fraction", 0.0),
+                    "interface_hbond_percentage": scoring_result.get("interface_hbond_percentage", 0.0),
+                    "interface_delta_unsat_hbonds_percentage": scoring_result.get("interface_delta_unsat_hbonds_percentage", 0.0),
+                    "apo_holo_rmsd": scoring_result.get("apo_holo_rmsd"),
+                    "i_pae": scoring_result.get("i_pae"),
+                    "rg": scoring_result.get("rg"),
                 },
-                relaxed_pdb=pr_result.get("relaxed_pdb", ""),
+                relaxed_pdb=scoring_result.get("relaxed_pdb", ""),
             )
         
         # ========== COMBINE ALL RESULTS ==========
-        
+
         return {
             # Design results
             **design_result,
@@ -845,8 +900,8 @@ def run_pipeline(
             "af3_confidence_json": af3_result.get("af3_confidence_json"),
             # APO results
             "apo_structure": apo_structure,
-            # PyRosetta results (merge all keys except design_id)
-            **{k: v for k, v in pr_result.items() if k != "design_id"},
+            # Interface scoring results (merge all keys except design_id)
+            **{k: v for k, v in scoring_result.items() if k != "design_id"},
             # Binder metadata
             "binder_sequence": binder_seq,
             "binder_length": len(binder_seq) if binder_seq else 0,
@@ -857,12 +912,21 @@ def run_pipeline(
     
     # Execute with concurrency limit
     all_results = []
-    pipeline_mode = "full pipeline (Boltz→AF3→PyRosetta)" if use_alphafold3_validation else "design only"
+    if use_alphafold3_validation:
+        scoring_backend = "OpenMM/FreeSASA" if use_open_scoring else "PyRosetta"
+        pipeline_mode = f"full pipeline (Boltz→AF3→{scoring_backend})"
+    else:
+        pipeline_mode = "design only"
     
-    if max_concurrent > 0:
-        print(f"Executing {len(tasks)} tasks [{pipeline_mode}] (concurrency: {max_concurrent} GPUs)...\n")
+    # Determine effective concurrency
+    effective_concurrency = max_concurrent if max_concurrent > 0 else len(tasks)
+    concurrency_str = f"{max_concurrent} GPUs" if max_concurrent > 0 else "unlimited"
+    
+    if use_alphafold3_validation:
+        # Full pipeline mode: use ThreadPoolExecutor for sequential per-design orchestration
+        print(f"Executing {len(tasks)} tasks [{pipeline_mode}] (concurrency: {concurrency_str})...\n")
         
-        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+        with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
             futures = {executor.submit(_run_full_pipeline_for_design, t): t for t in tasks}
             
             for i, future in enumerate(as_completed(futures)):
@@ -872,22 +936,22 @@ def run_pipeline(
                 # Print completion status
                 design_idx = result.get("design_idx", "?")
                 
-                if use_alphafold3_validation and result.get("af3_iptm") is not None:
+                if result.get("af3_iptm") is not None:
                     # Full pipeline completed with AF3 validation
                     accepted = "✓ ACCEPTED" if result.get("accepted") else "✗ REJECTED"
                     print(f"\n[{i+1}/{len(tasks)}] Design {design_idx} COMPLETE: "
                           f"Boltz={result.get('best_iptm', 0):.3f}, AF3={result.get('af3_iptm', 0):.3f}, "
                           f"dG={result.get('interface_dG', 0):.1f} → {accepted}\n")
-                elif use_alphafold3_validation and result.get("rejection_reason"):
+                elif result.get("rejection_reason"):
                     # AF3 was skipped due to Boltz metrics not meeting threshold
                     print(f"[{i+1}/{len(tasks)}] Design {design_idx}: ✗ REJECTED ({result.get('rejection_reason')})")
                 else:
-                    # Design-only mode or design error
+                    # Design completed but no AF3 result (shouldn't happen normally)
                     status = "✓" if result.get("status") == "success" else "✗"
                     print(f"[{i+1}/{len(tasks)}] {status} Design {design_idx}: ipTM={result.get('best_iptm', 0):.3f}")
     else:
-        # Unlimited concurrency (design only mode)
-        print(f"Executing {len(tasks)} tasks [{pipeline_mode}] (unlimited concurrency)...")
+        # Design-only mode: use Modal's native parallelism for maximum throughput
+        print(f"Executing {len(tasks)} tasks [{pipeline_mode}] (concurrency: {concurrency_str})...")
         for i, result in enumerate(gpu_fn.map(tasks)):
             all_results.append(result)
             status = "✓" if result.get("status") == "success" else "✗"
@@ -1084,11 +1148,12 @@ def run_pipeline(
         if af3_results:
             best_af3 = max(af3_results, key=lambda r: r.get("af3_iptm", 0))
             print(f"Best AF3 ipTM: {best_af3.get('design_id')} = {best_af3.get('af3_iptm', 0):.3f}")
-        
-        print("\nPyRosetta Filtering:")
+
+        scoring_label = "Open-source Scoring" if use_open_scoring else "PyRosetta Filtering"
+        print(f"\n{scoring_label}:")
         print(f"  Accepted: {len(accepted)}")
         print(f"  Rejected: {len(rejected)}")
-        
+
         if accepted:
             print("\n  Accepted designs:")
             for r in accepted:
@@ -1098,11 +1163,12 @@ def run_pipeline(
     
     print(f"\nOutput: {output_path}/")
     if use_alphafold3_validation:
+        filter_label = "open-source" if use_open_scoring else "PyRosetta"
         print("  ├── designs/           # All cycles from Boltz")
         print("  ├── best_designs/      # Best cycle per design (Boltz PDBs)")
         print("  ├── af3_validation/    # AF3 predicted structures")
-        print("  ├── accepted_designs/  # Passed PyRosetta filters (relaxed PDBs)")
-        print("  └── rejected/          # Failed PyRosetta filters")
+        print(f"  ├── accepted_designs/  # Passed {filter_label} filters (relaxed PDBs)")
+        print(f"  └── rejected/          # Failed {filter_label} filters")
     else:
         print("  ├── designs/           # All cycles")
         print("  └── best_designs/      # Best cycle per design")

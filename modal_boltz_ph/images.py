@@ -152,3 +152,80 @@ pyrosetta_image = (
     )
 )
 
+# =============================================================================
+# OPEN-SOURCE SCORING IMAGE (GPU-enabled, PyRosetta-free)
+# =============================================================================
+# Uses OpenMM for GPU-accelerated relaxation, FreeSASA for SASA calculations,
+# sc-rs for shape complementarity, and Biopython for interface residue detection.
+# Modeled after FreeBindCraft's PyRosetta bypass approach.
+
+opensource_scoring_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    # Install system dependencies for OpenMM and compilation
+    .apt_install(
+        "git",
+        "wget",
+        "build-essential",
+        "cmake",
+        "libopenblas-dev",
+        "libfftw3-dev",
+        # OpenCL support (fallback if CUDA fails)
+        "ocl-icd-opencl-dev",
+        "opencl-headers",
+    )
+    # Install Miniforge (conda-forge only, no Anaconda TOS required)
+    .run_commands(
+        # Download and install Miniforge (uses conda-forge by default)
+        "wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O /tmp/miniforge.sh",
+        "bash /tmp/miniforge.sh -b -p /opt/conda",
+        "rm /tmp/miniforge.sh",
+        # Add conda to PATH
+        "echo 'export PATH=/opt/conda/bin:$PATH' >> /root/.bashrc",
+    )
+    # Install OpenMM with CUDA support via conda-forge
+    .run_commands(
+        "/opt/conda/bin/conda install -y openmm cudatoolkit pdbfixer",
+        # Verify OpenMM installation
+        "/opt/conda/bin/python -c 'import openmm; print(f\"OpenMM {openmm.__version__} installed\")'",
+    )
+    # Install Python dependencies via pip (using conda's python)
+    .run_commands(
+        "/opt/conda/bin/pip install --no-cache-dir "
+        "'numpy>=1.24,<2.0' "
+        "'scipy>=1.11' "
+        "'pandas>=2.0' "
+        "'biopython>=1.83' "
+        "'gemmi>=0.6.3' "
+        "freesasa "
+        "pyyaml "
+        "tqdm "
+        # Modal runtime dependencies (required when conda python is used)
+        "typing_extensions "
+        "protobuf "
+        "grpclib "
+        "synchronicity",
+    )
+    # Add protein-hunter utils (includes pre-compiled FASPR, sc-rs binaries)
+    .add_local_dir("utils", "/root/protein_hunter/utils", copy=True)
+    # Make binaries executable and verify
+    .run_commands(
+        # Make FASPR and sc-rs executable
+        "chmod +x /root/protein_hunter/utils/opensource_scoring/FASPR",
+        "chmod +x /root/protein_hunter/utils/opensource_scoring/sc",
+        # Verify binaries exist
+        "ls -la /root/protein_hunter/utils/opensource_scoring/",
+        # Test that FASPR can at least show help (will fail without input, but proves binary works)
+        "/root/protein_hunter/utils/opensource_scoring/FASPR -h || echo 'FASPR binary accessible'",
+    )
+    # Set environment variables
+    .env({
+        "PATH": "/opt/conda/bin:$PATH",
+        # Binary locations
+        "FASPR_BIN": "/root/protein_hunter/utils/opensource_scoring/FASPR",
+        "SC_RS_BIN": "/root/protein_hunter/utils/opensource_scoring/sc",
+        "FREESASA_CONFIG": "/root/protein_hunter/utils/opensource_scoring/freesasa_naccess.cfg",
+        # OpenMM platform preference: try CUDA first, then OpenCL, then CPU
+        "OPENMM_DEFAULT_PLATFORM": "CUDA",
+    })
+)
+

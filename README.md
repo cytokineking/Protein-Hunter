@@ -1,4 +1,4 @@
-# Protein Hunter (Cloud Edition)
+# Free Protein Hunter
 
 > **Fork Notice**: This is a fork of [Protein Hunter](https://github.com/yehlincho/Protein-Hunter) 
 > that concentrates on the Boltz pathway with enhanced Modal cloud support and improved output organization.
@@ -10,18 +10,22 @@ A protein binder design pipeline using Boltz structure prediction and LigandMPNN
 
 1. **BindCraft-style Design Cycles** — Restructured workflow with resumable execution and early stopping
 2. **Serverless Compute Ready** — Full Modal cloud compatibility with massive parallelization and real-time streaming
-3. **Open-Source Future** — Working toward replacing AF3/PyRosetta with open-source alternatives
+3. **Open-Source Scoring** — Optional PyRosetta-free scoring using OpenMM, FreeSASA, and sc-rs (adapted from [FreeBindCraft](https://github.com/cytokineking/FreeBindCraft))
+4. **Open-Source Future** — Working toward open-source alternatives for structural validation (replacing AF3)
 
-## What's Different in This Fork
+## Fork Additions
 
-| Feature | Upstream | This Fork |
-|---------|----------|-----------|
-| **Boltz Support** | ✅ | ✅ (primary focus) |
-| **Chai Support** | ✅ | ❌ (legacy, not maintained in this fork) |
-| **Modal Cloud Pipeline** | ❌ | ✅ Parallelized design runs |
-| **ipSAE Scoring** | ❌ | ✅ Interface pSAE metric |
-| **Output Organization** | Complex folder structure | Streamlined: `designs/`, `best_designs/`, `accepted_designs/`, etc. |
-| **Resumable Execution** | ❌ | ✅ Resume interrupted jobs, stop at N accepted |
+This fork extends the upstream with the following capabilities:
+
+| Addition | Description |
+|----------|-------------|
+| **Modal Cloud Pipeline** | Parallelized design runs with multi-GPU orchestration |
+| **Open-Source Scoring** | PyRosetta-free interface scoring (Modal only) |
+| **ipSAE Scoring** | Interface pSAE metric for quality assessment |
+| **Streamlined Output** | Organized folders: `designs/`, `best_designs/`, `accepted_designs/` |
+| **Resumable Execution** | Resume interrupted jobs, stop at N accepted designs |
+
+> **Note**: This fork focuses on the Boltz pathway. Chai support from upstream is not maintained here.
 
 ---
 
@@ -48,6 +52,7 @@ A protein binder design pipeline using Boltz structure prediction and LigandMPNN
   - [Parallelization & Concurrency](#parallelization--concurrency)
   - [Template Structures on Modal](#template-structures-on-modal)
   - [Modal Examples](#modal-examples)
+- [Open-Source Scoring (Modal)](#open-source-scoring-modal)
 
 ---
 
@@ -1169,6 +1174,79 @@ This runs `boltz_ph/pipeline.py` directly on a single Modal GPU, useful for:
 - Debugging without the complexity of parallel execution
 - Quick validation with minimal cycles
 - Testing the full pipeline (Boltz → AF3 → PyRosetta) end-to-end
+
+---
+
+## Open-Source Scoring (Modal)
+
+The Modal pipeline supports an **open-source scoring pathway** as an alternative to PyRosetta. This allows running the full design-to-validation pipeline without a PyRosetta license.
+
+The open-source scoring implementation is adapted from [FreeBindCraft](https://github.com/cytokineking/FreeBindCraft) by cytokineking.
+
+> **Note**: Open-source scoring is currently only available in the Modal cloud pipeline, not the local pipeline.
+
+### What's Included
+
+| Component | Tool | Description |
+|-----------|------|-------------|
+| **Relaxation** | OpenMM + FASPR | GPU-accelerated structure relaxation (~3-4x faster than PyRosetta FastRelax) |
+| **Shape Complementarity** | [sc-rs](https://github.com/cytokineking/sc-rs) | Rust implementation, nearly identical to PyRosetta SC |
+| **SASA Calculations** | FreeSASA | Surface area metrics with NACCESS classifier |
+| **Interface Detection** | Biopython | Contact-based interface residue identification |
+
+### CLI Flags
+
+```bash
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "my_design" \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --use-alphafold3-validation=true \
+    --use-open-scoring=true \
+    --open-scoring-gpu A10G \
+    --gpu H100
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--use-open-scoring` | `false` | Enable open-source scoring instead of PyRosetta |
+| `--open-scoring-gpu` | `A10G` | GPU type for OpenMM relaxation (`T4`, `L4`, `A10G`, `L40S`, `A100`, `H100`) |
+
+### Computed Metrics
+
+The open-source pathway computes these interface metrics:
+
+- `interface_sc` — Shape complementarity (sc-rs)
+- `interface_dSASA` — Buried surface area at interface (FreeSASA)
+- `interface_nres` — Number of interface residues (Biopython)
+- `surface_hydrophobicity` — Fraction of hydrophobic surface (FreeSASA)
+- `binder_sasa` — Total binder solvent-accessible surface area
+- `rg` — Radius of gyration (compactness measure)
+- `apo_holo_rmsd` — Structural change between bound and unbound states
+
+### Placeholder Values
+
+Some PyRosetta-specific metrics (e.g., `interface_dG`, `interface_packstat`, `interface_hbonds`) are set to placeholder values that pass default filters. Evaluate design quality using the computed metrics above.
+
+### Example: Full Pipeline with Open-Source Scoring
+
+```bash
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "PDL1_opensource" \
+    --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --contact-residues "56,113,115,123" \
+    --num-designs 10 \
+    --num-cycles 5 \
+    --gpu A100 \
+    --use-alphafold3-validation=true \
+    --use-open-scoring=true \
+    --open-scoring-gpu A10G \
+    --max-concurrent 5 \
+    --output-dir ./opensource_results
+```
+
+### Future: Open-Source Structure Validation
+
+We are also working toward replacing AlphaFold3 with open-source alternatives for structural validation. This would enable a fully open-source design pipeline from structure prediction through scoring.
 
 ---
 
