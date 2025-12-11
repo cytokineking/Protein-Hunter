@@ -16,6 +16,7 @@ import numpy as np
 from modal_boltz_ph.app import app, cache_volume, af3_weights_volume
 from modal_boltz_ph.images import af3_image
 from modal_boltz_ph.helpers import get_cif_alignment_json
+from modal_boltz_ph.validation.base import calculate_ipsae_from_pae
 
 
 def calculate_af3_ipsae(
@@ -27,8 +28,7 @@ def calculate_af3_ipsae(
     """
     Calculate ipSAE from AF3 confidence JSON.
     
-    Uses the same algorithm as Boltz ipSAE calculation, adapted for AF3's
-    PAE matrix format.
+    Thin wrapper around calculate_ipsae_from_pae that handles AF3's JSON format.
     
     Args:
         confidence_json: Raw JSON string from AF3 confidence output
@@ -37,10 +37,7 @@ def calculate_af3_ipsae(
         pae_cutoff: PAE cutoff for considering residue pairs (default 10.0 Å)
     
     Returns:
-        dict with:
-            - 'af3_ipsae': max of binder and target direction scores
-            - 'af3_ipsae_binder_to_target': per-residue max from binder → target
-            - 'af3_ipsae_target_to_binder': per-residue max from target → binder
+        dict with af3_ipsae and directional scores
     """
     result = {
         'af3_ipsae': 0.0,
@@ -58,79 +55,15 @@ def calculate_af3_ipsae(
         # Convert to numpy array
         pae_matrix = np.array(pae_data)
         
-        # AF3 outputs PAE as a flat list or 2D array
-        # Expected shape after conversion: (N, N) where N = binder_length + target_length
-        total_length = binder_length + target_length
+        # Use shared implementation
+        ipsae_result = calculate_ipsae_from_pae(
+            pae_matrix, binder_length, target_length, pae_cutoff
+        )
         
-        if pae_matrix.ndim == 1:
-            # Flatten format - reshape to square matrix
-            expected_size = total_length * total_length
-            if len(pae_matrix) != expected_size:
-                return result
-            pae_matrix = pae_matrix.reshape(total_length, total_length)
-        
-        if pae_matrix.shape != (total_length, total_length):
-            return result
-        
-        # Define binder and target indices
-        # AF3 orders chains alphabetically, so binder (A) comes first
-        binder_indices = np.arange(binder_length)
-        target_indices = np.arange(binder_length, total_length)
-        
-        # Extract interface PAE: binder rows → target columns
-        interface_pae = pae_matrix[np.ix_(binder_indices, target_indices)]
-        
-        # Apply PAE cutoff mask
-        valid_mask = interface_pae < pae_cutoff
-        
-        # PTM-style transformation for ipSAE
-        def ptm_func(x: np.ndarray, d0: float) -> np.ndarray:
-            return 1.0 / (1.0 + (x / d0) ** 2.0)
-        
-        def calc_d0(L: int) -> float:
-            L = float(max(L, 27))
-            d0 = 1.24 * (L - 15) ** (1.0 / 3.0) - 1.8
-            return max(1.0, d0)
-        
-        # Calculate per-binder-residue ipSAE scores (binder → target direction)
-        ipsae_byres_binder = []
-        for i in range(binder_length):
-            valid = valid_mask[i]
-            if valid.any():
-                n0res = valid.sum()
-                d0res = calc_d0(n0res)
-                ptm_vals = ptm_func(interface_pae[i][valid], d0res)
-                ipsae_byres_binder.append(ptm_vals.mean())
-            else:
-                ipsae_byres_binder.append(0.0)
-        
-        ipsae_byres_binder = np.array(ipsae_byres_binder)
-        ipsae_binder_max = float(ipsae_byres_binder.max()) if len(ipsae_byres_binder) > 0 else 0.0
-        
-        # Calculate reverse direction: target → binder
-        interface_pae_rev = pae_matrix[np.ix_(target_indices, binder_indices)]
-        valid_mask_rev = interface_pae_rev < pae_cutoff
-        
-        ipsae_byres_target = []
-        for i in range(target_length):
-            valid = valid_mask_rev[i]
-            if valid.any():
-                n0res = valid.sum()
-                d0res = calc_d0(n0res)
-                ptm_vals = ptm_func(interface_pae_rev[i][valid], d0res)
-                ipsae_byres_target.append(ptm_vals.mean())
-            else:
-                ipsae_byres_target.append(0.0)
-        
-        ipsae_byres_target = np.array(ipsae_byres_target)
-        ipsae_target_max = float(ipsae_byres_target.max()) if len(ipsae_byres_target) > 0 else 0.0
-        
-        # Take max of both directions
-        ipsae = max(ipsae_binder_max, ipsae_target_max)
-        
-        result['af3_ipsae'] = round(ipsae, 4)
-        result['af3_ipsae_binder_to_target'] = round(ipsae_binder_max, 4)
-        result['af3_ipsae_target_to_binder'] = round(ipsae_target_max, 4)
+        # Map to AF3-prefixed keys
+        result['af3_ipsae'] = ipsae_result.get('ipsae', 0.0)
+        result['af3_ipsae_binder_to_target'] = ipsae_result.get('ipsae_binder_to_target', 0.0)
+        result['af3_ipsae_target_to_binder'] = ipsae_result.get('ipsae_target_to_binder', 0.0)
         
     except Exception as e:
         print(f"  Warning: AF3 ipSAE calculation failed: {e}")
@@ -608,4 +541,3 @@ AF3_APO_GPU_FUNCTIONS = {
     "A100": run_af3_apo_A100_40GB,
     "A100-40GB": run_af3_apo_A100_40GB,
 }
-

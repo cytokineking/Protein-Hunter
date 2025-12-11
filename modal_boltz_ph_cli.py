@@ -35,35 +35,26 @@ from modal_boltz_ph.app import app, GPU_TYPES, DEFAULT_GPU
 
 # Import functions from modules
 from modal_boltz_ph.design import GPU_FUNCTIONS
-from modal_boltz_ph.validation_af3 import (
+from modal_boltz_ph.validation import (
     AF3_GPU_FUNCTIONS,
     AF3_APO_GPU_FUNCTIONS,
     run_af3_single_A100_80GB,
     run_af3_apo_A100_80GB,
-)
-from modal_boltz_ph.validation_protenix import (
     PROTENIX_GPU_FUNCTIONS,
     DEFAULT_PROTENIX_GPU,
     run_protenix_validation_A100,
-)
-from modal_boltz_ph.validation_openfold3 import (
     OPENFOLD3_GPU_FUNCTIONS,
     DEFAULT_OPENFOLD3_GPU,
     run_openfold3_validation_A100,
-)
-from modal_boltz_ph.validation import (
-    get_validation_function,
     get_default_validation_gpu,
     validate_model_gpu_combination,
 )
-from modal_boltz_ph.scoring_pyrosetta import (
+from modal_boltz_ph.scoring import (
     run_pyrosetta_single,
-    configure_verbose as configure_pyrosetta_verbose,
-)
-from modal_boltz_ph.scoring_opensource import (
+    configure_pyrosetta_verbose,
     OPENSOURCE_SCORING_GPU_FUNCTIONS,
     DEFAULT_OPENSOURCE_GPU,
-    configure_verbose as configure_opensource_verbose,
+    configure_opensource_verbose,
 )
 from modal_boltz_ph.cache import initialize_cache, _upload_af3_weights_impl, precompute_msas
 from modal_boltz_ph.sync import (
@@ -71,15 +62,15 @@ from modal_boltz_ph.sync import (
     _stream_best_design,
     _stream_af3_result,
     _stream_final_result,
+    _extract_scoring_metrics,
 )
-from modal_boltz_ph.tests import test_af3_image, _test_gpu
+from modal_boltz_ph.tests.test_infra import test_af3_image, _test_gpu
 from modal_boltz_ph.helpers import (
     analyze_template_structure,
     validate_hotspots,
     convert_auth_to_canonical,
     print_target_analysis,
     print_gap_error,
-    collapse_to_ranges,
 )
 
 
@@ -858,25 +849,7 @@ def run_pipeline(
                         design_id=design_id,
                         accepted=validation_result.get("accepted", False),
                         rejection_reason=validation_result.get("rejection_reason", ""),
-                        metrics={
-                            "interface_dG": validation_result.get("interface_dG", 0.0),
-                            "interface_sc": validation_result.get("interface_sc", 0.0),
-                            "interface_nres": validation_result.get("interface_nres", 0),
-                            "interface_dSASA": validation_result.get("interface_dSASA", 0.0),
-                            "interface_packstat": validation_result.get("interface_packstat", 0.0),
-                            "interface_dG_SASA_ratio": validation_result.get("interface_dG_SASA_ratio", 0.0),
-                            "interface_interface_hbonds": validation_result.get("interface_interface_hbonds", 0),
-                            "interface_delta_unsat_hbonds": validation_result.get("interface_delta_unsat_hbonds", 0),
-                            "interface_hydrophobicity": validation_result.get("interface_hydrophobicity", 0.0),
-                            "surface_hydrophobicity": validation_result.get("surface_hydrophobicity", 0.0),
-                            "binder_sasa": validation_result.get("binder_sasa", 0.0),
-                            "interface_fraction": validation_result.get("interface_fraction", 0.0),
-                            "interface_hbond_percentage": validation_result.get("interface_hbond_percentage", 0.0),
-                            "interface_delta_unsat_hbonds_percentage": validation_result.get("interface_delta_unsat_hbonds_percentage", 0.0),
-                            "apo_holo_rmsd": validation_result.get("apo_holo_rmsd"),
-                            "i_pae": validation_result.get("i_pae"),
-                            "rg": validation_result.get("rg"),
-                        },
+                        metrics=_extract_scoring_metrics(validation_result),
                         relaxed_pdb=validation_result.get("relaxed_pdb", ""),
                     )
                 
@@ -944,25 +917,7 @@ def run_pipeline(
                         design_id=design_id,
                         accepted=validation_result.get("accepted", False),
                         rejection_reason=validation_result.get("rejection_reason", ""),
-                        metrics={
-                            "interface_dG": validation_result.get("interface_dG", 0.0),
-                            "interface_sc": validation_result.get("interface_sc", 0.0),
-                            "interface_nres": validation_result.get("interface_nres", 0),
-                            "interface_dSASA": validation_result.get("interface_dSASA", 0.0),
-                            "interface_packstat": validation_result.get("interface_packstat", 0.0),
-                            "interface_dG_SASA_ratio": validation_result.get("interface_dG_SASA_ratio", 0.0),
-                            "interface_interface_hbonds": validation_result.get("interface_interface_hbonds", 0),
-                            "interface_delta_unsat_hbonds": validation_result.get("interface_delta_unsat_hbonds", 0),
-                            "interface_hydrophobicity": validation_result.get("interface_hydrophobicity", 0.0),
-                            "surface_hydrophobicity": validation_result.get("surface_hydrophobicity", 0.0),
-                            "binder_sasa": validation_result.get("binder_sasa", 0.0),
-                            "interface_fraction": validation_result.get("interface_fraction", 0.0),
-                            "interface_hbond_percentage": validation_result.get("interface_hbond_percentage", 0.0),
-                            "interface_delta_unsat_hbonds_percentage": validation_result.get("interface_delta_unsat_hbonds_percentage", 0.0),
-                            "apo_holo_rmsd": validation_result.get("apo_holo_rmsd"),
-                            "i_pae": validation_result.get("i_pae"),
-                            "rg": validation_result.get("rg"),
-                        },
+                        metrics=_extract_scoring_metrics(validation_result),
                         relaxed_pdb=validation_result.get("relaxed_pdb", ""),
                     )
                 
@@ -1069,25 +1024,7 @@ def run_pipeline(
                 design_id=design_id,
                 accepted=scoring_result.get("accepted", False),
                 rejection_reason=scoring_result.get("rejection_reason", ""),
-                metrics={
-                    "interface_dG": scoring_result.get("interface_dG", 0.0),
-                    "interface_sc": scoring_result.get("interface_sc", 0.0),
-                    "interface_nres": scoring_result.get("interface_nres", 0),
-                    "interface_dSASA": scoring_result.get("interface_dSASA", 0.0),
-                    "interface_packstat": scoring_result.get("interface_packstat", 0.0),
-                    "interface_dG_SASA_ratio": scoring_result.get("interface_dG_SASA_ratio", 0.0),
-                    "interface_interface_hbonds": scoring_result.get("interface_interface_hbonds", 0),
-                    "interface_delta_unsat_hbonds": scoring_result.get("interface_delta_unsat_hbonds", 0),
-                    "interface_hydrophobicity": scoring_result.get("interface_hydrophobicity", 0.0),
-                    "surface_hydrophobicity": scoring_result.get("surface_hydrophobicity", 0.0),
-                    "binder_sasa": scoring_result.get("binder_sasa", 0.0),
-                    "interface_fraction": scoring_result.get("interface_fraction", 0.0),
-                    "interface_hbond_percentage": scoring_result.get("interface_hbond_percentage", 0.0),
-                    "interface_delta_unsat_hbonds_percentage": scoring_result.get("interface_delta_unsat_hbonds_percentage", 0.0),
-                    "apo_holo_rmsd": scoring_result.get("apo_holo_rmsd"),
-                    "i_pae": scoring_result.get("i_pae"),
-                    "rg": scoring_result.get("rg"),
-                },
+                metrics=_extract_scoring_metrics(scoring_result),
                 relaxed_pdb=scoring_result.get("relaxed_pdb", ""),
             )
         

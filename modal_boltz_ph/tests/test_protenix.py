@@ -1,22 +1,19 @@
 """
-Test harness for OpenFold3 validation on existing design structures.
+Test harness for Protenix validation on existing design structures.
 
-This script allows isolated testing of the OpenFold3 validation pipeline using
+This script allows isolated testing of the Protenix validation pipeline using
 existing Boltz design outputs, without running the full design pipeline.
-
-OpenFold3 is an Apache 2.0 licensed reproduction of AlphaFold3 from the
-AlQuraishi Lab at Columbia University.
 
 Usage:
     # Test a single PDB file
-    modal run modal_boltz_ph/test_openfold3_validation.py::test_single \
-        --pdb-path ./modal_results/test_run/best_designs/design_001.pdb \
+    modal run modal_boltz_ph/test_protenix_validation.py::test_single \
+        --pdb-path ./modal_results/KRAS_G12V_pMHC_test2/best_designs/KRAS_G12V_pMHC_d11_c5.pdb \
         --validation-gpu A100
 
     # Test all designs in a folder
-    modal run modal_boltz_ph/test_openfold3_validation.py::test_folder \
-        --input-dir ./modal_results/test_run/best_designs \
-        --output-dir ./openfold3_validation_test \
+    modal run modal_boltz_ph/test_protenix_validation.py::test_folder \
+        --input-dir ./modal_results/KRAS_G12V_pMHC_test2/best_designs \
+        --output-dir ./protenix_validation_test \
         --validation-gpu A100
 
 Input format:
@@ -24,9 +21,9 @@ Input format:
     - Target MSAs will be automatically fetched and cached
 
 Output:
-    - validation_results.csv: OpenFold3 validation metrics for each design
+    - validation_results.csv: Protenix validation metrics for each design
     - msas/: Cached MSA files for target sequences (reused on subsequent runs)
-    - structures/: Predicted structures from OpenFold3 (PDB format)
+    - structures/: Predicted structures from Protenix (CIF format)
 """
 
 import csv
@@ -41,19 +38,225 @@ import modal
 
 from modal_boltz_ph.app import app
 from modal_boltz_ph.cache import precompute_msas
-from modal_boltz_ph.validation_openfold3 import (
-    OPENFOLD3_GPU_FUNCTIONS,
-    DEFAULT_OPENFOLD3_GPU,
+from modal_boltz_ph.validation.protenix import (
+    PROTENIX_GPU_FUNCTIONS,
+    DEFAULT_PROTENIX_GPU,
 )
 
-# Reuse utilities from test_protenix_validation (avoid code duplication)
-from modal_boltz_ph.test_protenix_validation import (
-    extract_sequences_from_pdb,
-    parse_design_pdbs,
-    load_cached_msas,
-    save_cached_msas,
-    get_or_fetch_msas,
-)
+
+# =============================================================================
+# PDB SEQUENCE EXTRACTION
+# =============================================================================
+
+# Standard 3-letter to 1-letter amino acid mapping
+AA_3TO1 = {
+    'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
+    'GLN': 'Q', 'GLU': 'E', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
+    'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
+    'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V',
+    # Non-standard codes
+    'MSE': 'M',  # Selenomethionine
+    'HSD': 'H', 'HSE': 'H', 'HSP': 'H',  # Histidine variants
+}
+
+
+def extract_sequences_from_pdb(pdb_path: str) -> Dict[str, str]:
+    """
+    Extract protein sequences from a PDB file.
+    
+    Args:
+        pdb_path: Path to the PDB file
+        
+    Returns:
+        Dict mapping chain ID -> sequence
+    """
+    chains = {}  # chain_id -> [(resnum, resname)]
+    
+    with open(pdb_path, 'r') as f:
+        for line in f:
+            if not line.startswith('ATOM'):
+                continue
+            
+            atom_name = line[12:16].strip()
+            if atom_name != 'CA':  # Only count CA atoms to avoid duplicates
+                continue
+            
+            chain_id = line[21].strip()
+            resnum = int(line[22:26].strip())
+            resname = line[17:20].strip()
+            
+            if chain_id not in chains:
+                chains[chain_id] = []
+            chains[chain_id].append((resnum, resname))
+    
+    # Convert to sequences
+    sequences = {}
+    for chain_id, residues in chains.items():
+        # Sort by residue number and deduplicate
+        residues = sorted(set(residues), key=lambda x: x[0])
+        seq = ''.join(AA_3TO1.get(resname, 'X') for _, resname in residues)
+        sequences[chain_id] = seq
+    
+    return sequences
+
+
+def parse_design_pdbs(input_dir: str) -> List[Dict[str, Any]]:
+    """
+    Parse all design PDB files in a directory.
+    
+    Args:
+        input_dir: Path to directory containing PDB files
+        
+    Returns:
+        List of design dicts with id, pdb_path, binder_seq, target_seqs
+    """
+    input_path = Path(input_dir)
+    designs = []
+    
+    # Find all PDB files
+    pdb_files = sorted(input_path.glob("*.pdb"))
+    
+    for pdb_file in pdb_files:
+        design_id = pdb_file.stem
+        
+        try:
+            sequences = extract_sequences_from_pdb(str(pdb_file))
+            
+            if 'A' not in sequences:
+                print(f"  Warning: No chain A (binder) in {design_id}, skipping")
+                continue
+            
+            binder_seq = sequences['A']
+            
+            # Target chains are B, C, D, etc.
+            target_chains = []
+            for chain_id in sorted(sequences.keys()):
+                if chain_id != 'A':
+                    target_chains.append((chain_id, sequences[chain_id]))
+            
+            if not target_chains:
+                print(f"  Warning: No target chains in {design_id}, skipping")
+                continue
+            
+            designs.append({
+                "design_id": design_id,
+                "pdb_path": str(pdb_file),
+                "binder_seq": binder_seq,
+                "target_chains": target_chains,  # [(chain_id, seq), ...]
+                "target_seq": ":".join(seq for _, seq in target_chains),  # Colon-separated
+            })
+            
+        except Exception as e:
+            print(f"  Warning: Failed to parse {design_id}: {e}")
+    
+    return designs
+
+
+# =============================================================================
+# MSA CACHING
+# =============================================================================
+
+def load_cached_msas(msa_cache_dir: Path) -> Dict[str, str]:
+    """
+    Load previously cached MSAs from disk.
+    
+    Args:
+        msa_cache_dir: Directory containing cached MSA files
+        
+    Returns:
+        Dict mapping sequence -> MSA content
+    """
+    cached_msas = {}
+    
+    if not msa_cache_dir.exists():
+        return cached_msas
+    
+    # Load MSA index if it exists
+    index_file = msa_cache_dir / "msa_index.json"
+    if index_file.exists():
+        with open(index_file, 'r') as f:
+            index = json.load(f)
+        
+        for seq, filename in index.items():
+            msa_file = msa_cache_dir / filename
+            if msa_file.exists():
+                cached_msas[seq] = msa_file.read_text()
+    
+    return cached_msas
+
+
+def save_cached_msas(msa_cache_dir: Path, msas: Dict[str, str]) -> None:
+    """
+    Save MSAs to disk cache.
+    
+    Args:
+        msa_cache_dir: Directory to save MSAs
+        msas: Dict mapping sequence -> MSA content
+    """
+    msa_cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Load existing index
+    index_file = msa_cache_dir / "msa_index.json"
+    if index_file.exists():
+        with open(index_file, 'r') as f:
+            index = json.load(f)
+    else:
+        index = {}
+    
+    # Save new MSAs
+    for i, (seq, content) in enumerate(msas.items()):
+        if seq in index:
+            continue  # Already cached
+        
+        # Use sequence hash for filename
+        seq_hash = hash(seq) % (10 ** 10)
+        filename = f"msa_{seq_hash}.a3m"
+        
+        msa_file = msa_cache_dir / filename
+        msa_file.write_text(content)
+        index[seq] = filename
+    
+    # Save index
+    with open(index_file, 'w') as f:
+        json.dump(index, f, indent=2)
+
+
+def get_or_fetch_msas(
+    target_sequences: List[str],
+    msa_cache_dir: Path,
+) -> Dict[str, str]:
+    """
+    Get MSAs from cache or fetch them via ColabFold.
+    
+    Args:
+        target_sequences: List of unique target sequences
+        msa_cache_dir: Directory for MSA cache
+        
+    Returns:
+        Dict mapping sequence -> MSA content
+    """
+    # Load cached MSAs
+    cached_msas = load_cached_msas(msa_cache_dir)
+    
+    # Find sequences that need fetching
+    missing_seqs = [seq for seq in target_sequences if seq not in cached_msas]
+    
+    if missing_seqs:
+        print(f"\nFetching {len(missing_seqs)} MSA(s) from ColabFold...")
+        print("  (This may take a few minutes)")
+        
+        # Fetch via Modal
+        new_msas = precompute_msas.remote(missing_seqs)
+        
+        # Save to cache
+        save_cached_msas(msa_cache_dir, new_msas)
+        cached_msas.update(new_msas)
+        
+        print(f"  ✓ Fetched and cached {len(new_msas)} MSA(s)\n")
+    else:
+        print(f"\n✓ All {len(target_sequences)} MSA(s) loaded from cache\n")
+    
+    return cached_msas
 
 
 # =============================================================================
@@ -61,32 +264,32 @@ from modal_boltz_ph.test_protenix_validation import (
 # =============================================================================
 
 @app.local_entrypoint()
-def test_single_of3(
+def test_single(
     pdb_path: str,
     validation_gpu: str = "A100",
-    output_dir: str = "./openfold3_single_test",
+    output_dir: str = "./protenix_single_test",
     run_scoring: bool = True,
     verbose: bool = True,
 ):
     """
-    Test OpenFold3 validation on a single PDB file.
+    Test Protenix validation on a single PDB file.
     
     Chain A is treated as the binder (no MSA).
     Chains B, C, D, etc. are treated as targets (MSAs fetched).
     
     Args:
         pdb_path: Path to the design PDB file
-        validation_gpu: GPU type for OpenFold3 validation
+        validation_gpu: GPU type for Protenix validation
         output_dir: Where to save results and MSA cache
         run_scoring: Also run open-source scoring (default: True)
         verbose: Enable detailed output
     
     Example:
-        modal run modal_boltz_ph/test_openfold3_validation.py::test_single_of3 \\
-            --pdb-path ./modal_results/test_run/best_designs/design_001.pdb
+        modal run modal_boltz_ph/test_protenix_validation.py::test_single \\
+            --pdb-path ./modal_results/KRAS_G12V_pMHC_test2/best_designs/KRAS_G12V_pMHC_d11_c5.pdb
     """
     print("\n" + "=" * 70)
-    print("OPENFOLD3 VALIDATION - SINGLE DESIGN TEST")
+    print("PROTENIX VALIDATION - SINGLE DESIGN TEST")
     print("=" * 70)
     
     pdb_file = Path(pdb_path)
@@ -122,20 +325,21 @@ def test_single_of3(
     seq_to_msa = get_or_fetch_msas(unique_target_seqs, msa_cache_dir)
     
     # Convert sequence-keyed MSAs to chain_id-keyed MSAs
+    # This is what Protenix's ensure_msa_files expects
     target_msas = {}
     for chain_id, seq in target_chains:
         if seq in seq_to_msa:
             target_msas[chain_id] = seq_to_msa[seq]
     
     # Get validation function
-    validation_fn = OPENFOLD3_GPU_FUNCTIONS.get(
+    validation_fn = PROTENIX_GPU_FUNCTIONS.get(
         validation_gpu,
-        OPENFOLD3_GPU_FUNCTIONS[DEFAULT_OPENFOLD3_GPU]
+        PROTENIX_GPU_FUNCTIONS[DEFAULT_PROTENIX_GPU]
     )
     
     # Run validation
     design_id = pdb_file.stem
-    print(f"\nRunning OpenFold3 validation for {design_id}...")
+    print(f"\nRunning Protenix validation for {design_id}...")
     
     t0 = time.time()
     result = validation_fn.remote(
@@ -158,12 +362,11 @@ def test_single_of3(
         return
     
     # Core metrics
-    print(f"\n--- OpenFold3 Confidence ---")
-    print(f"  ipTM: {result.get('of3_iptm', 0):.4f}")
-    print(f"  pTM: {result.get('of3_ptm', 0):.4f}")
-    print(f"  pLDDT: {result.get('of3_plddt', 0):.2f}")
-    print(f"  ipSAE: {result.get('of3_ipsae', 0):.4f}")
-    print(f"  gPDE: {result.get('of3_gpde', 0):.4f}")
+    print(f"\n--- Protenix Confidence ---")
+    print(f"  ipTM: {result.get('protenix_iptm', 0):.4f}")
+    print(f"  pTM: {result.get('protenix_ptm', 0):.4f}")
+    print(f"  pLDDT: {result.get('protenix_plddt', 0):.2f}")
+    print(f"  ipSAE: {result.get('protenix_ipsae', 0):.4f}")
     print(f"  Ranking score: {result.get('ranking_score', 0):.4f}")
     print(f"  Has clash: {result.get('has_clash', 'N/A')}")
     
@@ -178,9 +381,9 @@ def test_single_of3(
         status = "ACCEPTED" if result.get('accepted') else f"REJECTED ({result.get('rejection_reason', 'unknown')})"
         print(f"\n  Status: {status}")
     
-    # Save structure (OpenFold3 outputs CIF format)
+    # Save structure
     if result.get('holo_structure'):
-        struct_path = output_path / f"{design_id}_openfold3.cif"
+        struct_path = output_path / f"{design_id}_protenix.cif"
         struct_path.write_text(result['holo_structure'])
         print(f"\n✓ Saved structure: {struct_path}")
     
@@ -197,16 +400,16 @@ def test_single_of3(
 
 
 @app.local_entrypoint()
-def test_folder_of3(
+def test_folder(
     input_dir: str,
-    output_dir: str = "./openfold3_validation_test",
+    output_dir: str = "./protenix_validation_test",
     validation_gpu: str = "A100",
     run_scoring: bool = True,
     max_designs: int = 0,
     verbose: bool = False,
 ):
     """
-    Test OpenFold3 validation on all PDB files in a folder.
+    Test Protenix validation on all PDB files in a folder.
     
     Chain A is treated as the binder (no MSA).
     Chains B, C, D, etc. are treated as targets (MSAs fetched once and cached).
@@ -214,19 +417,19 @@ def test_folder_of3(
     Args:
         input_dir: Directory containing design PDB files
         output_dir: Where to save results and MSA cache
-        validation_gpu: GPU type for OpenFold3 validation
+        validation_gpu: GPU type for Protenix validation
         run_scoring: Also run open-source scoring (default: True)
         max_designs: Maximum designs to process (0 = all)
         verbose: Enable detailed output per design
     
     Example:
-        modal run modal_boltz_ph/test_openfold3_validation.py::test_folder_of3 \\
-            --input-dir ./modal_results/test_run/best_designs \\
-            --output-dir ./openfold3_validation_test \\
+        modal run modal_boltz_ph/test_protenix_validation.py::test_folder \\
+            --input-dir ./modal_results/KRAS_G12V_pMHC_test2/best_designs \\
+            --output-dir ./protenix_validation_test \\
             --validation-gpu A100
     """
     print("\n" + "=" * 70)
-    print("OPENFOLD3 VALIDATION - FOLDER TEST")
+    print("PROTENIX VALIDATION - FOLDER TEST")
     print("=" * 70)
     print(f"Input directory: {input_dir}")
     print(f"Output directory: {output_dir}")
@@ -269,9 +472,9 @@ def test_folder_of3(
     seq_to_msa = get_or_fetch_msas(list(all_target_seqs), msa_cache_dir)
     
     # Get validation function
-    validation_fn = OPENFOLD3_GPU_FUNCTIONS.get(
+    validation_fn = PROTENIX_GPU_FUNCTIONS.get(
         validation_gpu,
-        OPENFOLD3_GPU_FUNCTIONS[DEFAULT_OPENFOLD3_GPU]
+        PROTENIX_GPU_FUNCTIONS[DEFAULT_PROTENIX_GPU]
     )
     
     # Process each design
@@ -311,8 +514,8 @@ def test_folder_of3(
                 }
             else:
                 # Success
-                iptm = result.get('of3_iptm', 0)
-                plddt = result.get('of3_plddt', 0)
+                iptm = result.get('protenix_iptm', 0)
+                plddt = result.get('protenix_plddt', 0)
                 sc = result.get('interface_sc', 0) if run_scoring else None
                 
                 status_str = ""
@@ -322,20 +525,19 @@ def test_folder_of3(
                 print(f"  ✓ Success ({elapsed:.1f}s): ipTM={iptm:.3f}, pLDDT={plddt:.1f}" +
                       (f", SC={sc:.3f}" if sc else "") + status_str)
                 
-                # Save structure (OpenFold3 outputs CIF format)
+                # Save structure
                 if result.get('holo_structure'):
-                    struct_path = structures_dir / f"{design_id}_openfold3.cif"
+                    struct_path = structures_dir / f"{design_id}_protenix.cif"
                     struct_path.write_text(result['holo_structure'])
                 
                 result_entry = {
                     "design_id": design_id,
                     "binder_length": len(design["binder_seq"]),
                     "binder_seq": design["binder_seq"],
-                    "of3_iptm": result.get('of3_iptm'),
-                    "of3_ptm": result.get('of3_ptm'),
-                    "of3_plddt": result.get('of3_plddt'),
-                    "of3_ipsae": result.get('of3_ipsae'),
-                    "of3_gpde": result.get('of3_gpde'),
+                    "protenix_iptm": result.get('protenix_iptm'),
+                    "protenix_ptm": result.get('protenix_ptm'),
+                    "protenix_plddt": result.get('protenix_plddt'),
+                    "protenix_ipsae": result.get('protenix_ipsae'),
                     "ranking_score": result.get('ranking_score'),
                     "has_clash": result.get('has_clash'),
                     "elapsed_time": elapsed,
@@ -391,7 +593,7 @@ def test_folder_of3(
     print("SUMMARY")
     print("=" * 70)
     
-    successful = [r for r in all_results if 'of3_iptm' in r and r.get('of3_iptm') is not None]
+    successful = [r for r in all_results if 'protenix_iptm' in r and r.get('protenix_iptm') is not None]
     failed = len(all_results) - len(successful)
     
     print(f"\nTotal designs: {len(all_results)}")
@@ -399,8 +601,8 @@ def test_folder_of3(
     print(f"Failed: {failed}")
     
     if successful:
-        avg_iptm = sum(r['of3_iptm'] for r in successful) / len(successful)
-        avg_plddt = sum(r['of3_plddt'] for r in successful) / len(successful)
+        avg_iptm = sum(r['protenix_iptm'] for r in successful) / len(successful)
+        avg_plddt = sum(r['protenix_plddt'] for r in successful) / len(successful)
         avg_time = sum(r.get('elapsed_time', 0) for r in successful) / len(successful)
         
         print(f"\nAverage metrics:")
@@ -423,117 +625,47 @@ def test_folder_of3(
 
 
 # =============================================================================
-# UTILITY: COMPARE VALIDATION MODELS
+# UTILITY: COMPARE WITH AF3 RESULTS (if available)
 # =============================================================================
 
 @app.local_entrypoint()
-def compare_of3_protenix(
+def compare_with_af3(
     protenix_results: str,
-    openfold3_results: str,
-    output_file: str = "./validation_model_comparison.csv",
+    af3_results: str,
+    output_file: str = "./validation_comparison.csv",
 ):
     """
-    Compare Protenix vs OpenFold3 validation results.
-    
-    Useful for benchmarking the two open-source AF3 reproductions.
+    Compare Protenix validation results with prior AF3 validation results.
     
     Args:
         protenix_results: Path to Protenix validation_results.csv
-        openfold3_results: Path to OpenFold3 validation_results.csv
-        output_file: Path to save comparison CSV
-    
-    Example:
-        modal run modal_boltz_ph/test_openfold3_validation.py::compare_of3_protenix \\
-            --protenix-results ./protenix_test/validation_results.csv \\
-            --openfold3-results ./openfold3_test/validation_results.csv
-    """
-    import pandas as pd
-    
-    print("\n" + "=" * 70)
-    print("COMPARING PROTENIX vs OPENFOLD3")
-    print("=" * 70)
-    
-    protenix_df = pd.read_csv(protenix_results)
-    of3_df = pd.read_csv(openfold3_results)
-    
-    print(f"\nProtenix results: {len(protenix_df)} designs")
-    print(f"OpenFold3 results: {len(of3_df)} designs")
-    
-    # Merge on design_id
-    merged = protenix_df.merge(
-        of3_df[['design_id', 'of3_iptm', 'of3_ptm', 'of3_plddt', 'of3_ipsae']],
-        on='design_id',
-        how='inner',
-    )
-    
-    print(f"Matched designs: {len(merged)}")
-    
-    if len(merged) == 0:
-        print("\nNo matching designs found!")
-        return
-    
-    # Calculate differences
-    if 'protenix_iptm' in merged.columns:
-        merged['iptm_diff'] = merged['of3_iptm'] - merged['protenix_iptm']
-        merged['plddt_diff'] = merged['of3_plddt'] - merged['protenix_plddt']
-    
-    # Save comparison
-    merged.to_csv(output_file, index=False)
-    print(f"\n✓ Saved comparison: {output_file}")
-    
-    if len(merged) > 2 and 'protenix_iptm' in merged.columns:
-        # Calculate correlation
-        iptm_corr = merged['protenix_iptm'].corr(merged['of3_iptm'])
-        plddt_corr = merged['protenix_plddt'].corr(merged['of3_plddt'])
-        print(f"\n--- Correlation ---")
-        print(f"  ipTM correlation: {iptm_corr:.3f}")
-        print(f"  pLDDT correlation: {plddt_corr:.3f}")
-        
-        print("\n--- Average Differences (OpenFold3 - Protenix) ---")
-        print(f"  ipTM: {merged['iptm_diff'].mean():+.4f} (std: {merged['iptm_diff'].std():.4f})")
-        print(f"  pLDDT: {merged['plddt_diff'].mean():+.2f} (std: {merged['plddt_diff'].std():.2f})")
-    
-    print("\n" + "=" * 70 + "\n")
-
-
-@app.local_entrypoint()
-def compare_of3_af3(
-    openfold3_results: str,
-    af3_results: str,
-    output_file: str = "./of3_vs_af3_comparison.csv",
-):
-    """
-    Compare OpenFold3 validation results with prior AF3 validation results.
-    
-    Args:
-        openfold3_results: Path to OpenFold3 validation_results.csv
         af3_results: Path to AF3 af3_results.csv
         output_file: Path to save comparison CSV
     
     Example:
-        modal run modal_boltz_ph/test_openfold3_validation.py::compare_of3_af3 \\
-            --openfold3-results ./openfold3_test/validation_results.csv \\
-            --af3-results ./modal_results/test_run/refolded/validation_results.csv
+        modal run modal_boltz_ph/test_protenix_validation.py::compare_with_af3 \\
+            --protenix-results ./protenix_test/validation_results.csv \\
+            --af3-results ./modal_results/KRAS_test/refolded/validation_results.csv
     """
     import pandas as pd
     
     print("\n" + "=" * 70)
-    print("COMPARING OPENFOLD3 vs AF3 VALIDATION")
+    print("COMPARING PROTENIX vs AF3 VALIDATION")
     print("=" * 70)
     
     # Load results
-    of3_df = pd.read_csv(openfold3_results)
+    protenix_df = pd.read_csv(protenix_results)
     af3_df = pd.read_csv(af3_results)
     
-    print(f"\nOpenFold3 results: {len(of3_df)} designs")
+    print(f"\nProtenix results: {len(protenix_df)} designs")
     print(f"AF3 results: {len(af3_df)} designs")
     
     # Merge on design_id
-    merged = of3_df.merge(
+    merged = protenix_df.merge(
         af3_df[['design_id', 'af3_iptm', 'af3_ptm', 'af3_plddt', 'af3_ipsae']],
         on='design_id',
         how='inner',
-        suffixes=('', '_af3_orig'),
+        suffixes=('', '_af3'),
     )
     
     print(f"Matched designs: {len(merged)}")
@@ -543,8 +675,8 @@ def compare_of3_af3(
         return
     
     # Calculate differences
-    merged['iptm_diff'] = merged['of3_iptm'] - merged['af3_iptm']
-    merged['plddt_diff'] = merged['of3_plddt'] - merged['af3_plddt']
+    merged['iptm_diff'] = merged['protenix_iptm'] - merged['af3_iptm']
+    merged['plddt_diff'] = merged['protenix_plddt'] - merged['af3_plddt']
     
     # Save comparison
     merged.to_csv(output_file, index=False)
@@ -553,12 +685,12 @@ def compare_of3_af3(
     # Summary stats
     print("\n--- Correlation ---")
     if len(merged) > 2:
-        iptm_corr = merged['of3_iptm'].corr(merged['af3_iptm'])
-        plddt_corr = merged['of3_plddt'].corr(merged['af3_plddt'])
+        iptm_corr = merged['protenix_iptm'].corr(merged['af3_iptm'])
+        plddt_corr = merged['protenix_plddt'].corr(merged['af3_plddt'])
         print(f"  ipTM correlation: {iptm_corr:.3f}")
         print(f"  pLDDT correlation: {plddt_corr:.3f}")
     
-    print("\n--- Average Differences (OpenFold3 - AF3) ---")
+    print("\n--- Average Differences (Protenix - AF3) ---")
     print(f"  ipTM: {merged['iptm_diff'].mean():+.4f} (std: {merged['iptm_diff'].std():.4f})")
     print(f"  pLDDT: {merged['plddt_diff'].mean():+.2f} (std: {merged['plddt_diff'].std():.2f})")
     

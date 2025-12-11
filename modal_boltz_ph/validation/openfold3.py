@@ -22,7 +22,7 @@ import numpy as np
 
 from modal_boltz_ph.app import app, cache_volume, openfold3_weights_volume
 from modal_boltz_ph.images import openfold3_validation_image
-from modal_boltz_ph.validation_base import (
+from modal_boltz_ph.validation.base import (
     calculate_ipsae_from_pae,
     normalize_plddt_scale,
 )
@@ -50,8 +50,7 @@ def ensure_openfold3_weights() -> Path:
     
     Downloads weights on first use via direct URL download from AWS S3.
     """
-    import os
-    import urllib.request
+    from modal_boltz_ph.utils.weights import download_with_progress, verify_download
     
     weights_dir = Path(OPENFOLD3_WEIGHTS_PATH)
     weights_dir.mkdir(parents=True, exist_ok=True)
@@ -61,17 +60,16 @@ def ensure_openfold3_weights() -> Path:
     checkpoint_path = weights_dir / checkpoint_name
     
     # Check if weights already exist
-    if checkpoint_path.exists():
+    if verify_download(checkpoint_path, min_size_mb=100):
         size_mb = checkpoint_path.stat().st_size / (1024 * 1024)
-        if size_mb > 100:  # Sanity check - checkpoint should be > 100MB
-            print(f"  ✓ OpenFold3 weights found at {checkpoint_path} ({size_mb:.1f} MB)")
-            return weights_dir
+        print(f"  ✓ OpenFold3 weights found at {checkpoint_path} ({size_mb:.1f} MB)")
+        return weights_dir
     
     # Also check for any .pt files in the directory
     ckpt_files = list(weights_dir.glob("*.pt"))
     for f in ckpt_files:
-        size_mb = f.stat().st_size / (1024 * 1024)
-        if size_mb > 100:
+        if verify_download(f, min_size_mb=100):
+            size_mb = f.stat().st_size / (1024 * 1024)
             print(f"  ✓ OpenFold3 weights found at {f} ({size_mb:.1f} MB)")
             return weights_dir
     
@@ -79,27 +77,19 @@ def ensure_openfold3_weights() -> Path:
     print("  Downloading OpenFold3 weights (one-time operation)...")
     
     # Official OpenFold3 weights URL (from download_openfold3_params.sh)
-    # S3 bucket: s3://openfold, path: openfold3_params/of3_ft3_v1.pt
     weights_url = "https://openfold.s3.amazonaws.com/openfold3_params/of3_ft3_v1.pt"
     
     try:
-        print(f"  Downloading from {weights_url}...")
-        
-        def progress_callback(block_num, block_size, total_size):
-            downloaded = block_num * block_size
-            if total_size > 0:
-                percent = min(100, downloaded * 100 / total_size)
-                mb_downloaded = downloaded / (1024 * 1024)
-                mb_total = total_size / (1024 * 1024)
-                if block_num % 500 == 0:  # Print less frequently
-                    print(f"\r    Progress: {percent:.1f}% ({mb_downloaded:.1f}/{mb_total:.1f} MB)", end="", flush=True)
-        
-        urllib.request.urlretrieve(weights_url, str(checkpoint_path), reporthook=progress_callback)
-        print()  # Newline after progress
+        download_with_progress(
+            url=weights_url,
+            dest_path=checkpoint_path,
+            description=f"  Downloading from {weights_url}...",
+            print_every=500,  # Less frequent progress updates for large file
+        )
         
         # Verify download
-        size_mb = checkpoint_path.stat().st_size / (1024 * 1024)
-        if size_mb < 100:
+        if not verify_download(checkpoint_path, min_size_mb=100):
+            size_mb = checkpoint_path.stat().st_size / (1024 * 1024) if checkpoint_path.exists() else 0
             raise RuntimeError(f"Downloaded file too small: {size_mb:.1f} MB")
         
         # Write ckpt_root file so OpenFold3 knows where to find weights
@@ -108,6 +98,7 @@ def ensure_openfold3_weights() -> Path:
         
         # Commit volume changes
         openfold3_weights_volume.commit()
+        size_mb = checkpoint_path.stat().st_size / (1024 * 1024)
         print(f"  ✓ OpenFold3 weights downloaded to {checkpoint_path} ({size_mb:.1f} MB)")
         
     except Exception as e:
@@ -824,7 +815,7 @@ def _run_openfold3_validation_impl(
     Runs HOLO + APO predictions, calculates ipSAE, and optionally runs
     open-source interface scoring.
     """
-    from modal_boltz_ph.scoring_opensource import (
+    from modal_boltz_ph.scoring.opensource import (
         _run_opensource_scoring_impl,
         configure_verbose,
     )

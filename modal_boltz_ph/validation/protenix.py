@@ -21,7 +21,7 @@ import numpy as np
 
 from modal_boltz_ph.app import app, cache_volume, protenix_weights_volume
 from modal_boltz_ph.images import protenix_validation_image
-from modal_boltz_ph.validation_base import (
+from modal_boltz_ph.validation.base import (
     calculate_ipsae_from_pae,
     convert_chain_indices_to_letters,
     normalize_plddt_scale,
@@ -54,20 +54,7 @@ PROTENIX_DATA_URLS = {
 # PROTENIX WEIGHTS MANAGEMENT
 # =============================================================================
 
-def _download_file_with_progress(url: str, dest_path: Path) -> None:
-    """Download a file with progress indicator."""
-    import urllib.request
-    
-    def progress_callback(block_num, block_size, total_size):
-        downloaded = block_num * block_size
-        if total_size > 0:
-            percent = min(100, downloaded * 100 / total_size)
-            mb_downloaded = downloaded / (1024 * 1024)
-            mb_total = total_size / (1024 * 1024)
-            print(f"\r    Progress: {percent:.1f}% ({mb_downloaded:.1f}/{mb_total:.1f} MB)", end="", flush=True)
-    
-    urllib.request.urlretrieve(url, str(dest_path), reporthook=progress_callback)
-    print()  # Newline after progress
+from modal_boltz_ph.utils.weights import download_with_progress
 
 
 # Expected file sizes for verification (approximate, in bytes)
@@ -131,7 +118,7 @@ def ensure_protenix_weights(model_name: str = DEFAULT_PROTENIX_MODEL) -> Path:
     url = PROTENIX_MODEL_URLS[model_name]
     
     try:
-        _download_file_with_progress(url, checkpoint_path)
+        download_with_progress(url, checkpoint_path)
         
         # Verify the download
         ckpt = torch.load(checkpoint_path, map_location="cpu")
@@ -490,6 +477,32 @@ def _parse_protenix_output(
     # Protenix returns plddt in 0-100 scale (like AF3), not 0-1 scale
     plddt_raw = confidence.get("plddt", 0.0)
     
+    # Full data JSON contains PAE matrix (token_pair_pae)
+    # Try to find full_data_sample file for PAE
+    full_data_json = None
+    full_data_patterns = [
+        f"{design_id}_full_data_sample_{sample}.json",
+        f"{design_id}_{seed}_full_data_sample_{sample}.json",
+        f"full_data_sample_{sample}.json",
+        # More patterns based on Protenix output naming conventions
+        f"{design_id}_seed_{seed}_full_data_sample_{sample}.json",
+        "*full_data*.json",
+    ]
+    
+    for pattern in full_data_patterns:
+        if "*" in pattern:
+            # Glob pattern
+            matches = list(result_dir.glob(pattern))
+            if matches:
+                full_data_file = matches[0]
+                full_data_json = full_data_file.read_text()
+                break
+        else:
+            full_data_file = result_dir / pattern
+            if full_data_file.exists():
+                full_data_json = full_data_file.read_text()
+                break
+    
     return {
         "iptm": confidence.get("iptm", 0.0),
         "ptm": confidence.get("ptm", 0.0),
@@ -501,6 +514,7 @@ def _parse_protenix_output(
         "has_clash": confidence.get("has_clash", False),
         "structure_cif": structure_cif,
         "confidence_json": conf_file.read_text(),
+        "full_data_json": full_data_json,  # Contains token_pair_pae for ipSAE
     }
 
 
@@ -551,6 +565,11 @@ def _run_protenix_prediction(
         "--enable_tf32", "true",
         "--enable_efficient_fusion", "true",
         "--enable_diffusion_shared_vars_cache", "true",
+        # Enable full_data output with PAE matrix (token_pair_pae) for ipSAE calculation
+        # This causes Protenix to save full_data_sample_*.json in addition to summary_confidence
+        "--need_atom_confidence", "true",
+        # MSA usage - disable for APO predictions (binder-only, no MSA available)
+        "--use_msa", str(use_msa).lower(),
     ]
     
     # Environment setup for optimized kernels
@@ -746,15 +765,18 @@ def _run_protenix_apo_impl(
 
 
 def calculate_protenix_ipsae(
-    confidence_json: str,
+    full_data_json: str,
     binder_length: int,
     target_length: int,
 ) -> Dict[str, float]:
     """
-    Calculate ipSAE from Protenix confidence JSON.
+    Calculate ipSAE from Protenix full_data JSON.
+    
+    Note: Protenix stores the PAE matrix in full_data_sample*.json under 
+    the key 'token_pair_pae', NOT in summary_confidence*.json.
     
     Args:
-        confidence_json: Raw JSON string from Protenix confidence output
+        full_data_json: Raw JSON string from Protenix full_data_sample output
         binder_length: Number of residues in binder
         target_length: Total number of residues in target chain(s)
     
@@ -763,9 +785,17 @@ def calculate_protenix_ipsae(
     """
     result = {'protenix_ipsae': 0.0}
     
+    if not full_data_json:
+        return result
+    
     try:
-        confidence = json.loads(confidence_json)
-        pae_data = confidence.get("pae", [])
+        full_data = json.loads(full_data_json)
+        # Protenix uses 'token_pair_pae' key for the PAE matrix
+        pae_data = full_data.get("token_pair_pae", [])
+        
+        if not pae_data:
+            # Also try 'pae' as fallback
+            pae_data = full_data.get("pae", [])
         
         if not pae_data:
             return result
@@ -905,7 +935,7 @@ def _run_protenix_validation_impl(
     Returns:
         Dict with validation metrics and structures
     """
-    from modal_boltz_ph.scoring_opensource import (
+    from modal_boltz_ph.scoring.opensource import (
         _run_opensource_scoring_impl,
         configure_verbose,
     )
@@ -949,11 +979,11 @@ def _run_protenix_validation_impl(
     # pLDDT is already in 0-100 scale from Protenix (like AF3)
     holo_plddt_scaled = holo_result["plddt"]
     
-    # Calculate ipSAE from HOLO confidence
+    # Calculate ipSAE from HOLO full_data (contains token_pair_pae)
     ipsae_result = {}
-    if holo_result.get("confidence_json"):
+    if holo_result.get("full_data_json"):
         ipsae_result = calculate_protenix_ipsae(
-            holo_result["confidence_json"],
+            holo_result["full_data_json"],
             binder_length=len(binder_seq),
             target_length=total_target_length,
         )
@@ -978,6 +1008,8 @@ def _run_protenix_validation_impl(
         "af3_structure": holo_result.get("structure_cif"),  # Alias for compatibility
         "holo_confidence_json": holo_result.get("confidence_json"),
         "af3_confidence_json": holo_result.get("confidence_json"),  # Alias
+        # Full data JSON with PAE matrix for debugging/analysis
+        "holo_full_data_json": holo_result.get("full_data_json"),
     })
     
     # ========== 2. APO PREDICTION (binder alone) ==========

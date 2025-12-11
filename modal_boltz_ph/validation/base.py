@@ -1,37 +1,12 @@
 """
-Base classes and utilities for structure validation.
+Shared utilities for structure validation.
 
-This module provides shared utilities used by both AF3 and Protenix validation.
+This module provides shared utilities used by AF3, Protenix, and OpenFold3 validation.
 """
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 import numpy as np
-
-
-@dataclass
-class ValidationInput:
-    """Standard input format for all validation models."""
-    design_id: str
-    binder_seq: str
-    target_seq: str  # Colon-separated for multi-chain
-    target_msas: Optional[Dict[str, str]] = None  # chain_id -> A3M content
-    template_content: Optional[str] = None  # Base64-encoded PDB/CIF
-
-
-@dataclass
-class ValidationOutput:
-    """Standard output format for all validation models."""
-    design_id: str
-    iptm: float
-    ptm: float
-    plddt: float
-    ipsae: Optional[float] = None
-    chain_pair_iptm: Optional[Dict[str, float]] = None
-    structure_cif: Optional[str] = None
-    confidence_json: Optional[str] = None
-    error: Optional[str] = None
 
 
 def calculate_ipsae_from_pae(
@@ -43,7 +18,7 @@ def calculate_ipsae_from_pae(
     """
     Calculate ipSAE (interface predicted Squared Aligned Error) from PAE matrix.
     
-    Shared implementation for AF3 and Protenix.
+    Shared implementation for AF3, Protenix, and OpenFold3.
     
     This uses the same algorithm as Boltz ipSAE calculation - a PTM-like
     transformation applied to interface PAE values.
@@ -98,6 +73,7 @@ def calculate_ipsae_from_pae(
         # Binder → Target direction
         interface_pae = pae_matrix[np.ix_(binder_indices, target_indices)]
         valid_mask = interface_pae < pae_cutoff
+        
         
         ipsae_byres_binder = []
         for i in range(binder_length):
@@ -205,47 +181,3 @@ def normalize_plddt_scale(plddt: float, from_scale: str = "0-1") -> float:
     if from_scale == "0-1":
         return plddt * 100.0
     return plddt
-
-
-def get_validation_model_info(model_name: str) -> Dict[str, Any]:
-    """
-    Get information about a validation model.
-    
-    Args:
-        model_name: "af3", "protenix", or "openfold3"
-    
-    Returns:
-        Dict with model information
-    """
-    models = {
-        "af3": {
-            "name": "AlphaFold3",
-            "license": "Proprietary (research only)",
-            "weights_required": True,
-            "gpu_recommended": "A100-80GB",
-            "description": "Google DeepMind's AlphaFold 3 - requires proprietary weights",
-        },
-        "protenix": {
-            "name": "Protenix",
-            "license": "Apache 2.0",
-            "weights_required": False,  # Auto-downloaded
-            "gpu_recommended": "A100",
-            "description": "ByteDance's open-source AF3 reproduction",
-        },
-        "openfold3": {
-            "name": "OpenFold3",
-            "license": "Apache 2.0",
-            "weights_required": False,  # Auto-downloaded
-            "gpu_recommended": "A100",
-            "description": "AlQuraishi Lab's open-source AF3 reproduction",
-        },
-        "none": {
-            "name": "None",
-            "license": "N/A",
-            "weights_required": False,
-            "gpu_recommended": None,
-            "description": "No structure validation (design only)",
-        },
-    }
-    
-    return models.get(model_name.lower(), models["none"])

@@ -226,6 +226,40 @@ def _stream_final_result(
         print(f"  Stream final error: {e}")
 
 
+def _extract_scoring_metrics(validation_result: Dict) -> Dict:
+    """
+    Extract scoring metrics from a validation result dict.
+    
+    This helper consolidates the metric extraction logic used when streaming
+    bundled validation+scoring results from Protenix or OpenFold3.
+    
+    Args:
+        validation_result: Dict containing validation and scoring results
+    
+    Returns:
+        Dict with extracted scoring metrics
+    """
+    return {
+        "interface_dG": validation_result.get("interface_dG", 0.0),
+        "interface_sc": validation_result.get("interface_sc", 0.0),
+        "interface_nres": validation_result.get("interface_nres", 0),
+        "interface_dSASA": validation_result.get("interface_dSASA", 0.0),
+        "interface_packstat": validation_result.get("interface_packstat", 0.0),
+        "interface_dG_SASA_ratio": validation_result.get("interface_dG_SASA_ratio", 0.0),
+        "interface_interface_hbonds": validation_result.get("interface_interface_hbonds", 0),
+        "interface_delta_unsat_hbonds": validation_result.get("interface_delta_unsat_hbonds", 0),
+        "interface_hydrophobicity": validation_result.get("interface_hydrophobicity", 0.0),
+        "surface_hydrophobicity": validation_result.get("surface_hydrophobicity", 0.0),
+        "binder_sasa": validation_result.get("binder_sasa", 0.0),
+        "interface_fraction": validation_result.get("interface_fraction", 0.0),
+        "interface_hbond_percentage": validation_result.get("interface_hbond_percentage", 0.0),
+        "interface_delta_unsat_hbonds_percentage": validation_result.get("interface_delta_unsat_hbonds_percentage", 0.0),
+        "apo_holo_rmsd": validation_result.get("apo_holo_rmsd"),
+        "i_pae": validation_result.get("i_pae"),
+        "rg": validation_result.get("rg"),
+    }
+
+
 def _sync_worker(
     run_id: str,
     output_path: Path,

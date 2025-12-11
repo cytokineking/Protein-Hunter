@@ -33,13 +33,13 @@ import modal
 
 from modal_boltz_ph.app import app
 from modal_boltz_ph.images import opensource_scoring_image, pyrosetta_image
-from modal_boltz_ph.scoring_opensource import (
+from modal_boltz_ph.scoring.opensource import (
     OPENSOURCE_SCORING_GPU_FUNCTIONS,
     DEFAULT_OPENSOURCE_GPU,
     compare_sasa_methods,
     configure_verbose as configure_opensource_verbose,
 )
-from modal_boltz_ph.scoring_pyrosetta import (
+from modal_boltz_ph.scoring.pyrosetta import (
     run_pyrosetta_single,
     configure_verbose as configure_pyrosetta_verbose,
 )

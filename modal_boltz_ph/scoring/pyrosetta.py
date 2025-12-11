@@ -18,34 +18,10 @@ from modal_boltz_ph.images import pyrosetta_image
 
 
 # =============================================================================
-# LOGGING UTILITIES
+# LOGGING UTILITIES (imported from shared module)
 # =============================================================================
 
-# Module-level verbose flag (simpler approach for Modal remote functions)
-_VERBOSE = False
-
-
-def configure_verbose(verbose: bool = False):
-    """
-    Configure verbose logging for the PyRosetta scoring module.
-    
-    Call this at the start of your entrypoint to control verbosity.
-    When verbose=False (default), only warnings/errors are shown.
-    When verbose=True, detailed timing and progress messages are shown.
-    """
-    global _VERBOSE
-    _VERBOSE = verbose
-
-
-def vprint(msg: str):
-    """
-    Verbose print - only shown when verbose mode is enabled.
-    
-    Uses a simple flag-based approach that works across Modal remote functions.
-    """
-    if _VERBOSE:
-        timestamp = time.strftime("%H:%M:%S")
-        print(f"[{timestamp}] {msg}", flush=True)
+from modal_boltz_ph.utils.logging import configure_verbose, vprint
 
 
 @app.function(image=pyrosetta_image, cpu=4, timeout=1800, max_containers=20)

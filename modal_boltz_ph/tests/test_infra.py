@@ -3,6 +3,10 @@ Test functions for validating Modal infrastructure.
 
 This module contains test functions to verify GPU availability,
 image configuration, and weight availability.
+
+Usage:
+    modal run modal_boltz_ph/tests/test_infra.py::test_connection
+    modal run modal_boltz_ph/tests/test_infra.py::test_af3
 """
 
 import subprocess
@@ -109,4 +113,3 @@ def test_af3_image() -> str:
         results.append(f"✗ Failed: {e}")
     
     return "\n".join(results)
-

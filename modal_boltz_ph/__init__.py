@@ -4,20 +4,29 @@ Modal Boltz Protein Hunter - Modular Package
 This package provides serverless GPU execution of the Protein Hunter design pipeline
 on Modal's cloud infrastructure.
 
-Modules:
+Package Structure:
     app: Modal App definition and shared infrastructure
-    images: Docker image definitions for Boltz, AF3, Protenix, and PyRosetta
+    images: Docker image definitions for Boltz, AF3, Protenix, OpenFold3, and scoring
     helpers: Shared utility functions
-    design: Core design implementation and GPU wrappers
-    validation_af3: AlphaFold3 validation functions
-    validation_protenix: Protenix (open-source AF3) validation functions
-    validation_base: Shared validation utilities
-    validation: Validation dispatcher and orchestration
-    scoring_pyrosetta: PyRosetta interface analysis
-    scoring_opensource: Open-source interface scoring (OpenMM + FreeSASA)
-    sync: Result streaming and synchronization
+    design: Core Boltz design implementation and GPU wrappers
     cache: Cache initialization and weight management
-    tests: Test functions for validating infrastructure
+    sync: Result streaming and synchronization
+    
+    validation/: Structure validation subpackage
+        base: Shared validation utilities (ipSAE, pLDDT normalization)
+        af3: AlphaFold3 validation functions
+        protenix: Protenix (open-source AF3) validation functions
+        openfold3: OpenFold3 validation functions
+    
+    scoring/: Interface scoring subpackage
+        opensource: Open-source scoring (OpenMM + FreeSASA + sc-rs)
+        pyrosetta: PyRosetta interface analysis
+    
+    utils/: Shared utilities subpackage
+        logging: Verbose logging utilities
+        weights: Model weight download helpers
+    
+    tests/: Test harnesses for pipeline components
 
 Usage:
     # Initialize cache (run once)
@@ -49,20 +58,26 @@ from modal_boltz_ph.app import (
     cache_volume,
     af3_weights_volume,
     protenix_weights_volume,
+    openfold3_weights_volume,
     results_dict,
     GPU_TYPES,
     DEFAULT_GPU,
 )
 
 from modal_boltz_ph.validation import (
-    get_validation_function,
     get_default_validation_gpu,
     validate_model_gpu_combination,
-)
-
-from modal_boltz_ph.validation_protenix import (
     PROTENIX_GPU_FUNCTIONS,
     DEFAULT_PROTENIX_GPU,
+    OPENFOLD3_GPU_FUNCTIONS,
+    DEFAULT_OPENFOLD3_GPU,
+    AF3_GPU_FUNCTIONS,
+    AF3_APO_GPU_FUNCTIONS,
+)
+
+from modal_boltz_ph.scoring import (
+    OPENSOURCE_SCORING_GPU_FUNCTIONS,
+    DEFAULT_OPENSOURCE_GPU,
 )
 
 __all__ = [
@@ -71,14 +86,20 @@ __all__ = [
     "cache_volume",
     "af3_weights_volume",
     "protenix_weights_volume",
+    "openfold3_weights_volume",
     "results_dict",
     "GPU_TYPES",
     "DEFAULT_GPU",
     # Validation
-    "get_validation_function",
     "get_default_validation_gpu",
     "validate_model_gpu_combination",
     "PROTENIX_GPU_FUNCTIONS",
     "DEFAULT_PROTENIX_GPU",
+    "OPENFOLD3_GPU_FUNCTIONS",
+    "DEFAULT_OPENFOLD3_GPU",
+    "AF3_GPU_FUNCTIONS",
+    "AF3_APO_GPU_FUNCTIONS",
+    # Scoring
+    "OPENSOURCE_SCORING_GPU_FUNCTIONS",
+    "DEFAULT_OPENSOURCE_GPU",
 ]
-
