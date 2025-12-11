@@ -1063,9 +1063,9 @@ class ProteinHunter_Boltz:
         
         OUTPUT STRUCTURE:
         -----------------
-        af3_validation/
-        ├── af3_results.csv
-        └── *_af3.cif
+        refolded/
+        ├── validation_results.csv
+        └── *_refolded.cif
         accepted_designs/
         ├── accepted_stats.csv
         └── *_relaxed.pdb
@@ -1147,21 +1147,21 @@ class ProteinHunter_Boltz:
         )
 
         # ===================================================================
-        # STEP 1: CREATE AF3_VALIDATION FOLDER (BEFORE PyRosetta)
-        # This ensures af3_validation/ is created even if PyRosetta fails
+        # STEP 1: CREATE REFOLDED FOLDER (BEFORE PyRosetta)
+        # This ensures refolded/ is created even if PyRosetta fails
         # ===================================================================
-        print("\nCreating af3_validation folder...")
+        print("\nCreating refolded folder...")
         
-        af3_dir = os.path.join(self.save_dir, "af3_validation")
+        refolded_dir = os.path.join(self.save_dir, "refolded")
         accepted_dir = os.path.join(self.save_dir, "accepted_designs")
         rejected_dir = os.path.join(self.save_dir, "rejected")
-        os.makedirs(af3_dir, exist_ok=True)
+        os.makedirs(refolded_dir, exist_ok=True)
         os.makedirs(accepted_dir, exist_ok=True)
         os.makedirs(rejected_dir, exist_ok=True)
 
-        af3_results_rows = []
+        validation_results_rows = []
         
-        # Find AF3 output CIFs and copy to af3_validation/
+        # Find AF3 output CIFs and copy to refolded/
         if af_output_dir and os.path.exists(af_output_dir):
             for design_subdir in os.listdir(af_output_dir):
                 design_path = os.path.join(af_output_dir, design_subdir)
@@ -1182,7 +1182,7 @@ class ProteinHunter_Boltz:
                     
                     # Copy CIF with new naming
                     src_cif = cif_files[0]
-                    dest_cif = os.path.join(af3_dir, f"{design_id}_af3.cif")
+                    dest_cif = os.path.join(refolded_dir, f"{design_id}_refolded.cif")
                     shutil.copy(src_cif, dest_cif)
                     
                     # Extract AF3 metrics
@@ -1225,7 +1225,7 @@ class ProteinHunter_Boltz:
                         except Exception as e:
                             print(f"  Warning: Could not read confidence for {design_id}: {e}")
                     
-                    af3_results_rows.append({
+                    validation_results_rows.append({
                         "design_id": design_id,
                         "af3_iptm": round(af3_iptm, 4),
                         "af3_ipsae": round(af3_ipsae, 4),
@@ -1233,11 +1233,11 @@ class ProteinHunter_Boltz:
                         "af3_plddt": round(af3_plddt, 2),
                     })
 
-        # Save af3_results.csv
-        if af3_results_rows:
-            af3_results_df = pd.DataFrame(af3_results_rows)
-            af3_results_df.to_csv(os.path.join(af3_dir, "af3_results.csv"), index=False)
-            print(f"  ✓ Saved af3_validation/af3_results.csv ({len(af3_results_rows)} designs)")
+        # Save validation_results.csv
+        if validation_results_rows:
+            validation_results_df = pd.DataFrame(validation_results_rows)
+            validation_results_df.to_csv(os.path.join(refolded_dir, "validation_results.csv"), index=False)
+            print(f"  ✓ Saved refolded/validation_results.csv ({len(validation_results_rows)} designs)")
         else:
             print("  Warning: No AF3 results found to save")
 
@@ -1245,7 +1245,7 @@ class ProteinHunter_Boltz:
         if not af_pdb_dir or not os.path.exists(af_pdb_dir) or not any(f.endswith(".pdb") for f in os.listdir(af_pdb_dir)):
             print("No AF3 PDB conversions available. Skipping PyRosetta step.")
             print(f"\nResults saved to: {self.save_dir}")
-            print(f"  - af3_validation/af3_results.csv: {len(af3_results_rows)} designs")
+            print(f"  - refolded/validation_results.csv: {len(validation_results_rows)} designs")
             return
 
         # ===================================================================
@@ -1274,8 +1274,8 @@ class ProteinHunter_Boltz:
         accepted_rows = []
         rejected_rows = []
 
-        # Create af3_results lookup for joining
-        af3_lookup = {r["design_id"]: r for r in af3_results_rows}
+        # Create validation_results lookup for joining
+        validation_lookup = {r["design_id"]: r for r in validation_results_rows}
 
         # Process success designs (check file exists AND has data)
         if os.path.exists(success_csv) and os.path.getsize(success_csv) > 0:
@@ -1290,7 +1290,7 @@ class ProteinHunter_Boltz:
                 
                 # Get design metadata
                 metadata = design_metadata.get(design_id, {})
-                af3_data = af3_lookup.get(design_id, {})
+                val_data = validation_lookup.get(design_id, {})
                 
                 # Build full row
                 full_row = {
@@ -1307,11 +1307,11 @@ class ProteinHunter_Boltz:
                     "boltz_ipsae": metadata.get("boltz_ipsae", 0.0),
                     "boltz_plddt": metadata.get("boltz_plddt", 0.0),
                     "boltz_iplddt": metadata.get("boltz_iplddt", 0.0),
-                    # AF3 validation metrics
-                    "af3_iptm": af3_data.get("af3_iptm", row.get("iptm", 0)),
-                    "af3_ipsae": af3_data.get("af3_ipsae", 0.0),
-                    "af3_ptm": af3_data.get("af3_ptm", 0),
-                    "af3_plddt": af3_data.get("af3_plddt", row.get("plddt", 0)),
+                    # Validation metrics (AF3 or Protenix)
+                    "af3_iptm": val_data.get("af3_iptm", row.get("iptm", 0)),
+                    "af3_ipsae": val_data.get("af3_ipsae", 0.0),
+                    "af3_ptm": val_data.get("af3_ptm", 0),
+                    "af3_plddt": val_data.get("af3_plddt", row.get("plddt", 0)),
                     "accepted": True,
                     "rejection_reason": "",
                     # PyRosetta metrics
@@ -1355,7 +1355,7 @@ class ProteinHunter_Boltz:
                 design_id = model_name.replace("relax_", "").replace("_model.pdb", "")
                 
                 metadata = design_metadata.get(design_id, {})
-                af3_data = af3_lookup.get(design_id, {})
+                val_data = validation_lookup.get(design_id, {})
                 
                 full_row = {
                     "design_id": design_id,
@@ -1371,11 +1371,11 @@ class ProteinHunter_Boltz:
                     "boltz_ipsae": metadata.get("boltz_ipsae", 0.0),
                     "boltz_plddt": metadata.get("boltz_plddt", 0.0),
                     "boltz_iplddt": metadata.get("boltz_iplddt", 0.0),
-                    # AF3 validation metrics
-                    "af3_iptm": af3_data.get("af3_iptm", row.get("iptm", 0)),
-                    "af3_ipsae": af3_data.get("af3_ipsae", 0.0),
-                    "af3_ptm": af3_data.get("af3_ptm", 0),
-                    "af3_plddt": af3_data.get("af3_plddt", row.get("plddt", 0)),
+                    # Validation metrics (AF3 or Open-source Model)
+                    "af3_iptm": val_data.get("af3_iptm", row.get("iptm", 0)),
+                    "af3_ipsae": val_data.get("af3_ipsae", 0.0),
+                    "af3_ptm": val_data.get("af3_ptm", 0),
+                    "af3_plddt": val_data.get("af3_plddt", row.get("plddt", 0)),
                     "accepted": False,
                     "rejection_reason": row.get("failure_reason", ""),
                     # PyRosetta metrics
@@ -1432,14 +1432,14 @@ class ProteinHunter_Boltz:
         print(f"\n{'='*60}")
         print("DOWNSTREAM VALIDATION COMPLETE")
         print(f"{'='*60}")
-        print(f"AF3 validated: {len(af3_results_rows)} designs")
+        print(f"Validated: {len(validation_results_rows)} designs")
         print(f"Accepted: {len(accepted_rows)}")
         print(f"Rejected: {len(rejected_rows)}")
         print(f"\nOutput structure:")
         print(f"  {self.save_dir}/")
-        print(f"  ├── af3_validation/       # AF3 structures + metrics")
-        print(f"  │   ├── af3_results.csv")
-        print(f"  │   └── *_af3.cif")
+        print(f"  ├── refolded/             # Refolded structures + metrics")
+        print(f"  │   ├── validation_results.csv")
+        print(f"  │   └── *_refolded.cif")
         print(f"  ├── accepted_designs/     # Passed filters")
         print(f"  │   ├── accepted_stats.csv")
         print(f"  │   └── *_relaxed.pdb")
@@ -1627,13 +1627,13 @@ class ProteinHunter_Boltz:
                         break  # Found our design
             
             # ===================================================================
-            # STEP 4: COPY AF3 CIF TO af3_validation/
+            # STEP 4: COPY AF3 CIF TO refolded/
             # ===================================================================
-            af3_dir = os.path.join(self.save_dir, "af3_validation")
-            os.makedirs(af3_dir, exist_ok=True)
+            refolded_dir = os.path.join(self.save_dir, "refolded")
+            os.makedirs(refolded_dir, exist_ok=True)
             
             if af3_cif_path and os.path.exists(af3_cif_path):
-                dest_cif = os.path.join(af3_dir, f"{design_id}_af3.cif")
+                dest_cif = os.path.join(refolded_dir, f"{design_id}_refolded.cif")
                 shutil.copy(af3_cif_path, dest_cif)
             
             # ===================================================================
@@ -1792,25 +1792,25 @@ class ProteinHunter_Boltz:
         
         This enables incremental saving for the design-by-design execution model.
         Results are appended to:
-        - af3_validation/af3_results.csv
+        - refolded/validation_results.csv
         - accepted_designs/accepted_stats.csv (if accepted)
         - rejected/rejected_stats.csv (if rejected)
         
         Args:
             result: Full result dict from _run_single_design_validation()
         """
-        # Save AF3 results
-        af3_dir = os.path.join(self.save_dir, "af3_validation")
-        os.makedirs(af3_dir, exist_ok=True)
+        # Save validation results
+        refolded_dir = os.path.join(self.save_dir, "refolded")
+        os.makedirs(refolded_dir, exist_ok=True)
         
-        af3_row = {
+        validation_row = {
             "design_id": result.get("design_id"),
             "af3_iptm": result.get("af3_iptm", 0.0),
             "af3_ipsae": result.get("af3_ipsae", 0.0),
             "af3_ptm": result.get("af3_ptm", 0.0),
             "af3_plddt": result.get("af3_plddt", 0.0),
         }
-        append_to_csv_safe(Path(af3_dir) / "af3_results.csv", af3_row)
+        append_to_csv_safe(Path(refolded_dir) / "validation_results.csv", validation_row)
         
         # Build full stats row
         stats_row = _reorder_columns(pd.DataFrame([result])).iloc[0].to_dict()
@@ -2081,8 +2081,8 @@ class ProteinHunter_Boltz:
             print(f"  {self.save_dir}/")
             print(f"  ├── designs/              # All cycle PDBs + design_stats.csv")
             print(f"  ├── best_designs/         # Best per design + best_designs.csv")
-            print(f"  ├── af3_validation/       # AF3 structures + metrics")
-            print(f"  │   ├── af3_results.csv")
+            print(f"  ├── refolded/             # Refolded structures + metrics")
+            print(f"  │   ├── validation_results.csv")
             print(f"  │   └── *_af3.cif")
             print(f"  ├── accepted_designs/     # Passed filters")
             print(f"  │   ├── accepted_stats.csv")
@@ -2589,7 +2589,7 @@ class MultiGPUOrchestrator:
         print(f"  ├── designs/              # All cycle PDBs + design_stats.csv")
         print(f"  ├── best_designs/         # Best per design + best_designs.csv")
         if self.args.use_alphafold3_validation:
-            print(f"  ├── af3_validation/       # AF3 structures + metrics")
+            print(f"  ├── refolded/             # Refolded structures + metrics")
             print(f"  ├── accepted_designs/     # Passed filters")
             print(f"  └── rejected/             # Failed filters")
         print(f"\nTo view detailed logs: tail -f {self.save_dir}/worker_gpu*.log")

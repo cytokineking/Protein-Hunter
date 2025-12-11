@@ -221,9 +221,9 @@ results_{name}/
 ├── best_designs/               # Best cycle per design
 │   ├── best_designs.csv
 │   └── {name}_d{X}_c{Y}.pdb
-├── af3_validation/             # AlphaFold 3 predictions
-│   ├── af3_results.csv         # ipTM, pTM, pLDDT scores
-│   └── *_af3.cif               # Predicted structures
+├── refolded/                   # Refolded structures (AF3 or Protenix)
+│   ├── validation_results.csv  # ipTM, pTM, pLDDT scores
+│   └── *_refolded.cif          # Predicted structures
 ├── accepted_designs/           # Passed all filters
 │   ├── accepted_stats.csv      # Full metrics
 │   └── *_relaxed.pdb           # Relaxed structures

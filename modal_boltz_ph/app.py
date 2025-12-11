@@ -22,6 +22,9 @@ cache_volume = modal.Volume.from_name("protein-hunter-cache", create_if_missing=
 # Volume for AlphaFold3 weights (user uploads their own)
 af3_weights_volume = modal.Volume.from_name("af3-weights", create_if_missing=True)
 
+# Volume for Protenix weights (auto-downloaded on first use)
+protenix_weights_volume = modal.Volume.from_name("protenix-weights", create_if_missing=True)
+
 # =============================================================================
 # SHARED DICT FOR RESULT STREAMING
 # =============================================================================

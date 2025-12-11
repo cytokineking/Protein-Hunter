@@ -11,7 +11,7 @@ A protein binder design pipeline using Boltz structure prediction and LigandMPNN
 1. **BindCraft-style Design Cycles** — Restructured workflow with resumable execution and early stopping
 2. **Serverless Compute Ready** — Full Modal cloud compatibility with massive parallelization and real-time streaming
 3. **Open-Source Scoring** — Optional PyRosetta-free scoring using OpenMM, FreeSASA, and sc-rs (adapted from [FreeBindCraft](https://github.com/cytokineking/FreeBindCraft))
-4. **Open-Source Future** — Working toward open-source alternatives for structural validation (replacing AF3)
+4. **Open-Source Validation** — Protenix integration for fully open-source structure validation (no AF3 weights required)
 
 ## Fork Additions
 
@@ -20,6 +20,7 @@ This fork extends the upstream with the following capabilities:
 | Addition | Description |
 |----------|-------------|
 | **Modal Cloud Pipeline** | Parallelized design runs with multi-GPU orchestration |
+| **Open-Source Validation** | Protenix integration for structure validation (no AF3 weights required) |
 | **Open-Source Scoring** | PyRosetta-free interface scoring (Modal only) |
 | **ipSAE Scoring** | Interface pSAE metric for quality assessment |
 | **Streamlined Output** | Organized folders: `designs/`, `best_designs/`, `accepted_designs/` |
@@ -568,12 +569,21 @@ python boltz_ph/design.py \
     --use_alphafold3_validation \
     --alphafold_dir ~/alphafold3
 
-# Modal (PyRosetta runs automatically for protein targets)
+# Modal with Protenix (fully open-source, recommended)
 modal run modal_boltz_ph_cli.py::run_pipeline \
     --name PDL1_validated \
     --protein-seqs "AFTVTVPK..." \
     --num-designs 5 \
-    --use-alphafold3-validation
+    --validation-model protenix \
+    --scoring-method opensource
+
+# Modal with AF3 (requires weights upload)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name PDL1_validated \
+    --protein-seqs "AFTVTVPK..." \
+    --num-designs 5 \
+    --validation-model af3 \
+    --validation-gpu A100-80GB
 ```
 
 ---
@@ -599,9 +609,9 @@ results_my_design/
     └── best_designs.csv             # Summary of best designs only
 ```
 
-### Full Output (With AF3 Validation)
+### Full Output (With Validation)
 
-When using `--use_alphafold3_validation` (local) or `--use-alphafold3-validation` (Modal):
+When using `--use_alphafold3_validation` (local) or `--validation-model {af3,protenix}` (Modal):
 
 ```
 results_my_design/
@@ -611,9 +621,9 @@ results_my_design/
 ├── best_designs/                    # Best cycle per design
 │   ├── best_designs.csv
 │   └── {name}_d{X}_c{Y}.pdb
-├── af3_validation/                  # AlphaFold3 predictions
-│   ├── af3_results.csv
-│   └── *_af3.cif
+├── refolded/                        # Refolded structures (AF3 or Open-source Model)
+│   ├── validation_results.csv
+│   └── *_refolded.cif
 ├── accepted_designs/                # Passed all filters (protein targets)
 │   ├── accepted_stats.csv
 │   └── *_relaxed.pdb
@@ -1023,9 +1033,24 @@ The Modal CLI uses the same arguments as the local pipeline with these differenc
 | `--no-stream` | str | `"false"` | Disable real-time result streaming |
 | `--sync-interval` | float | `5.0` | Sync polling interval (seconds) |
 | `--output-dir` | str | `"./results_{name}"` | Local output directory |
-| `--use-alphafold3-validation` | str | `"false"` | Enable AF3 + PyRosetta validation |
-| `--af3-gpu` | str | `"A100-80GB"` | GPU type for AF3 validation |
-| `--use-msa-for-af3` | str | `"true"` | Reuse MSAs from design phase for AF3 |
+
+#### Validation & Scoring Arguments
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--validation-model` | str | `"none"` | Structure validation: `none`, `af3`, or `protenix` |
+| `--scoring-method` | str | `"pyrosetta"` | Scoring: `pyrosetta` or `opensource` |
+| `--validation-gpu` | str | auto | GPU for validation (`A100` for protenix, `A100-80GB` for af3) |
+| `--use-msa-for-validation` | str | `"true"` | Reuse MSAs from design phase for validation |
+
+**Validation models:**
+- `none` — Design only, no cross-validation (default)
+- `protenix` — Open-source AF3 reproduction (Apache 2.0 license, recommended)
+- `af3` — AlphaFold3 (requires proprietary weights, see [AF3 Setup](#alphafold3-validation-optional))
+
+**Scoring methods:**
+- `pyrosetta` — Full PyRosetta scoring with interface energetics
+- `opensource` — OpenMM + FreeSASA + sc-rs (no license required)
 
 #### Available GPU Types
 
@@ -1127,10 +1152,11 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
     --gpu H100
 ```
 
-#### Example 3: pMHC Binder with Template
+#### Example 3: pMHC Binder with Template + Validation
 
 ```bash
 # Sequences auto-extracted from template; hotspots use PDB numbering
+# Uses Protenix validation (fully open-source)
 modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "pMHC_TCRm" \
     --template-path "./my_pmhc_structure.pdb" \
@@ -1143,7 +1169,8 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
     --min-protein-length 60 \
     --max-protein-length 120 \
     --high-iptm-threshold 0.8 \
-    --use-alphafold3-validation=true \
+    --validation-model protenix \
+    --scoring-method opensource \
     --gpu H100 \
     --output-dir ./pMHC_results
 ```
@@ -1162,6 +1189,20 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
     --gpu H100
 ```
 
+#### Example 5: AF3 Validation with PyRosetta Scoring
+
+```bash
+# Requires AF3 weights upload first (see AF3 Setup section)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "PDL1_af3" \
+    --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --num-designs 10 \
+    --num-cycles 5 \
+    --validation-model af3 \
+    --scoring-method pyrosetta \
+    --validation-gpu A100-80GB \
+    --gpu H100
+```
 
 ### Modal Output Files
 
@@ -1194,22 +1235,28 @@ The open-source scoring implementation is adapted from [FreeBindCraft](https://g
 | **SASA Calculations** | FreeSASA | Surface area metrics with NACCESS classifier |
 | **Interface Detection** | Biopython | Contact-based interface residue identification |
 
-### CLI Flags
+### Usage
+
+Use `--scoring-method opensource` to enable open-source scoring:
 
 ```bash
+# Fully open-source pipeline (Protenix validation + opensource scoring)
 modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "my_design" \
     --protein-seqs "YOUR_TARGET_SEQUENCE" \
-    --use-alphafold3-validation=true \
-    --use-open-scoring=true \
-    --open-scoring-gpu A10G \
+    --validation-model protenix \
+    --scoring-method opensource \
+    --gpu H100
+
+# AF3 validation with open-source scoring
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "my_design" \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --validation-model af3 \
+    --scoring-method opensource \
+    --validation-gpu A100-80GB \
     --gpu H100
 ```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--use-open-scoring` | `false` | Enable open-source scoring instead of PyRosetta |
-| `--open-scoring-gpu` | `A10G` | GPU type for OpenMM relaxation (`T4`, `L4`, `A10G`, `L40S`, `A100`, `H100`) |
 
 ### Computed Metrics
 
@@ -1227,9 +1274,10 @@ The open-source pathway computes these interface metrics:
 
 Some PyRosetta-specific metrics (e.g., `interface_dG`, `interface_packstat`, `interface_hbonds`) are set to placeholder values that pass default filters. Evaluate design quality using the computed metrics above.
 
-### Example: Full Pipeline with Open-Source Scoring
+### Example: Full Pipeline with Open-Source Validation + Scoring
 
 ```bash
+# Recommended: Fully open-source pipeline
 modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "PDL1_opensource" \
     --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
@@ -1237,16 +1285,15 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
     --num-designs 10 \
     --num-cycles 5 \
     --gpu A100 \
-    --use-alphafold3-validation=true \
-    --use-open-scoring=true \
-    --open-scoring-gpu A10G \
+    --validation-model protenix \
+    --scoring-method opensource \
     --max-concurrent 5 \
     --output-dir ./opensource_results
 ```
 
-### Future: Open-Source Structure Validation
+### Protenix: Open-Source Structure Validation
 
-We are also working toward replacing AlphaFold3 with open-source alternatives for structural validation. This would enable a fully open-source design pipeline from structure prediction through scoring.
+With `--validation-model protenix`, the pipeline uses [Protenix](https://github.com/bytedance/Protenix) — an open-source reproduction of AlphaFold3 released under the Apache 2.0 license. This enables a **fully open-source design pipeline** from structure prediction through scoring, with no proprietary dependencies.
 
 ---
 

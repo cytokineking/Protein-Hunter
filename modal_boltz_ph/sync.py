@@ -449,9 +449,9 @@ def _save_best_result(output_path: Path, result: Dict):
 
 def _save_af3_result(output_path: Path, result: Dict):
     """
-    Save AF3 validation result to af3_validation/ directory.
+    Save validation result to refolded/ directory.
     
-    Also updates the existing row in best_designs.csv with AF3 metrics.
+    Also updates the existing row in best_designs.csv with validation metrics.
     
     Args:
         output_path: Base output directory
@@ -462,17 +462,17 @@ def _save_af3_result(output_path: Path, result: Dict):
 
     design_id = result.get("design_id", "unknown")
 
-    # Create af3_validation directory
-    af3_dir = output_path / "af3_validation"
-    af3_dir.mkdir(parents=True, exist_ok=True)
+    # Create refolded directory
+    refolded_dir = output_path / "refolded"
+    refolded_dir.mkdir(parents=True, exist_ok=True)
 
     # Save CIF structure
     if result.get("af3_structure"):
-        cif_file = af3_dir / f"{design_id}_af3.cif"
+        cif_file = refolded_dir / f"{design_id}_refolded.cif"
         cif_file.write_text(result["af3_structure"])
 
-    # Append to af3_results.csv (includes af3_ipsae)
-    csv_file = af3_dir / "af3_results.csv"
+    # Append to validation_results.csv (includes af3_ipsae)
+    csv_file = refolded_dir / "validation_results.csv"
     row = {
         "design_id": design_id,
         "af3_iptm": result.get("af3_iptm", 0.0),

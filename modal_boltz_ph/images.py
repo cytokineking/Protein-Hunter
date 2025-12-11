@@ -159,6 +159,109 @@ pyrosetta_image = (
 # sc-rs for shape complementarity, and Biopython for interface residue detection.
 # Modeled after FreeBindCraft's PyRosetta bypass approach.
 
+# =============================================================================
+# PROTENIX VALIDATION IMAGE (open-source AF3 alternative + bundled scoring)
+# =============================================================================
+# Protenix is a trainable PyTorch reproduction of AlphaFold 3 from ByteDance.
+# This image bundles structure prediction with open-source scoring for efficiency.
+# Reference: https://github.com/bytedance/Protenix
+
+protenix_validation_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    # Install system dependencies for Protenix and OpenMM
+    .apt_install(
+        "git",
+        "wget",
+        "build-essential",
+        "cmake",
+        "libopenblas-dev",
+        "libfftw3-dev",
+        # OpenCL support (fallback if CUDA fails)
+        "ocl-icd-opencl-dev",
+        "opencl-headers",
+    )
+    # Install Miniforge (conda-forge only, no Anaconda TOS required)
+    .run_commands(
+        "wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O /tmp/miniforge.sh",
+        "bash /tmp/miniforge.sh -b -p /opt/conda",
+        "rm /tmp/miniforge.sh",
+        "echo 'export PATH=/opt/conda/bin:$PATH' >> /root/.bashrc",
+    )
+    # Install OpenMM with CUDA support via conda-forge
+    .run_commands(
+        "/opt/conda/bin/conda install -y openmm cudatoolkit pdbfixer",
+        "/opt/conda/bin/python -c 'import openmm; print(f\"OpenMM {openmm.__version__} installed\")'",
+    )
+    # Install Protenix and dependencies
+    .run_commands(
+        # Core ML dependencies
+        "/opt/conda/bin/pip install --no-cache-dir "
+        "'torch>=2.4.0' "
+        "'numpy>=1.24,<2.0' "
+        "'pandas>=2.0' "
+        "'scipy>=1.11' "
+        # Structure handling
+        "'biopython>=1.83' "
+        "'gemmi>=0.6.3' "
+        # Protenix and its dependencies
+        "'protenix>=0.5.0' "
+        "'einops>=0.7' "
+        "'ml-collections>=0.1.1' "
+        "'dm-tree>=0.1.8' "
+        "'hydra-core>=1.3' "
+        "'pytorch-lightning>=2.0' "
+        "'modelcif>=1.0' "
+        # Open-source scoring dependencies
+        "'freesasa' "
+        "'pyyaml' "
+        "'tqdm' "
+        # Modal runtime dependencies
+        "'typing_extensions' "
+        "'protobuf' "
+        "'grpclib' "
+        "'synchronicity' ",
+    )
+    # Install cuEquivariance for acceleration (optional but recommended)
+    .run_commands(
+        "pip install cuequivariance-torch cuequivariance-ops-torch-cu12 || echo 'cuEquivariance not available, using fallback'",
+    )
+    # Note: Protenix weights are stored on a Modal volume (protenix_weights_volume)
+    # This avoids slow downloads at runtime and allows sharing across containers.
+    # Weights are auto-downloaded on first use via ensure_protenix_weights() in validation_protenix.py
+    .run_commands(
+        # Create cache directory (weights will be symlinked from volume at runtime)
+        "mkdir -p /root/.cache/protenix",
+    )
+    # Add protein-hunter utils (includes pre-compiled FASPR, sc-rs binaries)
+    .add_local_dir("utils", "/root/protein_hunter/utils", copy=True)
+    # Make binaries executable
+    .run_commands(
+        "chmod +x /root/protein_hunter/utils/opensource_scoring/FASPR",
+        "chmod +x /root/protein_hunter/utils/opensource_scoring/sc",
+        "ls -la /root/protein_hunter/utils/opensource_scoring/",
+    )
+    # Set environment variables
+    # NOTE: fast_layernorm requires CUDA development headers for JIT compilation.
+    # Since conda's cudatoolkit only provides runtime libraries (not headers),
+    # we use torch layernorm. The v0.7.0 optimizations (tf32, efficient_fusion,
+    # shared_vars_cache) still provide significant speedup without custom kernels.
+    .env({
+        "PATH": "/opt/conda/bin:$PATH",
+        "FASPR_BIN": "/root/protein_hunter/utils/opensource_scoring/FASPR",
+        "SC_RS_BIN": "/root/protein_hunter/utils/opensource_scoring/sc",
+        "FREESASA_CONFIG": "/root/protein_hunter/utils/opensource_scoring/freesasa_naccess.cfg",
+        "OPENMM_DEFAULT_PLATFORM": "CUDA",
+        # Protenix environment
+        "PROTENIX_CACHE_DIR": "/root/.cache/protenix",
+        # CUDA paths (runtime only - no dev headers available via conda)
+        "CUDA_HOME": "/usr/local/cuda",
+        "CUDA_PATH": "/usr/local/cuda",
+        # Use torch layernorm (fast_layernorm requires CUDA dev headers for JIT compilation)
+        "LAYERNORM_TYPE": "torch",
+    })
+)
+
+
 opensource_scoring_image = (
     modal.Image.debian_slim(python_version="3.11")
     # Install system dependencies for OpenMM and compilation

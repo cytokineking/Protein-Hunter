@@ -1,27 +1,13 @@
 #!/usr/bin/env python3
 """
-Modal Boltz Protein Hunter CLI
+Modal Boltz Protein Hunter CLI - Design protein binders on Modal GPUs.
 
-This is the main entry point for running the Protein Hunter design pipeline on Modal.
+Quick Start:
+    modal run modal_boltz_ph_cli.py::init_cache                    # Run once
+    modal run modal_boltz_ph_cli.py::run_pipeline --help           # See all options
+    modal run modal_boltz_ph_cli.py::run_pipeline --name "test" --protein-seqs "AFTVTVPK..."
 
-Usage:
-    # Initialize cache (run once)
-    modal run modal_boltz_ph_cli.py::init_cache
-    
-    # Upload AF3 weights (if using AF3 validation)
-    modal run modal_boltz_ph_cli.py::upload_af3_weights --weights-path ~/AF3/af3.bin.zst
-    
-    # Run design pipeline
-    modal run modal_boltz_ph_cli.py::run_pipeline \\
-        --name "PDL1_binder" \\
-        --protein-seqs "AFTVTVPK..." \\
-        --num-designs 5
-    
-    # List available GPUs
-    modal run modal_boltz_ph_cli.py::list_gpus
-    
-    # Test connection
-    modal run modal_boltz_ph_cli.py::test_connection
+See run_pipeline docstring for full documentation and examples.
 """
 
 import datetime
@@ -55,6 +41,16 @@ from modal_boltz_ph.validation_af3 import (
     run_af3_single_A100_80GB,
     run_af3_apo_A100_80GB,
 )
+from modal_boltz_ph.validation_protenix import (
+    PROTENIX_GPU_FUNCTIONS,
+    DEFAULT_PROTENIX_GPU,
+    run_protenix_validation_A100,
+)
+from modal_boltz_ph.validation import (
+    get_validation_function,
+    get_default_validation_gpu,
+    validate_model_gpu_combination,
+)
 from modal_boltz_ph.scoring_pyrosetta import (
     run_pyrosetta_single,
     configure_verbose as configure_pyrosetta_verbose,
@@ -82,51 +78,28 @@ from modal_boltz_ph.helpers import (
 )
 
 
-# =============================================================================
-# CSV COLUMN DEFINITIONS
-# =============================================================================
-
-# Fields to exclude from CSV outputs (large data or internal fields)
+# CSV column definitions (af3_* prefix used for both AF3 and Protenix validation)
 CSV_EXCLUDE = {
     "relaxed_pdb", "_target_msas", "af3_confidence_json", "af3_structure",
     "apo_structure", "best_pdb", "cycles", "target_msas"
 }
 
-# Unified column schema for best_designs, accepted_stats, and rejected_stats CSVs
-# These three CSVs use identical columns for consistency
 UNIFIED_DESIGN_COLUMNS = [
-    # Identity
     "design_id", "design_num", "cycle",
-    # Binder info
     "binder_sequence", "binder_length", "cyclic", "alanine_count", "alanine_pct",
-    # Boltz design metrics (prefixed for clarity)
     "boltz_iptm", "boltz_ipsae", "boltz_plddt", "boltz_iplddt",
-    # AF3 validation metrics
     "af3_iptm", "af3_ipsae", "af3_ptm", "af3_plddt",
-    # PyRosetta interface metrics
     "interface_dG", "interface_sc", "interface_nres", "interface_dSASA",
     "interface_packstat", "interface_hbonds", "interface_delta_unsat_hbonds",
-    # Secondary quality metrics
     "apo_holo_rmsd", "i_pae", "rg",
-    # Acceptance status
     "accepted", "rejection_reason",
-    # Hotspot/template traceability
     "contact_residues", "contact_residues_auth", "template_first_residue",
 ]
 
 
-# =============================================================================
-# LOCAL ENTRYPOINTS
-# =============================================================================
-
 @app.local_entrypoint()
 def upload_af3_weights(weights_path: str):
-    """
-    Upload AlphaFold3 weights to Modal volume.
-    
-    Usage:
-        modal run modal_boltz_ph_cli.py::upload_af3_weights --weights-path ~/AF3/af3.bin.zst
-    """
+    """Upload AlphaFold3 weights to Modal volume."""
     import subprocess as sp
     
     weights_file = Path(weights_path).expanduser()
@@ -169,13 +142,7 @@ def upload_af3_weights(weights_path: str):
 
 @app.local_entrypoint()
 def init_cache():
-    """
-    Initialize the cache (download model weights).
-    Run this ONCE before using the pipeline.
-    
-    Usage:
-        modal run modal_boltz_ph_cli.py::init_cache
-    """
+    """Initialize the cache (download model weights). Run once before using the pipeline."""
     print("Initializing Protein Hunter cache...")
     result = initialize_cache.remote()
     print(result)
@@ -232,11 +199,15 @@ def run_pipeline(
     output_dir: Optional[str] = None,
     no_stream: str = "false",
     sync_interval: float = 5.0,
-    # AF3 Validation (optional)
+    # Validation options (see docstring for details)
+    validation_model: str = "none",
+    scoring_method: str = "pyrosetta",
+    validation_gpu: Optional[str] = None,
+    use_msa_for_validation: str = "true",
+    # Deprecated flags (still work, emit warnings)
     use_alphafold3_validation: str = "false",
     use_msa_for_af3: str = "true",
     af3_gpu: str = "A100-80GB",
-    # Open-source scoring (PyRosetta-free alternative)
     use_open_scoring: str = "false",
     open_scoring_gpu: str = DEFAULT_OPENSOURCE_GPU,
     # Verbosity
@@ -245,93 +216,73 @@ def run_pipeline(
     """
     Run the Protein Hunter design pipeline on Modal.
     
-    Examples:
-        # Basic protein binder design (alanine_bias is ON by default)
-        modal run modal_boltz_ph_cli.py::run_pipeline \\
-            --name "PDL1_binder" \\
-            --protein-seqs "AFTVTVPK..." \\
-            --num-designs 5 \\
-            --num-cycles 7
-        
-        # With template (auto-extracts sequence if no gaps)
-        modal run modal_boltz_ph_cli.py::run_pipeline \\
-            --name "CD33_binder" \\
-            --template-path "CD33_69R.pdb" \\
-            --template-cif-chain-id "B" \\
-            --contact-residues "69" \\
-            --use-auth-numbering \\
-            --num-designs 10
-        
-        # With AF3 validation (PyRosetta runs automatically for protein targets)
-        modal run modal_boltz_ph_cli.py::run_pipeline \\
-            --name "PDL1_validated" \\
-            --protein-seqs "AFTVTVPK..." \\
-            --num-designs 3 \\
-            --use-alphafold3-validation
-        
-        # With hotspots (canonical numbering - default)
-        modal run modal_boltz_ph_cli.py::run_pipeline \\
-            --name "PDL1_hotspot" \\
-            --protein-seqs "AFTVTVPK..." \\
-            --contact-residues "54,56,115" \\
-            --num-designs 3
-        
-        # Small molecule binder
-        modal run modal_boltz_ph_cli.py::run_pipeline \\
-            --name "SAM_binder" \\
-            --ligand-ccd "SAM" \\
-            --num-designs 5
-        
-        # Multi-chain pMHC target (hotspots on peptide chain C)
-        modal run modal_boltz_ph_cli.py::run_pipeline \\
-            --name "pMHC_TCRm" \\
-            --template-path "pmhc_complex.pdb" \\
-            --template-cif-chain-id "A,B,C" \\
-            --contact-residues "||1,2,3,4,5,6,7,8,9" \\
-            --use-auth-numbering \\
-            --num-designs 20
+    EXAMPLES
+    --------
+    # Basic design (no validation)
+    modal run modal_boltz_ph_cli.py::run_pipeline \\
+        --name "PDL1_binder" --protein-seqs "AFTVTVPK..." --num-designs 5
+
+    # With Protenix validation (RECOMMENDED - fully open-source)
+    modal run modal_boltz_ph_cli.py::run_pipeline \\
+        --name "PDL1_open" --protein-seqs "AFTVTVPK..." \\
+        --validation-model protenix --scoring-method opensource
+
+    # With AF3 validation (requires weights upload first)
+    modal run modal_boltz_ph_cli.py::run_pipeline \\
+        --name "PDL1_af3" --protein-seqs "AFTVTVPK..." \\
+        --validation-model af3 --validation-gpu A100-80GB
+
+    # With template and hotspots (PDB numbering)
+    modal run modal_boltz_ph_cli.py::run_pipeline \\
+        --name "CD33" --template-path "CD33.pdb" --template-cif-chain-id "B" \\
+        --contact-residues "69,72" --use-auth-numbering
+
+    # Small molecule binder
+    modal run modal_boltz_ph_cli.py::run_pipeline \\
+        --name "SAM_binder" --ligand-ccd "SAM" --num-designs 5
     
-    Hotspot Numbering:
-        --contact-residues "69,72,115"     # Canonical (1-indexed, default)
-        --contact-residues "69,72,115" --use-auth-numbering  # PDB/auth numbering
-        
-        For multi-chain targets, use | separator:
-        --contact-residues "54,56|115"     # Chain B: 54,56; Chain C: 115
-        --contact-residues "||1,2,3"       # Only chain C (third chain)
-    
-    Template Auto-Extraction:
-        When --template-path is provided without --protein-seqs:
-        - CIF: Extracts full sequence from _entity_poly_seq
-        - PDB: Parses residues; errors if gaps detected
-        
-        If gaps are detected, you must provide --protein-seqs with the full sequence.
-    
-    AF3 Validation:
-        First upload weights: modal run modal_boltz_ph_cli.py::upload_af3_weights --weights-path ~/AF3/af3.bin.zst
-        Then use --use-alphafold3-validation flag
+    VALIDATION & SCORING
+    --------------------
+    --validation-model {none,af3,protenix}
+        - none: Design only (default)
+        - protenix: Open-source AF3 reproduction (recommended)
+        - af3: AlphaFold3 (requires weights - see AF3 SETUP)
 
-        MSA reuse (default: True):
-            --use-msa-for-af3=true   Reuse MSAs from design phase (recommended)
-            --use-msa-for-af3=false  Query-only for all chains (faster, less accurate)
+    --scoring-method {pyrosetta,opensource}
+        - opensource: OpenMM + FreeSASA (no license needed)
+        - pyrosetta: Full PyRosetta scoring
 
-        PyRosetta filtering runs automatically for protein targets when AF3 validation is enabled.
+    --validation-gpu: A100 (protenix default), A100-80GB (af3 default)
+    --use-msa-for-validation: Reuse MSAs from design phase (default: true)
 
-    Open-Source Scoring (PyRosetta-free):
-        Use --use-open-scoring instead of PyRosetta for interface scoring.
-        This uses GPU-accelerated OpenMM relaxation + FreeSASA/sc-rs for scoring.
+    HOTSPOT NUMBERING
+    -----------------
+    --contact-residues "69,72,115"                        # Canonical (1-indexed)
+    --contact-residues "69,72" --use-auth-numbering       # PDB/auth numbering
+    --contact-residues "54,56|115"                        # Multi-chain (| separator)
+    --contact-residues "||1,2,3"                          # Third chain only
 
-        Example:
-            modal run modal_boltz_ph_cli.py::run_pipeline \\
-                --name "PDL1_open" \\
-                --protein-seqs "AFTVTVPK..." \\
-                --use-alphafold3-validation \\
-                --use-open-scoring \\
-                --open-scoring-gpu A10G
+    TEMPLATE AUTO-EXTRACTION
+    ------------------------
+    When --template-path is provided without --protein-seqs:
+    - CIF: Extracts full sequence from _entity_poly_seq
+    - PDB: Parses residues; errors if gaps detected
+    Provide --protein-seqs with full sequence if gaps are detected.
 
-        Note: Some metrics (binder_score, interface_dG, interface_hbonds, BUNS) use
-        placeholder values that pass filters. This matches FreeBindCraft's approach.
+    AF3 SETUP
+    ---------
+    Required only for --validation-model=af3:
+        modal run modal_boltz_ph_cli.py::upload_af3_weights --weights-path ~/AF3/af3.bin.zst
+
+    DEPRECATED FLAGS
+    ----------------
+    --use-alphafold3-validation → --validation-model=af3
+    --use-open-scoring          → --scoring-method=opensource
+    --use-msa-for-af3           → --use-msa-for-validation
+    --af3-gpu / --open-scoring-gpu → --validation-gpu
     """
     import base64
+    import warnings
     import pandas as pd
     
     # Convert string boolean parameters to actual booleans
@@ -346,29 +297,74 @@ def run_pipeline(
     no_stream = str2bool(no_stream)
     use_alphafold3_validation = str2bool(use_alphafold3_validation)
     use_msa_for_af3 = str2bool(use_msa_for_af3)
+    use_msa_for_validation = str2bool(use_msa_for_validation)
     use_open_scoring = str2bool(use_open_scoring)
     verbose = str2bool(verbose)
     
     # Configure verbose logging for scoring modules
     configure_opensource_verbose(verbose)
     configure_pyrosetta_verbose(verbose)
+    
+    # Handle deprecated flags
+    # --use-alphafold3-validation (deprecated)
+    if use_alphafold3_validation and validation_model == "none":
+        warnings.warn(
+            "--use-alphafold3-validation is deprecated. "
+            "Use --validation-model=af3 instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        validation_model = "af3"
+    
+    # Handle --use-open-scoring (deprecated)
+    if use_open_scoring and scoring_method == "pyrosetta":
+        warnings.warn(
+            "--use-open-scoring is deprecated. "
+            "Use --scoring-method=opensource instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        scoring_method = "opensource"
+    
+    # Handle --af3-gpu (deprecated, but only if using af3)
+    if validation_model == "af3" and validation_gpu is None:
+        validation_gpu = af3_gpu
+    
+    # Handle --open-scoring-gpu (deprecated)
+    if validation_model == "af3" and scoring_method == "opensource" and validation_gpu is None:
+        validation_gpu = open_scoring_gpu
+    
+    # Handle --use-msa-for-af3 (deprecated)
+    if not use_msa_for_af3:
+        use_msa_for_validation = False
+    
+    # Set default validation GPU if not specified
+    if validation_model != "none" and validation_gpu is None:
+        validation_gpu = get_default_validation_gpu(validation_model)
+    
+    # Validate GPU selection
+    if validation_model != "none":
+        is_valid, error_msg = validate_model_gpu_combination(validation_model, validation_gpu)
+        if not is_valid:
+            print(f"Error: {error_msg}")
+            return
+    
+    # Determine if validation is enabled
+    validation_enabled = validation_model != "none"
 
-    # Smart MSA mode default based on template and AF3 validation
-    # - Template provided + no AF3 validation: skip MSAs (Boltz has template, no AF3 needs)
-    # - Template provided + AF3 validation: compute MSAs (AF3 needs them)
+    # Smart MSA mode default based on template and validation
+    # - Template provided + no validation: skip MSAs (Boltz has template, no validation needs)
+    # - Template provided + validation enabled: compute MSAs (AF3/Protenix need them)
     # - No template: compute MSAs (Boltz needs them)
-    if template_path and msa_mode == "mmseqs" and not use_alphafold3_validation:
-        print("Note: Template provided without AF3 validation - switching to --msa-mode single")
+    if template_path and msa_mode == "mmseqs" and not validation_enabled:
+        print("Note: Template provided without validation - switching to --msa-mode single")
         print("      (Boltz uses template structure; MSAs not needed)\n")
         msa_mode = "single"
     
     stream = not no_stream
     run_id = f"{name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    # ===========================================================================
-    # TEMPLATE ANALYSIS AND SEQUENCE AUTO-EXTRACTION
-    # ===========================================================================
-    
+    # Template analysis and sequence auto-extraction
     template_content = ""
     template_analysis = None
     contact_residues_canonical = contact_residues  # Will be converted if using auth numbering
@@ -508,11 +504,7 @@ def run_pipeline(
         # Encode template for upload
         template_content = base64.b64encode(template_bytes).decode('utf-8')
     
-    # ===========================================================================
-    # INPUT VALIDATION
-    # ===========================================================================
-    
-    # Validate inputs - protein_seqs may have been auto-extracted above
+    # Validate inputs (protein_seqs may have been auto-extracted above)
     if not any([protein_seqs, ligand_ccd, ligand_smiles, nucleic_seq]):
         print("Error: Must provide at least one target (--protein-seqs, --ligand-ccd, --ligand-smiles, or --nucleic-seq)")
         return
@@ -552,11 +544,10 @@ def run_pipeline(
             print(f"Hotspots: {contact_residues_canonical}")
     print(f"MSA mode: {msa_mode}")
     print(f"Alanine bias: {alanine_bias}")
-    if use_alphafold3_validation:
-        scoring_mode = "Open-source (OpenMM + FreeSASA)" if use_open_scoring else "PyRosetta"
-        print(f"Scoring: {scoring_mode}")
-        if use_open_scoring:
-            print(f"Open scoring GPU: {open_scoring_gpu}")
+    if validation_enabled:
+        print(f"Validation: {validation_model} on {validation_gpu}")
+        scoring_display = "open-source (OpenMM + FreeSASA)" if scoring_method == "opensource" else "PyRosetta"
+        print(f"Scoring: {scoring_display}")
     print(f"{'='*70}\n")
     
     # Build template metadata for CSV output
@@ -565,9 +556,7 @@ def run_pipeline(
         for chain_id, chain_data in template_analysis["chains"].items():
             template_first_residues[chain_id] = chain_data["first_auth_residue"]
     
-    # ===========================================================================
-    # PRE-COMPUTE MSAs (once, before dispatching parallel design tasks)
-    # ===========================================================================
+    # Pre-compute MSAs (once, before dispatching parallel design tasks)
     precomputed_msas = {}
     if msa_mode == "mmseqs" and protein_seqs:
         # Get unique sequences to avoid redundant API calls
@@ -662,18 +651,26 @@ def run_pipeline(
     
     # ==========================================================================
     # END-TO-END PER-DESIGN ORCHESTRATION
-    # Each design completes: Boltz → AF3 → APO → PyRosetta before next slot freed
+    # Each design completes: Boltz → Validation → Scoring before next slot freed
     # ==========================================================================
     
-    # Select AF3 functions (if needed)
-    af3_gpu_to_use = gpu if gpu in AF3_GPU_FUNCTIONS else "A100-80GB"
+    # Select validation functions (if needed)
+    # For AF3, we still use the individual function approach for fine-grained control
+    # For Protenix with opensource scoring, we use the bundled approach
+    af3_gpu_to_use = validation_gpu if validation_model == "af3" else (gpu if gpu in AF3_GPU_FUNCTIONS else "A100-80GB")
     af3_fn = AF3_GPU_FUNCTIONS.get(af3_gpu_to_use, run_af3_single_A100_80GB)
     af3_apo_fn = AF3_APO_GPU_FUNCTIONS.get(af3_gpu_to_use, run_af3_apo_A100_80GB)
     
+    # For Protenix, select the appropriate GPU function
+    protenix_gpu_to_use = validation_gpu if validation_model == "protenix" else DEFAULT_PROTENIX_GPU
+    protenix_fn = PROTENIX_GPU_FUNCTIONS.get(protenix_gpu_to_use, run_protenix_validation_A100)
+    
     def _run_full_pipeline_for_design(task_input: dict) -> dict:
         """
-        Run complete pipeline for one design: Boltz → AF3 → APO → PyRosetta.
+        Run complete pipeline for one design: Boltz → Validation → APO → Scoring.
         
+        Validation can be AF3 or Protenix (set via --validation-model).
+        Scoring can be PyRosetta or open-source (set via --scoring-method).
         All stages run sequentially for this design before the thread is freed.
         """
         design_idx = task_input.get("design_idx", 0)
@@ -724,13 +721,13 @@ def run_pipeline(
                 },
             )
         
-        # If no AF3 validation requested, return design result only
-        if not use_alphafold3_validation:
+        # If no validation requested, return design result only
+        if not validation_enabled:
             return design_result
         
-        # Skip AF3 validation if no valid design was found (best_seq is None/empty)
+        # Skip validation if no valid design was found (best_seq is None/empty)
         if not best_seq:
-            print(f"  [{design_id}] Skipping AF3 validation: no valid design (all cycles had alanine >20%)")
+            print(f"  [{design_id}] Skipping validation: no valid design (all cycles had alanine >20%)")
             return {
                 **design_result,
                 "design_id": design_id,
@@ -738,7 +735,7 @@ def run_pipeline(
                 "rejection_reason": "no cycle passed alanine threshold (≤20%)",
             }
         
-        # Skip AF3 validation if Boltz metrics don't meet thresholds
+        # Skip validation if Boltz metrics don't meet thresholds
         boltz_iptm = design_result.get("best_iptm", 0.0)
         boltz_plddt = design_result.get("best_plddt", 0.0)
         
@@ -752,7 +749,7 @@ def run_pipeline(
             if not plddt_ok:
                 failure_reasons.append(f"pLDDT {boltz_plddt:.2f} < {high_plddt_threshold}")
             rejection_reason = "; ".join(failure_reasons)
-            print(f"  [{design_id}] Skipping AF3 validation: {rejection_reason}")
+            print(f"  [{design_id}] Skipping validation: {rejection_reason}")
             return {
                 **design_result,
                 "design_id": design_id,
@@ -760,34 +757,130 @@ def run_pipeline(
                 "rejection_reason": rejection_reason,
             }
         
-        # ========== STAGE 2: AF3 VALIDATION ==========
+        # ========== STAGE 2: STRUCTURE VALIDATION ==========
+        # Validates the designed complex using AF3 or Protenix (open-source)
         binder_seq = best_seq
         target_seq = task_input.get("protein_seqs", "")
-        target_msas = design_result.get("target_msas", {}) if use_msa_for_af3 else {}
+        target_msas = design_result.get("target_msas", {}) if use_msa_for_validation else {}
 
-        print(f"  [{design_id}] Starting AF3 validation...")
+        print(f"  [{design_id}] Starting {validation_model.upper()} validation...")
         
-        # Get template info from task_input for AF3 validation
+        # Get template info from task_input for validation
         task_template_content = task_input.get("template_content", "")
         task_template_chain_ids = task_input.get("template_chain_ids", "")
         
-        try:
-            af3_result = af3_fn.remote(
-                design_id, binder_seq, target_seq,
-                "A", "B",  # binder_chain, starting target_chain
-                target_msas,  # Full dict of chain_id -> MSA content
-                "reuse" if use_msa_for_af3 else "none",
-                task_template_content if task_template_content else None,      # base64-encoded template
-                task_template_chain_ids if task_template_content else None     # chain IDs
-            )
-        except Exception as e:
-            print(f"  [{design_id}] AF3 failed: {e}")
-            return {**design_result, "design_id": design_id, "af3_error": str(e), "stage_failed": "af3"}
+        validation_result = {}
+        apo_structure = None
         
-        if not af3_result.get("af3_structure"):
-            return {**design_result, "design_id": design_id, **af3_result, "stage_failed": "af3"}
+        if validation_model == "af3":
+            # ===== AF3 VALIDATION =====
+            try:
+                af3_result = af3_fn.remote(
+                    design_id, binder_seq, target_seq,
+                    "A", "B",  # binder_chain, starting target_chain
+                    target_msas,  # Full dict of chain_id -> MSA content
+                    "reuse" if use_msa_for_validation else "none",
+                    task_template_content if task_template_content else None,      # base64-encoded template
+                    task_template_chain_ids if task_template_content else None     # chain IDs
+                )
+            except Exception as e:
+                print(f"  [{design_id}] AF3 failed: {e}")
+                return {**design_result, "design_id": design_id, "af3_error": str(e), "stage_failed": "validation"}
+            
+            if not af3_result.get("af3_structure"):
+                return {**design_result, "design_id": design_id, **af3_result, "stage_failed": "validation"}
+            
+            validation_result = af3_result
+            print(f"  [{design_id}] AF3 complete: ipTM={af3_result.get('af3_iptm', 0):.3f}, ipSAE={af3_result.get('af3_ipsae', 0):.3f}")
+            
+        elif validation_model == "protenix":
+            # ===== PROTENIX VALIDATION =====
+            # Protenix with opensource scoring runs in a single container
+            run_bundled_scoring = (scoring_method == "opensource")
+            
+            try:
+                protenix_result = protenix_fn.remote(
+                    design_id, binder_seq, target_seq,
+                    target_msas,
+                    run_scoring=run_bundled_scoring,  # Bundled scoring if opensource
+                    verbose=verbose,
+                )
+            except Exception as e:
+                print(f"  [{design_id}] Protenix failed: {e}")
+                return {**design_result, "design_id": design_id, "protenix_error": str(e), "stage_failed": "validation"}
+            
+            if not protenix_result.get("af3_structure"):
+                return {**design_result, "design_id": design_id, **protenix_result, "stage_failed": "validation"}
+            
+            validation_result = protenix_result
+            apo_structure = protenix_result.get("apo_structure")
+            
+            # Log results
+            iptm = protenix_result.get("af3_iptm", protenix_result.get("protenix_iptm", 0))
+            ipsae = protenix_result.get("af3_ipsae", protenix_result.get("protenix_ipsae", 0))
+            print(f"  [{design_id}] Protenix complete: ipTM={iptm:.3f}, ipSAE={ipsae:.3f}")
+            
+            # If bundled scoring was used, we can skip stages 3 and 4
+            if run_bundled_scoring:
+                # Stream AF3 result (Protenix outputs are aliased to af3_* for compatibility)
+                if stream:
+                    _stream_af3_result(
+                        run_id=run_id,
+                        design_idx=design_idx,
+                        design_id=design_id,
+                        af3_iptm=validation_result.get("af3_iptm", 0.0),
+                        af3_ipsae=validation_result.get("af3_ipsae", 0.0),
+                        af3_ptm=validation_result.get("af3_ptm", 0.0),
+                        af3_plddt=validation_result.get("af3_plddt", 0.0),
+                        af3_structure=validation_result.get("af3_structure", ""),
+                    )
+                
+                # Stream final result
+                if stream and target_type == "protein":
+                    _stream_final_result(
+                        run_id=run_id,
+                        design_idx=design_idx,
+                        design_id=design_id,
+                        accepted=validation_result.get("accepted", False),
+                        rejection_reason=validation_result.get("rejection_reason", ""),
+                        metrics={
+                            "interface_dG": validation_result.get("interface_dG", 0.0),
+                            "interface_sc": validation_result.get("interface_sc", 0.0),
+                            "interface_nres": validation_result.get("interface_nres", 0),
+                            "interface_dSASA": validation_result.get("interface_dSASA", 0.0),
+                            "interface_packstat": validation_result.get("interface_packstat", 0.0),
+                            "interface_dG_SASA_ratio": validation_result.get("interface_dG_SASA_ratio", 0.0),
+                            "interface_interface_hbonds": validation_result.get("interface_interface_hbonds", 0),
+                            "interface_delta_unsat_hbonds": validation_result.get("interface_delta_unsat_hbonds", 0),
+                            "interface_hydrophobicity": validation_result.get("interface_hydrophobicity", 0.0),
+                            "surface_hydrophobicity": validation_result.get("surface_hydrophobicity", 0.0),
+                            "binder_sasa": validation_result.get("binder_sasa", 0.0),
+                            "interface_fraction": validation_result.get("interface_fraction", 0.0),
+                            "interface_hbond_percentage": validation_result.get("interface_hbond_percentage", 0.0),
+                            "interface_delta_unsat_hbonds_percentage": validation_result.get("interface_delta_unsat_hbonds_percentage", 0.0),
+                            "apo_holo_rmsd": validation_result.get("apo_holo_rmsd"),
+                            "i_pae": validation_result.get("i_pae"),
+                            "rg": validation_result.get("rg"),
+                        },
+                        relaxed_pdb=validation_result.get("relaxed_pdb", ""),
+                    )
+                
+                # Return combined results (Protenix bundled includes scoring)
+                return {
+                    **design_result,
+                    "design_id": design_id,
+                    "design_num": design_idx,
+                    "cycle": best_cycle,
+                    **validation_result,
+                    "binder_sequence": binder_seq,
+                    "binder_length": len(binder_seq) if binder_seq else 0,
+                    "ipsae": best_cycle_data.get("ipsae", 0.0) if best_cycle_data else 0.0,
+                    "plddt": best_cycle_data.get("plddt", 0.0) if best_cycle_data else 0.0,
+                    "iplddt": best_cycle_data.get("iplddt", 0.0) if best_cycle_data else 0.0,
+                }
         
-        print(f"  [{design_id}] AF3 complete: ipTM={af3_result.get('af3_iptm', 0):.3f}, ipSAE={af3_result.get('af3_ipsae', 0):.3f}")
+        # For AF3, we continue to the APO and scoring stages
+        af3_result = validation_result
         
         # Stream AF3 result
         if stream:
@@ -803,8 +896,8 @@ def run_pipeline(
             )
         
         # ========== STAGE 3: APO PREDICTION (protein targets only) ==========
-        apo_structure = None
-        if target_type == "protein":
+        # Skip if Protenix already generated APO structure
+        if target_type == "protein" and apo_structure is None:
             try:
                 apo_result = af3_apo_fn.remote(design_id, binder_seq, "A")
                 apo_structure = apo_result.get("apo_structure")
@@ -815,16 +908,19 @@ def run_pipeline(
                 print(f"  [{design_id}] APO prediction failed (non-fatal): {e}")
         
         # ========== STAGE 4: INTERFACE SCORING (protein targets only) ==========
-        # Use open-source scoring (OpenMM + FreeSASA) or PyRosetta based on flag
+        # Uses PyRosetta (default) or open-source scoring (OpenMM + FreeSASA)
+        # based on --scoring-method flag
         scoring_result = {"accepted": True}  # Default for non-protein targets
         if target_type == "protein":
-            if use_open_scoring:
+            if scoring_method == "opensource":
                 # Open-source scoring (GPU-accelerated, PyRosetta-free)
+                # Use a smaller GPU for scoring when AF3 uses A100-80GB
+                scoring_gpu_to_use = open_scoring_gpu if validation_model == "af3" else DEFAULT_OPENSOURCE_GPU
                 scoring_fn = OPENSOURCE_SCORING_GPU_FUNCTIONS.get(
-                    open_scoring_gpu,
+                    scoring_gpu_to_use,
                     OPENSOURCE_SCORING_GPU_FUNCTIONS[DEFAULT_OPENSOURCE_GPU]
                 )
-                print(f"  [{design_id}] Running open-source scoring ({open_scoring_gpu})...")
+                print(f"  [{design_id}] Running open-source scoring ({scoring_gpu_to_use})...")
                 try:
                     scoring_result = scoring_fn.remote(
                         design_id,
@@ -924,9 +1020,10 @@ def run_pipeline(
     
     # Execute with concurrency limit
     all_results = []
-    if use_alphafold3_validation:
-        scoring_backend = "OpenMM/FreeSASA" if use_open_scoring else "PyRosetta"
-        pipeline_mode = f"full pipeline (Boltz→AF3→{scoring_backend})"
+    if validation_enabled:
+        validation_name = validation_model.upper()
+        scoring_backend = "OpenMM/FreeSASA" if scoring_method == "opensource" else "PyRosetta"
+        pipeline_mode = f"full pipeline (Boltz→{validation_name}→{scoring_backend})"
     else:
         pipeline_mode = "design only"
     
@@ -934,7 +1031,7 @@ def run_pipeline(
     effective_concurrency = max_concurrent if max_concurrent > 0 else len(tasks)
     concurrency_str = f"{max_concurrent} GPUs" if max_concurrent > 0 else "unlimited"
     
-    if use_alphafold3_validation:
+    if validation_enabled:
         # Full pipeline mode: use ThreadPoolExecutor for sequential per-design orchestration
         print(f"Executing {len(tasks)} tasks [{pipeline_mode}] (concurrency: {concurrency_str})...\n")
         
@@ -978,22 +1075,22 @@ def run_pipeline(
     
     # ==========================================================================
     # UNIFIED RESULT SAVING
-    # Handles both design-only and full pipeline (AF3+PyRosetta) results
+    # Handles design-only, AF3 validation, and Protenix validation results
     # ==========================================================================
     print(f"\nSaving results to {output_path}...")
     
     # Create all directories
     designs_dir = output_path / "designs"
     best_dir = output_path / "best_designs"
-    af3_dir = output_path / "af3_validation"
+    refolded_dir = output_path / "refolded"
     accepted_dir = output_path / "accepted_designs"
     rejected_dir = output_path / "rejected"
     
     designs_dir.mkdir(parents=True, exist_ok=True)
     best_dir.mkdir(exist_ok=True)
     
-    if use_alphafold3_validation:
-        af3_dir.mkdir(exist_ok=True)
+    if validation_enabled:
+        refolded_dir.mkdir(exist_ok=True)
         accepted_dir.mkdir(exist_ok=True)
         rejected_dir.mkdir(exist_ok=True)
     
@@ -1014,20 +1111,20 @@ def run_pipeline(
         if r.get("best_pdb"):
             (best_dir / f"{design_id}.pdb").write_text(r["best_pdb"])
         
-        # Save AF3 structure (if available)
+        # Save refolded structure (if available)
         if r.get("af3_structure"):
-            (af3_dir / f"{design_id}_af3.cif").write_text(r["af3_structure"])
+            (refolded_dir / f"{design_id}_refolded.cif").write_text(r["af3_structure"])
         
-        # Save relaxed PDB to accepted/rejected (if PyRosetta ran)
-        if use_alphafold3_validation and r.get("relaxed_pdb"):
+        # Save relaxed PDB to accepted/rejected (if scoring ran)
+        if validation_enabled and r.get("relaxed_pdb"):
             if r.get("accepted"):
                 (accepted_dir / f"{design_id}_relaxed.pdb").write_text(r["relaxed_pdb"])
                 accepted.append(r)
             else:
                 (rejected_dir / f"{design_id}_relaxed.pdb").write_text(r["relaxed_pdb"])
                 rejected.append(r)
-        elif use_alphafold3_validation and r.get("af3_structure"):
-            # No relaxed PDB but have AF3 structure - still classify
+        elif validation_enabled and r.get("af3_structure"):
+            # No relaxed PDB but have validated structure - still classify
             if r.get("accepted"):
                 accepted.append(r)
             else:
@@ -1050,44 +1147,23 @@ def run_pipeline(
         if template_first_residues:
             tfr_str = ",".join(f"{k}:{v}" for k, v in template_first_residues.items())
         
-        # Build unified row with boltz_ prefix for design-stage metrics
         best_rows.append({
-            # Identity
-            "design_id": design_id,
-            "design_num": design_idx,
-            "cycle": best_cycle,
-            # Binder info
-            "binder_sequence": seq,
-            "binder_length": binder_length,
-            "cyclic": cyclic,
-            "alanine_count": alanine_count,
-            "alanine_pct": round(alanine_pct, 2),
-            # Boltz design metrics (prefixed)
+            "design_id": design_id, "design_num": design_idx, "cycle": best_cycle,
+            "binder_sequence": seq, "binder_length": binder_length, "cyclic": cyclic,
+            "alanine_count": alanine_count, "alanine_pct": round(alanine_pct, 2),
             "boltz_iptm": r.get("best_iptm", 0.0),
             "boltz_ipsae": r.get("ipsae", best_cycle_data.get("ipsae", 0.0) if best_cycle_data else 0.0),
             "boltz_plddt": r.get("plddt", best_cycle_data.get("plddt", 0.0) if best_cycle_data else 0.0),
             "boltz_iplddt": r.get("iplddt", best_cycle_data.get("iplddt", 0.0) if best_cycle_data else 0.0),
-            # AF3 validation metrics
-            "af3_iptm": r.get("af3_iptm"),
-            "af3_ipsae": r.get("af3_ipsae"),
-            "af3_ptm": r.get("af3_ptm"),
-            "af3_plddt": r.get("af3_plddt"),
-            # PyRosetta interface metrics
-            "interface_dG": r.get("interface_dG"),
-            "interface_sc": r.get("interface_sc"),
-            "interface_nres": r.get("interface_nres"),
-            "interface_dSASA": r.get("interface_dSASA"),
+            "af3_iptm": r.get("af3_iptm"), "af3_ipsae": r.get("af3_ipsae"),
+            "af3_ptm": r.get("af3_ptm"), "af3_plddt": r.get("af3_plddt"),
+            "interface_dG": r.get("interface_dG"), "interface_sc": r.get("interface_sc"),
+            "interface_nres": r.get("interface_nres"), "interface_dSASA": r.get("interface_dSASA"),
             "interface_packstat": r.get("interface_packstat"),
             "interface_hbonds": r.get("interface_interface_hbonds"),
             "interface_delta_unsat_hbonds": r.get("interface_delta_unsat_hbonds"),
-            # Secondary quality metrics
-            "apo_holo_rmsd": r.get("apo_holo_rmsd"),
-            "i_pae": r.get("i_pae"),
-            "rg": r.get("rg"),
-            # Acceptance status
-            "accepted": r.get("accepted"),
-            "rejection_reason": r.get("rejection_reason"),
-            # Hotspot/template traceability
+            "apo_holo_rmsd": r.get("apo_holo_rmsd"), "i_pae": r.get("i_pae"), "rg": r.get("rg"),
+            "accepted": r.get("accepted"), "rejection_reason": r.get("rejection_reason"),
             "contact_residues": contact_residues_canonical or "",
             "contact_residues_auth": contact_residues_auth or "",
             "template_first_residue": tfr_str,
@@ -1112,18 +1188,15 @@ def run_pipeline(
     design_pdbs = list(designs_dir.glob("*.pdb"))
     print(f"  ✓ designs/ ({len(design_pdbs)} PDBs)")
     
-    # Save AF3 results CSV (if AF3 ran) - includes af3_ipsae
-    if use_alphafold3_validation:
-        af3_rows = [{"design_id": r.get("design_id"), "af3_iptm": r.get("af3_iptm"),
-                     "af3_ipsae": r.get("af3_ipsae"), "af3_ptm": r.get("af3_ptm"),
-                     "af3_plddt": r.get("af3_plddt")}
-                    for r in all_results if r.get("af3_iptm") is not None]
-        if af3_rows:
-            pd.DataFrame(af3_rows).to_csv(af3_dir / "af3_results.csv", index=False)
-            print(f"  ✓ af3_validation/ ({len(af3_rows)} structures)")
+    if validation_enabled:
+        validation_rows = [{"design_id": r.get("design_id"), "af3_iptm": r.get("af3_iptm"),
+                           "af3_ipsae": r.get("af3_ipsae"), "af3_ptm": r.get("af3_ptm"),
+                           "af3_plddt": r.get("af3_plddt")}
+                          for r in all_results if r.get("af3_iptm") is not None]
+        if validation_rows:
+            pd.DataFrame(validation_rows).to_csv(refolded_dir / "validation_results.csv", index=False)
+            print(f"  ✓ refolded/ ({len(validation_rows)} structures)")
         
-        # Save accepted/rejected CSVs using unified schema (filtered from best_rows)
-        # This ensures identical columns across best_designs, accepted_stats, rejected_stats
         accepted_rows = [row for row in best_rows if row.get("accepted") is True]
         rejected_rows = [row for row in best_rows if row.get("accepted") is False]
         
@@ -1155,13 +1228,14 @@ def run_pipeline(
         best_overall = max(successful, key=lambda r: r.get("best_iptm", 0))
         print(f"Best Boltz ipTM: {name}_d{best_overall['design_idx']} = {best_overall['best_iptm']:.3f}")
     
-    if use_alphafold3_validation:
-        af3_results = [r for r in successful if r.get("af3_iptm") is not None]
-        if af3_results:
-            best_af3 = max(af3_results, key=lambda r: r.get("af3_iptm", 0))
-            print(f"Best AF3 ipTM: {best_af3.get('design_id')} = {best_af3.get('af3_iptm', 0):.3f}")
+    if validation_enabled:
+        validation_results = [r for r in successful if r.get("af3_iptm") is not None]
+        if validation_results:
+            best_val = max(validation_results, key=lambda r: r.get("af3_iptm", 0))
+            val_label = validation_model.upper()
+            print(f"Best {val_label} ipTM: {best_val.get('design_id')} = {best_val.get('af3_iptm', 0):.3f}")
 
-        scoring_label = "Open-source Scoring" if use_open_scoring else "PyRosetta Filtering"
+        scoring_label = "Open-source Scoring" if scoring_method == "opensource" else "PyRosetta Filtering"
         print(f"\n{scoring_label}:")
         print(f"  Accepted: {len(accepted)}")
         print(f"  Rejected: {len(rejected)}")
@@ -1174,11 +1248,12 @@ def run_pipeline(
                       f"RMSD={r.get('apo_holo_rmsd', 'N/A')}")
     
     print(f"\nOutput: {output_path}/")
-    if use_alphafold3_validation:
-        filter_label = "open-source" if use_open_scoring else "PyRosetta"
+    if validation_enabled:
+        filter_label = "open-source" if scoring_method == "opensource" else "PyRosetta"
+        val_label = validation_model.upper()
         print("  ├── designs/           # All cycles from Boltz")
         print("  ├── best_designs/      # Best cycle per design (Boltz PDBs)")
-        print("  ├── af3_validation/    # AF3 predicted structures")
+        print(f"  ├── refolded/          # {val_label} refolded structures")
         print(f"  ├── accepted_designs/  # Passed {filter_label} filters (relaxed PDBs)")
         print(f"  └── rejected/          # Failed {filter_label} filters")
     else:

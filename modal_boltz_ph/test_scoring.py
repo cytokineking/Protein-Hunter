@@ -6,7 +6,7 @@ AF3 validation outputs, without running the full Boltz → AF3 pipeline.
 
 Usage:
     modal run modal_boltz_ph/test_scoring.py::test_scoring \
-        --input-dir ./modal_results/PDL1_open_test3/af3_validation \
+        --input-dir ./modal_results/PDL1_open_test3/refolded \
         --compare-pyrosetta true \
         --output-dir ./scoring_test_results
 
@@ -54,7 +54,7 @@ def load_af3_results(input_dir: str) -> List[Dict[str, Any]]:
     Load AF3 results from a validation directory.
     
     Args:
-        input_dir: Path to af3_validation directory
+        input_dir: Path to refolded directory
         
     Returns:
         List of dicts with design_id, af3_iptm, af3_ptm, af3_plddt, cif_path
@@ -135,7 +135,7 @@ def test_scoring(
     existing AF3 validation outputs from prior runs.
     
     Args:
-        input_dir: Path to af3_validation directory from a prior run
+        input_dir: Path to refolded directory from a prior run
         output_dir: Where to save comparison results and relaxed PDBs
         compare_pyrosetta: Also run PyRosetta scoring for comparison
         open_scoring_gpu: GPU type for open-source scoring (default: A10G)
@@ -147,7 +147,7 @@ def test_scoring(
     
     Example:
         modal run modal_boltz_ph/test_scoring.py::test_scoring \\
-            --input-dir ./modal_results/PDL1_open_test3/af3_validation \\
+            --input-dir ./modal_results/PDL1_open_test3/refolded \\
             --compare-pyrosetta true \\
             --output-dir ./scoring_test_results \\
             --verbose
@@ -411,7 +411,7 @@ def test_single(
     
     Example:
         modal run modal_boltz_ph/test_scoring.py::test_single \\
-            --cif-path ./modal_results/PDL1_open_test3/af3_validation/PDL1_open_test3_d1_c5_af3.cif \\
+            --cif-path ./modal_results/PDL1_open_test3/refolded/PDL1_open_test3_d1_c5_refolded.cif \\
             --compare-pyrosetta true
     """
     print("\n" + "=" * 70)
@@ -522,7 +522,7 @@ def test_sasa(
     a detailed comparison to help validate/debug SASA calculations.
     
     Args:
-        input_dir: Path to af3_validation directory from a prior run
+        input_dir: Path to refolded directory from a prior run
         output_dir: Where to save comparison results
         binder_chain: Chain ID of binder (default: A)
         target_chain: Chain ID of target (default: B)
@@ -530,7 +530,7 @@ def test_sasa(
     
     Example:
         modal run modal_boltz_ph/test_scoring.py::test_sasa \\
-            --input-dir ./modal_results/PDL1_open_test5/af3_validation \\
+            --input-dir ./modal_results/PDL1_open_test5/refolded \\
             --output-dir ./sasa_comparison_results
     """
     print("\n" + "=" * 70)
