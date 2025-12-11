@@ -262,6 +262,108 @@ protenix_validation_image = (
 )
 
 
+# =============================================================================
+# OPENFOLD3 VALIDATION IMAGE (open-source AF3 alternative + bundled scoring)
+# =============================================================================
+# OpenFold3 is an open-source reproduction of AlphaFold3 from the AlQuraishi Lab
+# at Columbia University. Apache 2.0 licensed, fully open for commercial use.
+# Reference: https://github.com/aqlaboratory/openfold-3
+
+openfold3_validation_image = (
+    # Use CUDA-enabled base image with development tools
+    modal.Image.from_registry(
+        "nvidia/cuda:12.1.1-devel-ubuntu22.04",
+        add_python="3.11"
+    )
+    .apt_install(
+        "git", "wget", "build-essential", "cmake",
+        "libopenblas-dev", "libfftw3-dev",
+        "ocl-icd-opencl-dev", "opencl-headers",
+        # X11 libraries required by RDKit Draw module
+        "libxrender1", "libxext6", "libx11-6",
+    )
+    # Install Miniforge for conda-forge packages
+    .run_commands(
+        "wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O /tmp/miniforge.sh",
+        "bash /tmp/miniforge.sh -b -p /opt/conda",
+        "rm /tmp/miniforge.sh",
+    )
+    # Install OpenMM with CUDA support and kalign2 for MSA processing
+    .run_commands(
+        "/opt/conda/bin/conda install -y openmm cudatoolkit pdbfixer kalign2 -c bioconda -c conda-forge",
+    )
+    # Install OpenFold3 WITH cuEquivariance for optimized kernels
+    .run_commands(
+        "/opt/conda/bin/pip install --no-cache-dir "
+        "'openfold3[cuequivariance]>=0.3.0' "
+        "'torch>=2.4.0' "
+        "'numpy>=1.24,<2.0' "
+        "'pandas>=2.0' "
+        "'scipy>=1.11' "
+        "'biopython>=1.83' "
+        "'gemmi>=0.6.3' "
+        "'biotite>=1.1.0' "
+        "'freesasa' "
+        "'pyyaml' "
+        "'tqdm' "
+        # Modal runtime dependencies
+        "'typing_extensions' "
+        "'protobuf' "
+        "'grpclib' "
+        "'synchronicity' ",
+    )
+    # Create necessary directories and set up environment
+    .run_commands(
+        "mkdir -p /root/.triton/autotune",
+        "mkdir -p /root/.cache/openfold3",
+    )
+    # Create runner config for optimized inference with PAE enabled and ColabFold MSA settings
+    .run_commands(
+        "mkdir -p /root/openfold3_config",
+        "echo 'model_update:' > /root/openfold3_config/runner.yaml",
+        "echo '  presets:' >> /root/openfold3_config/runner.yaml",
+        "echo '    - predict' >> /root/openfold3_config/runner.yaml",
+        "echo '    - pae_enabled' >> /root/openfold3_config/runner.yaml",
+        "echo '  custom:' >> /root/openfold3_config/runner.yaml",
+        "echo '    settings:' >> /root/openfold3_config/runner.yaml",
+        "echo '      memory:' >> /root/openfold3_config/runner.yaml",
+        "echo '        eval:' >> /root/openfold3_config/runner.yaml",
+        "echo '          use_cueq_triangle_kernels: true' >> /root/openfold3_config/runner.yaml",
+        "echo '          use_deepspeed_evo_attention: true' >> /root/openfold3_config/runner.yaml",
+        # MSA settings for precomputed ColabFold MSAs
+        "echo 'dataset_config_kwargs:' >> /root/openfold3_config/runner.yaml",
+        "echo '  msa:' >> /root/openfold3_config/runner.yaml",
+        "echo '    aln_order:' >> /root/openfold3_config/runner.yaml",
+        "echo '      - colabfold_main' >> /root/openfold3_config/runner.yaml",
+        "echo '    max_seq_counts:' >> /root/openfold3_config/runner.yaml",
+        "echo '      colabfold_main: 16384' >> /root/openfold3_config/runner.yaml",
+        # Disable paired MSA creation since our precomputed MSAs may not have species info
+        "echo '    msas_to_pair: []' >> /root/openfold3_config/runner.yaml",
+    )
+    # Add scoring utilities (FASPR, sc-rs binaries)
+    .add_local_dir("utils", "/root/protein_hunter/utils", copy=True)
+    .run_commands(
+        "chmod +x /root/protein_hunter/utils/opensource_scoring/FASPR",
+        "chmod +x /root/protein_hunter/utils/opensource_scoring/sc",
+    )
+    .env({
+        "PATH": "/opt/conda/bin:/usr/local/cuda/bin:$PATH",
+        "OPENFOLD_CACHE": "/openfold3_weights",
+        "FASPR_BIN": "/root/protein_hunter/utils/opensource_scoring/FASPR",
+        "SC_RS_BIN": "/root/protein_hunter/utils/opensource_scoring/sc",
+        "FREESASA_CONFIG": "/root/protein_hunter/utils/opensource_scoring/freesasa_naccess.cfg",
+        "OPENMM_DEFAULT_PLATFORM": "CUDA",
+        # cuEquivariance fallback threshold (default behavior)
+        "CUEQ_TRIATTN_FALLBACK_THRESHOLD": "256",
+        # CUDA paths - required for DeepSpeed
+        "CUDA_HOME": "/usr/local/cuda",
+        "CUDA_PATH": "/usr/local/cuda",
+        # Disable DeepSpeed JIT compilation that requires CUDA dev headers
+        "DS_BUILD_OPS": "0",
+    })
+)
+
+
 opensource_scoring_image = (
     modal.Image.debian_slim(python_version="3.11")
     # Install system dependencies for OpenMM and compilation

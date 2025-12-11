@@ -212,7 +212,7 @@ def get_validation_model_info(model_name: str) -> Dict[str, Any]:
     Get information about a validation model.
     
     Args:
-        model_name: "af3" or "protenix"
+        model_name: "af3", "protenix", or "openfold3"
     
     Returns:
         Dict with model information
@@ -231,6 +231,13 @@ def get_validation_model_info(model_name: str) -> Dict[str, Any]:
             "weights_required": False,  # Auto-downloaded
             "gpu_recommended": "A100",
             "description": "ByteDance's open-source AF3 reproduction",
+        },
+        "openfold3": {
+            "name": "OpenFold3",
+            "license": "Apache 2.0",
+            "weights_required": False,  # Auto-downloaded
+            "gpu_recommended": "A100",
+            "description": "AlQuraishi Lab's open-source AF3 reproduction",
         },
         "none": {
             "name": "None",

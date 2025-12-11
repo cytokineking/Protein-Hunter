@@ -2,7 +2,7 @@
 Validation dispatcher and orchestration.
 
 This module provides a unified interface for selecting and running
-structure validation with different models (AF3, Protenix) and
+structure validation with different models (AF3, Protenix, OpenFold3) and
 scoring methods (PyRosetta, open-source).
 """
 
@@ -18,6 +18,11 @@ from modal_boltz_ph.validation_protenix import (
     PROTENIX_GPU_FUNCTIONS,
     DEFAULT_PROTENIX_GPU,
     run_protenix_validation_A100,
+)
+from modal_boltz_ph.validation_openfold3 import (
+    OPENFOLD3_GPU_FUNCTIONS,
+    DEFAULT_OPENFOLD3_GPU,
+    run_openfold3_validation_A100,
 )
 from modal_boltz_ph.scoring_pyrosetta import run_pyrosetta_single
 from modal_boltz_ph.scoring_opensource import (
@@ -77,6 +82,15 @@ def get_validation_function(
             # Protenix → PyRosetta (separate containers)
             protenix_fn = PROTENIX_GPU_FUNCTIONS.get(validation_gpu, run_protenix_validation_A100)
             return _create_protenix_pyrosetta_pipeline(protenix_fn)
+    
+    elif validation_model == "openfold3":
+        if scoring_method == "opensource":
+            # Single container - bundled scoring
+            return OPENFOLD3_GPU_FUNCTIONS.get(validation_gpu, run_openfold3_validation_A100)
+        else:
+            # OpenFold3 → PyRosetta (separate containers)
+            of3_fn = OPENFOLD3_GPU_FUNCTIONS.get(validation_gpu, run_openfold3_validation_A100)
+            return _create_openfold3_pyrosetta_pipeline(of3_fn)
     
     else:
         raise ValueError(f"Unknown validation model: {validation_model}")
@@ -250,6 +264,57 @@ def _create_protenix_pyrosetta_pipeline(protenix_fn) -> Callable:
     return pipeline
 
 
+def _create_openfold3_pyrosetta_pipeline(of3_fn) -> Callable:
+    """Create a pipeline function that runs OpenFold3 → PyRosetta scoring."""
+    
+    def pipeline(
+        design_id: str,
+        binder_seq: str,
+        target_seq: str,
+        target_msas: Optional[Dict[str, str]] = None,
+        af3_msa_mode: str = "reuse",  # Unused but kept for interface compatibility
+        template_content: Optional[str] = None,  # Unused
+        template_chain_ids: Optional[str] = None,  # Unused
+        target_type: str = "protein",
+        verbose: bool = False,
+    ) -> Dict[str, Any]:
+        """Run OpenFold3 validation with PyRosetta scoring."""
+        
+        # OpenFold3 HOLO + APO (without bundled scoring)
+        of3_result = of3_fn.remote(
+            design_id, binder_seq, target_seq,
+            target_msas,
+            run_scoring=False,  # Don't run bundled scoring
+            verbose=verbose,
+        )
+        
+        if not of3_result.get("af3_structure"):
+            return of3_result
+        
+        # PyRosetta scoring
+        if target_type == "protein":
+            scoring_result = run_pyrosetta_single.remote(
+                design_id,
+                of3_result.get("af3_structure"),
+                of3_result.get("af3_iptm", 0),
+                of3_result.get("af3_ptm", 0),
+                of3_result.get("af3_plddt", 0),
+                "A", "B",
+                of3_result.get("apo_structure"),
+                of3_result.get("af3_confidence_json"),
+                target_type,
+            )
+        else:
+            scoring_result = {"accepted": True}
+        
+        return {
+            **of3_result,
+            **scoring_result,
+        }
+    
+    return pipeline
+
+
 # =============================================================================
 # CONFIGURATION HELPERS
 # =============================================================================
@@ -259,6 +324,7 @@ def get_default_validation_gpu(validation_model: str) -> str:
     defaults = {
         "af3": "A100-80GB",
         "protenix": "A100",
+        "openfold3": "A100",
         "none": None,
     }
     return defaults.get(validation_model, "A100")
@@ -270,6 +336,8 @@ def get_supported_gpus(validation_model: str) -> list:
         return list(AF3_GPU_FUNCTIONS.keys())
     elif validation_model == "protenix":
         return list(PROTENIX_GPU_FUNCTIONS.keys())
+    elif validation_model == "openfold3":
+        return list(OPENFOLD3_GPU_FUNCTIONS.keys())
     else:
         return []
 

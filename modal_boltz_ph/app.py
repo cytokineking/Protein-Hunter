@@ -25,6 +25,9 @@ af3_weights_volume = modal.Volume.from_name("af3-weights", create_if_missing=Tru
 # Volume for Protenix weights (auto-downloaded on first use)
 protenix_weights_volume = modal.Volume.from_name("protenix-weights", create_if_missing=True)
 
+# Volume for OpenFold3 weights (auto-downloaded on first use)
+openfold3_weights_volume = modal.Volume.from_name("protein-hunter-openfold3-weights", create_if_missing=True)
+
 # =============================================================================
 # SHARED DICT FOR RESULT STREAMING
 # =============================================================================

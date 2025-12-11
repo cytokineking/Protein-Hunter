@@ -46,6 +46,11 @@ from modal_boltz_ph.validation_protenix import (
     DEFAULT_PROTENIX_GPU,
     run_protenix_validation_A100,
 )
+from modal_boltz_ph.validation_openfold3 import (
+    OPENFOLD3_GPU_FUNCTIONS,
+    DEFAULT_OPENFOLD3_GPU,
+    run_openfold3_validation_A100,
+)
 from modal_boltz_ph.validation import (
     get_validation_function,
     get_default_validation_gpu,
@@ -227,6 +232,11 @@ def run_pipeline(
         --name "PDL1_open" --protein-seqs "AFTVTVPK..." \\
         --validation-model protenix --scoring-method opensource
 
+    # With OpenFold3 validation (Apache 2.0, fully open-source)
+    modal run modal_boltz_ph_cli.py::run_pipeline \\
+        --name "PDL1_of3" --protein-seqs "AFTVTVPK..." \\
+        --validation-model openfold3 --scoring-method opensource
+
     # With AF3 validation (requires weights upload first)
     modal run modal_boltz_ph_cli.py::run_pipeline \\
         --name "PDL1_af3" --protein-seqs "AFTVTVPK..." \\
@@ -243,9 +253,10 @@ def run_pipeline(
     
     VALIDATION & SCORING
     --------------------
-    --validation-model {none,af3,protenix}
+    --validation-model {none,af3,protenix,openfold3}
         - none: Design only (default)
         - protenix: Open-source AF3 reproduction (recommended)
+        - openfold3: AlQuraishi Lab's open-source AF3 reproduction
         - af3: AlphaFold3 (requires weights - see AF3 SETUP)
 
     --scoring-method {pyrosetta,opensource}
@@ -665,6 +676,10 @@ def run_pipeline(
     protenix_gpu_to_use = validation_gpu if validation_model == "protenix" else DEFAULT_PROTENIX_GPU
     protenix_fn = PROTENIX_GPU_FUNCTIONS.get(protenix_gpu_to_use, run_protenix_validation_A100)
     
+    # For OpenFold3, select the appropriate GPU function
+    openfold3_gpu_to_use = validation_gpu if validation_model == "openfold3" else DEFAULT_OPENFOLD3_GPU
+    openfold3_fn = OPENFOLD3_GPU_FUNCTIONS.get(openfold3_gpu_to_use, run_openfold3_validation_A100)
+    
     def _run_full_pipeline_for_design(task_input: dict) -> dict:
         """
         Run complete pipeline for one design: Boltz → Validation → APO → Scoring.
@@ -879,6 +894,92 @@ def run_pipeline(
                     "iplddt": best_cycle_data.get("iplddt", 0.0) if best_cycle_data else 0.0,
                 }
         
+        elif validation_model == "openfold3":
+            # ===== OPENFOLD3 VALIDATION =====
+            # OpenFold3 with opensource scoring runs in a single container
+            run_bundled_scoring = (scoring_method == "opensource")
+            
+            try:
+                of3_result = openfold3_fn.remote(
+                    design_id, binder_seq, target_seq,
+                    target_msas,
+                    run_scoring=run_bundled_scoring,  # Bundled scoring if opensource
+                    verbose=verbose,
+                )
+            except Exception as e:
+                print(f"  [{design_id}] OpenFold3 failed: {e}")
+                return {**design_result, "design_id": design_id, "openfold3_error": str(e), "stage_failed": "validation"}
+            
+            if not of3_result.get("af3_structure"):
+                return {**design_result, "design_id": design_id, **of3_result, "stage_failed": "validation"}
+            
+            validation_result = of3_result
+            apo_structure = of3_result.get("apo_structure")
+            
+            # Log results
+            iptm = of3_result.get("af3_iptm", of3_result.get("of3_iptm", 0))
+            ipsae = of3_result.get("af3_ipsae", of3_result.get("of3_ipsae", 0))
+            print(f"  [{design_id}] OpenFold3 complete: ipTM={iptm:.3f}, ipSAE={ipsae:.3f}")
+            
+            # If bundled scoring was used, we can skip stages 3 and 4
+            if run_bundled_scoring:
+                # Stream AF3 result (OpenFold3 outputs are aliased to af3_* for compatibility)
+                if stream:
+                    _stream_af3_result(
+                        run_id=run_id,
+                        design_idx=design_idx,
+                        design_id=design_id,
+                        af3_iptm=validation_result.get("af3_iptm", 0.0),
+                        af3_ipsae=validation_result.get("af3_ipsae", 0.0),
+                        af3_ptm=validation_result.get("af3_ptm", 0.0),
+                        af3_plddt=validation_result.get("af3_plddt", 0.0),
+                        af3_structure=validation_result.get("af3_structure", ""),
+                    )
+                
+                # Stream final result
+                if stream and target_type == "protein":
+                    _stream_final_result(
+                        run_id=run_id,
+                        design_idx=design_idx,
+                        design_id=design_id,
+                        accepted=validation_result.get("accepted", False),
+                        rejection_reason=validation_result.get("rejection_reason", ""),
+                        metrics={
+                            "interface_dG": validation_result.get("interface_dG", 0.0),
+                            "interface_sc": validation_result.get("interface_sc", 0.0),
+                            "interface_nres": validation_result.get("interface_nres", 0),
+                            "interface_dSASA": validation_result.get("interface_dSASA", 0.0),
+                            "interface_packstat": validation_result.get("interface_packstat", 0.0),
+                            "interface_dG_SASA_ratio": validation_result.get("interface_dG_SASA_ratio", 0.0),
+                            "interface_interface_hbonds": validation_result.get("interface_interface_hbonds", 0),
+                            "interface_delta_unsat_hbonds": validation_result.get("interface_delta_unsat_hbonds", 0),
+                            "interface_hydrophobicity": validation_result.get("interface_hydrophobicity", 0.0),
+                            "surface_hydrophobicity": validation_result.get("surface_hydrophobicity", 0.0),
+                            "binder_sasa": validation_result.get("binder_sasa", 0.0),
+                            "interface_fraction": validation_result.get("interface_fraction", 0.0),
+                            "interface_hbond_percentage": validation_result.get("interface_hbond_percentage", 0.0),
+                            "interface_delta_unsat_hbonds_percentage": validation_result.get("interface_delta_unsat_hbonds_percentage", 0.0),
+                            "apo_holo_rmsd": validation_result.get("apo_holo_rmsd"),
+                            "i_pae": validation_result.get("i_pae"),
+                            "rg": validation_result.get("rg"),
+                        },
+                        relaxed_pdb=validation_result.get("relaxed_pdb", ""),
+                    )
+                
+                # Return combined results (OpenFold3 bundled includes scoring)
+                return {
+                    **design_result,
+                    "design_id": design_id,
+                    "design_num": design_idx,
+                    "cycle": best_cycle,
+                    **validation_result,
+                    "binder_sequence": binder_seq,
+                    "binder_length": len(binder_seq) if binder_seq else 0,
+                    "ipsae": best_cycle_data.get("ipsae", 0.0) if best_cycle_data else 0.0,
+                    "plddt": best_cycle_data.get("plddt", 0.0) if best_cycle_data else 0.0,
+                    "iplddt": best_cycle_data.get("iplddt", 0.0) if best_cycle_data else 0.0,
+                }
+        
         # For AF3, we continue to the APO and scoring stages
         af3_result = validation_result
         
@@ -896,7 +997,7 @@ def run_pipeline(
             )
         
         # ========== STAGE 3: APO PREDICTION (protein targets only) ==========
-        # Skip if Protenix already generated APO structure
+        # Skip if Protenix or OpenFold3 already generated APO structure
         if target_type == "protein" and apo_structure is None:
             try:
                 apo_result = af3_apo_fn.remote(design_id, binder_seq, "A")
