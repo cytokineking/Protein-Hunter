@@ -658,3 +658,158 @@ def run_protenix_validation_local(
         result["apo_plddt"] = apo_result.get("plddt", 0.0)
 
     return result
+
+
+# =============================================================================
+# PERSISTENT RUNNER ENTRY POINT (Model Stays Loaded - ~6x Faster)
+# =============================================================================
+
+def run_protenix_validation_persistent(
+    design_id: str,
+    binder_seq: str,
+    target_seq: str,
+    target_msas: Optional[Dict[str, str]] = None,
+    verbose: bool = False,
+    model_name: str = DEFAULT_PROTENIX_MODEL,
+) -> Dict[str, Any]:
+    """
+    Run Protenix HOLO (+ APO) validation using persistent runner.
+    
+    This keeps the Protenix model loaded in GPU memory across multiple
+    predictions, reducing per-design time from ~105s to ~15s after the
+    first load (~70s one-time cost).
+    
+    API-compatible with run_protenix_validation_local() - same input/output schema.
+    
+    Args:
+        design_id: Unique identifier for this design
+        binder_seq: Binder sequence (chain A)
+        target_seq: Target sequence(s), colon-separated for multi-chain
+        target_msas: Optional dict mapping chain_id -> MSA content
+        verbose: Print detailed timing info
+        model_name: Protenix model name (default: protenix_base_default_v0.5.0)
+    
+    Returns:
+        Dict compatible with unified af3_* schema
+    """
+    global _PROTENIX_VERBOSE
+    _PROTENIX_VERBOSE = verbose
+    
+    # Initialize result with defaults
+    result: Dict[str, Any] = {
+        "af3_iptm": 0.0,
+        "af3_ipsae": 0.0,
+        "af3_ptm": 0.0,
+        "af3_plddt": 0.0,
+        "af3_structure": None,
+        "af3_confidence_json": None,
+        "apo_structure": None,
+    }
+    
+    # Ensure weights are available
+    try:
+        ensure_protenix_weights(model_name)
+    except Exception as e:
+        return {**result, "error": f"Protenix weights unavailable: {e}"}
+    
+    # Get/create the persistent runner
+    try:
+        from boltz_ph.validation.protenix_runner import PersistentProtenixRunner
+        
+        runner = PersistentProtenixRunner.get_instance()
+        load_time = runner.ensure_loaded()
+        
+        if load_time > 0:
+            print(f"  ✓ Protenix model loaded in {load_time:.1f}s (one-time cost)")
+        
+    except Exception as e:
+        return {**result, "error": f"Failed to initialize persistent runner: {e}"}
+    
+    # Calculate target length for ipSAE
+    target_chains = target_seq.split(":") if target_seq else []
+    total_target_length = sum(len(seq) for seq in target_chains)
+    
+    # Run HOLO prediction
+    try:
+        holo_start = time.time()
+        holo_result = runner.predict_holo(
+            design_id=design_id,
+            binder_seq=binder_seq,
+            target_seq=target_seq,
+            target_msas=target_msas,
+        )
+        holo_elapsed = time.time() - holo_start
+        
+        if verbose:
+            print(f"  HOLO prediction: {holo_elapsed:.1f}s")
+        
+        if holo_result.get("error"):
+            return {**result, "error": holo_result["error"]}
+        
+    except Exception as e:
+        return {**result, "error": f"HOLO prediction failed: {e}"}
+    
+    # Calculate ipSAE from PAE matrix
+    ipsae_result: Dict[str, float] = {}
+    if holo_result.get("full_data_json"):
+        ipsae_result = calculate_protenix_ipsae(
+            holo_result["full_data_json"],
+            binder_length=len(binder_seq),
+            target_length=total_target_length,
+        )
+    
+    # Build unified result
+    result.update({
+        "protenix_iptm": holo_result.get("iptm", 0.0),
+        "protenix_ptm": holo_result.get("ptm", 0.0),
+        "protenix_plddt": holo_result.get("plddt", 0.0),
+        "protenix_ipsae": ipsae_result.get("protenix_ipsae", 0.0),
+        "af3_iptm": holo_result.get("iptm", 0.0),
+        "af3_ptm": holo_result.get("ptm", 0.0),
+        "af3_plddt": holo_result.get("plddt", 0.0),
+        "af3_ipsae": ipsae_result.get("protenix_ipsae", 0.0),
+        "af3_structure": holo_result.get("structure_cif"),
+        "af3_confidence_json": holo_result.get("confidence_json"),
+        "chain_pair_iptm": holo_result.get("chain_pair_iptm", {}),
+        "ranking_score": holo_result.get("ranking_score", 0.0),
+        "has_clash": holo_result.get("has_clash", False),
+        "holo_time": holo_result.get("total_time", 0.0),
+        "holo_forward_time": holo_result.get("forward_time", 0.0),
+    })
+    
+    # Run APO prediction (binder only)
+    try:
+        apo_start = time.time()
+        apo_result = runner.predict_apo(
+            design_id=design_id,
+            binder_seq=binder_seq,
+        )
+        apo_elapsed = time.time() - apo_start
+        
+        if verbose:
+            print(f"  APO prediction: {apo_elapsed:.1f}s")
+        
+        if "error" not in apo_result:
+            result["apo_structure"] = apo_result.get("structure_cif")
+            result["apo_plddt"] = apo_result.get("plddt", 0.0)
+            result["apo_time"] = apo_result.get("total_time", 0.0)
+        
+    except Exception as e:
+        # APO failure is non-fatal
+        if verbose:
+            print(f"  Warning: APO prediction failed: {e}")
+    
+    return result
+
+
+def shutdown_persistent_runner() -> None:
+    """
+    Explicitly shutdown the persistent Protenix runner and free GPU memory.
+    
+    Call this at the end of validation or when switching to another model.
+    """
+    try:
+        from boltz_ph.validation.protenix_runner import PersistentProtenixRunner
+        PersistentProtenixRunner.shutdown()
+    except Exception:
+        pass

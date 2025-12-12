@@ -6,14 +6,21 @@ This script allows isolated testing of the Protenix validation pipeline using
 existing Boltz design outputs or synthetic test cases, without running the
 full design pipeline.
 
+Supports both:
+  - Subprocess mode (original): Each validation spawns a new process (~105s/design)
+  - Persistent mode (new): Model stays loaded in GPU memory (~25s/design after first)
+
 Usage:
-    # Test a single PDB file
-    python -m boltz_ph.tests.test_protenix_local --pdb-path ./best_designs/design_001.pdb
+    # Test a single PDB file (persistent mode - faster)
+    python -m boltz_ph.tests.test_protenix_local --pdb-path ./best_designs/design_001.pdb --persistent
     
-    # Test all designs in a folder
-    python -m boltz_ph.tests.test_protenix_local --input-dir ./best_designs --output-dir ./protenix_test
+    # Test all designs in a folder (persistent mode recommended for batches)
+    python -m boltz_ph.tests.test_protenix_local --input-dir ./best_designs --output-dir ./protenix_test --persistent
     
     # Quick synthetic test (no input files needed)
+    python -m boltz_ph.tests.test_protenix_local --synthetic --persistent
+    
+    # Original subprocess mode (for comparison/debugging)
     python -m boltz_ph.tests.test_protenix_local --synthetic
 
 Input format:
@@ -136,10 +143,13 @@ def test_protenix_import():
     try:
         from boltz_ph.validation.protenix_local import (
             run_protenix_validation_local,
+            run_protenix_validation_persistent,
+            shutdown_persistent_runner,
             ensure_protenix_weights,
             DEFAULT_PROTENIX_MODEL,
         )
         print(f"  ✓ Protenix local module imported successfully")
+        print(f"  ✓ Persistent runner available")
         print(f"  Default model: {DEFAULT_PROTENIX_MODEL}")
         return True
     except ImportError as e:
@@ -177,10 +187,11 @@ def test_protenix_weights():
         return False
 
 
-def test_protenix_synthetic():
+def test_protenix_synthetic(use_persistent: bool = False):
     """Test Protenix with a synthetic binder/target pair."""
+    mode_str = "PERSISTENT" if use_persistent else "SUBPROCESS"
     print("\n" + "=" * 70)
-    print("TEST: Protenix Synthetic Validation")
+    print(f"TEST: Protenix Synthetic Validation ({mode_str})")
     print("=" * 70)
     
     # Small synthetic sequences for quick testing
@@ -189,14 +200,23 @@ def test_protenix_synthetic():
     
     print(f"  Binder: {len(binder_seq)} residues")
     print(f"  Target: {len(target_seq)} residues")
+    print(f"  Mode: {mode_str}")
     
     try:
-        from boltz_ph.validation.protenix_local import run_protenix_validation_local
+        if use_persistent:
+            from boltz_ph.validation.protenix_local import (
+                run_protenix_validation_persistent,
+                shutdown_persistent_runner,
+            )
+            validation_func = run_protenix_validation_persistent
+        else:
+            from boltz_ph.validation.protenix_local import run_protenix_validation_local
+            validation_func = run_protenix_validation_local
         
-        print("\n  Running Protenix HOLO validation...")
+        print("\n  Running Protenix HOLO + APO validation...")
         t0 = time.time()
         
-        result = run_protenix_validation_local(
+        result = validation_func(
             design_id="synthetic_test",
             binder_seq=binder_seq,
             target_seq=target_seq,
@@ -217,6 +237,14 @@ def test_protenix_synthetic():
         print(f"  pLDDT: {result.get('af3_plddt', 'N/A')}")
         print(f"  ipSAE: {result.get('af3_ipsae', 'N/A')}")
         
+        if use_persistent:
+            holo_time = result.get('holo_time', 0)
+            apo_time = result.get('apo_time', 0)
+            if holo_time > 0:
+                print(f"  HOLO time: {holo_time:.1f}s")
+            if apo_time > 0:
+                print(f"  APO time: {apo_time:.1f}s")
+        
         if result.get('af3_iptm', 0) > 0:
             print(f"  ✓ Protenix validation succeeded")
             return True
@@ -229,12 +257,25 @@ def test_protenix_synthetic():
         print(f"  ✗ Exception: {e}")
         traceback.print_exc()
         return False
+    finally:
+        if use_persistent:
+            try:
+                from boltz_ph.validation.protenix_local import shutdown_persistent_runner
+                shutdown_persistent_runner()
+            except Exception:
+                pass
 
 
-def test_single_pdb(pdb_path: str, output_dir: str = "./protenix_test", verbose: bool = True):
+def test_single_pdb(
+    pdb_path: str,
+    output_dir: str = "./protenix_test",
+    verbose: bool = True,
+    use_persistent: bool = False,
+):
     """Test Protenix validation on a single PDB file."""
+    mode_str = "PERSISTENT" if use_persistent else "SUBPROCESS"
     print("\n" + "=" * 70)
-    print("TEST: Protenix Single PDB Validation")
+    print(f"TEST: Protenix Single PDB Validation ({mode_str})")
     print("=" * 70)
     
     pdb_file = Path(pdb_path)
@@ -263,13 +304,21 @@ def test_single_pdb(pdb_path: str, output_dir: str = "./protenix_test", verbose:
         print(f"    {chain_id} (target): {len(seq)} residues")
     
     try:
-        from boltz_ph.validation.protenix_local import run_protenix_validation_local
+        if use_persistent:
+            from boltz_ph.validation.protenix_local import (
+                run_protenix_validation_persistent,
+                shutdown_persistent_runner,
+            )
+            validation_func = run_protenix_validation_persistent
+        else:
+            from boltz_ph.validation.protenix_local import run_protenix_validation_local
+            validation_func = run_protenix_validation_local
         
         design_id = pdb_file.stem
         print(f"\n  Running Protenix validation for {design_id}...")
         
         t0 = time.time()
-        result = run_protenix_validation_local(
+        result = validation_func(
             design_id=design_id,
             binder_seq=binder_seq,
             target_seq=target_seq,
@@ -292,9 +341,10 @@ def test_single_pdb(pdb_path: str, output_dir: str = "./protenix_test", verbose:
         print(f"  ipSAE: {result.get('af3_ipsae', 0):.4f}")
         
         # Save structure if available
-        if result.get('holo_structure'):
+        holo_struct = result.get('af3_structure') or result.get('holo_structure')
+        if holo_struct:
             struct_path = output_path / f"{design_id}_protenix.cif"
-            struct_path.write_text(result['holo_structure'])
+            struct_path.write_text(holo_struct)
             print(f"\n  ✓ Saved structure: {struct_path}")
         
         # Save results JSON
@@ -312,6 +362,13 @@ def test_single_pdb(pdb_path: str, output_dir: str = "./protenix_test", verbose:
         print(f"  ✗ Exception: {e}")
         traceback.print_exc()
         return False
+    finally:
+        if use_persistent:
+            try:
+                from boltz_ph.validation.protenix_local import shutdown_persistent_runner
+                shutdown_persistent_runner()
+            except Exception:
+                pass
 
 
 def test_folder(
@@ -319,14 +376,20 @@ def test_folder(
     output_dir: str = "./protenix_validation_test",
     max_designs: int = 0,
     verbose: bool = False,
+    use_persistent: bool = False,
 ):
     """Test Protenix validation on all PDB files in a folder."""
+    mode_str = "PERSISTENT" if use_persistent else "SUBPROCESS"
     print("\n" + "=" * 70)
-    print("TEST: Protenix Folder Validation")
+    print(f"TEST: Protenix Folder Validation ({mode_str})")
     print("=" * 70)
     print(f"  Input directory: {input_dir}")
     print(f"  Output directory: {output_dir}")
     print(f"  Max designs: {max_designs if max_designs > 0 else 'all'}")
+    print(f"  Mode: {mode_str}")
+    
+    if use_persistent:
+        print("\n  💡 Using persistent runner - model loaded once, reused for all designs")
     
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -347,68 +410,97 @@ def test_folder(
         return False
     
     try:
-        from boltz_ph.validation.protenix_local import run_protenix_validation_local
+        if use_persistent:
+            from boltz_ph.validation.protenix_local import (
+                run_protenix_validation_persistent,
+                shutdown_persistent_runner,
+            )
+            validation_func = run_protenix_validation_persistent
+        else:
+            from boltz_ph.validation.protenix_local import run_protenix_validation_local
+            validation_func = run_protenix_validation_local
     except ImportError as e:
         print(f"  ✗ Failed to import protenix_local: {e}")
         return False
     
     all_results = []
+    total_start = time.time()
     
-    for i, design in enumerate(designs):
-        design_id = design["design_id"]
-        print(f"\n  [{i+1}/{len(designs)}] Processing {design_id}")
-        print(f"    Binder: {len(design['binder_seq'])} residues")
-        print(f"    Targets: {', '.join(f'{cid}={len(seq)}' for cid, seq in design['target_chains'])}")
-        
-        t0 = time.time()
-        try:
-            result = run_protenix_validation_local(
-                design_id=design_id,
-                binder_seq=design["binder_seq"],
-                target_seq=design["target_seq"],
-                target_msas=None,
-                verbose=verbose,
-            )
-            elapsed = time.time() - t0
+    try:
+        for i, design in enumerate(designs):
+            design_id = design["design_id"]
+            print(f"\n  [{i+1}/{len(designs)}] Processing {design_id}")
+            print(f"    Binder: {len(design['binder_seq'])} residues")
+            print(f"    Targets: {', '.join(f'{cid}={len(seq)}' for cid, seq in design['target_chains'])}")
             
-            if "error" in result:
-                print(f"    ✗ Error ({elapsed:.1f}s): {result['error']}")
-                result_entry = {
+            t0 = time.time()
+            try:
+                result = validation_func(
+                    design_id=design_id,
+                    binder_seq=design["binder_seq"],
+                    target_seq=design["target_seq"],
+                    target_msas=None,
+                    verbose=verbose,
+                )
+                elapsed = time.time() - t0
+                
+                if "error" in result:
+                    print(f"    ✗ Error ({elapsed:.1f}s): {result['error']}")
+                    result_entry = {
+                        "design_id": design_id,
+                        "binder_length": len(design["binder_seq"]),
+                        "error": result["error"],
+                        "elapsed_time": elapsed,
+                    }
+                else:
+                    iptm = result.get('af3_iptm', 0)
+                    plddt = result.get('af3_plddt', 0)
+                    
+                    print(f"    ✓ Success ({elapsed:.1f}s): ipTM={iptm:.3f}, pLDDT={plddt:.1f}")
+                    
+                    holo_struct = result.get('af3_structure') or result.get('holo_structure')
+                    if holo_struct:
+                        struct_path = structures_dir / f"{design_id}_protenix.cif"
+                        struct_path.write_text(holo_struct)
+                    
+                    result_entry = {
+                        "design_id": design_id,
+                        "binder_length": len(design["binder_seq"]),
+                        "binder_seq": design["binder_seq"],
+                        "protenix_iptm": result.get('af3_iptm'),
+                        "protenix_ptm": result.get('af3_ptm'),
+                        "protenix_plddt": result.get('af3_plddt'),
+                        "protenix_ipsae": result.get('af3_ipsae'),
+                        "elapsed_time": elapsed,
+                    }
+                    
+                    # Add timing breakdown for persistent mode
+                    if use_persistent:
+                        result_entry["holo_time"] = result.get('holo_time', 0)
+                        result_entry["apo_time"] = result.get('apo_time', 0)
+                
+                all_results.append(result_entry)
+                
+            except Exception as e:
+                elapsed = time.time() - t0
+                print(f"    ✗ Exception ({elapsed:.1f}s): {e}")
+                all_results.append({
                     "design_id": design_id,
                     "binder_length": len(design["binder_seq"]),
-                    "error": result["error"],
-                }
-            else:
-                iptm = result.get('af3_iptm', 0)
-                plddt = result.get('af3_plddt', 0)
-                
-                print(f"    ✓ Success ({elapsed:.1f}s): ipTM={iptm:.3f}, pLDDT={plddt:.1f}")
-                
-                if result.get('holo_structure'):
-                    struct_path = structures_dir / f"{design_id}_protenix.cif"
-                    struct_path.write_text(result['holo_structure'])
-                
-                result_entry = {
-                    "design_id": design_id,
-                    "binder_length": len(design["binder_seq"]),
-                    "binder_seq": design["binder_seq"],
-                    "protenix_iptm": result.get('af3_iptm'),
-                    "protenix_ptm": result.get('af3_ptm'),
-                    "protenix_plddt": result.get('af3_plddt'),
-                    "protenix_ipsae": result.get('af3_ipsae'),
+                    "error": str(e),
                     "elapsed_time": elapsed,
-                }
-            
-            all_results.append(result_entry)
-            
-        except Exception as e:
-            elapsed = time.time() - t0
-            print(f"    ✗ Exception ({elapsed:.1f}s): {e}")
-            all_results.append({
-                "design_id": design_id,
-                "binder_length": len(design["binder_seq"]),
-                "error": str(e),
-            })
+                })
+        
+        total_elapsed = time.time() - total_start
+        
+    finally:
+        # Always clean up persistent runner
+        if use_persistent:
+            try:
+                print("\n  Shutting down persistent runner...")
+                shutdown_persistent_runner()
+            except Exception:
+                pass
     
     # Save results
     if all_results:
@@ -429,18 +521,100 @@ def test_folder(
     successful = [r for r in all_results if 'protenix_iptm' in r and r.get('protenix_iptm') is not None]
     failed = len(all_results) - len(successful)
     
-    print(f"\n  --- Summary ---")
-    print(f"  Total: {len(all_results)}")
+    print(f"\n  " + "=" * 60)
+    print(f"  SUMMARY")
+    print(f"  " + "=" * 60)
+    print(f"  Total designs: {len(all_results)}")
     print(f"  Successful: {len(successful)}")
     print(f"  Failed: {failed}")
+    print(f"  Total time: {total_elapsed:.1f}s")
     
     if successful:
         avg_iptm = sum(r['protenix_iptm'] for r in successful) / len(successful)
         avg_plddt = sum(r['protenix_plddt'] for r in successful) / len(successful)
-        print(f"  Avg ipTM: {avg_iptm:.3f}")
-        print(f"  Avg pLDDT: {avg_plddt:.1f}")
+        avg_time = sum(r['elapsed_time'] for r in successful) / len(successful)
+        
+        print(f"\n  Average metrics:")
+        print(f"    ipTM: {avg_iptm:.3f}")
+        print(f"    pLDDT: {avg_plddt:.1f}")
+        print(f"    Time/design: {avg_time:.1f}s")
+        
+        if len(successful) > 1:
+            first_time = successful[0]['elapsed_time']
+            subsequent_times = [r['elapsed_time'] for r in successful[1:]]
+            avg_subsequent = sum(subsequent_times) / len(subsequent_times) if subsequent_times else 0
+            
+            if use_persistent and avg_subsequent > 0:
+                print(f"\n  Persistent runner performance:")
+                print(f"    First design (incl. model load): {first_time:.1f}s")
+                print(f"    Avg subsequent designs: {avg_subsequent:.1f}s")
+                estimated_subprocess = 105 * len(successful)
+                speedup = estimated_subprocess / total_elapsed if total_elapsed > 0 else 0
+                print(f"    Estimated speedup vs subprocess: {speedup:.1f}x")
+    
+    print(f"  " + "=" * 60)
     
     return len(successful) > 0
+
+
+def test_persistent_runner():
+    """Test the persistent runner specifically."""
+    print("\n" + "=" * 70)
+    print("TEST: Persistent Runner Load/Predict/Unload Cycle")
+    print("=" * 70)
+    
+    try:
+        from boltz_ph.validation.protenix_runner import PersistentProtenixRunner
+        
+        print("\n  Phase 1: Loading model...")
+        runner = PersistentProtenixRunner.get_instance()
+        load_time = runner.ensure_loaded()
+        print(f"  ✓ Model loaded in {load_time:.1f}s")
+        
+        print("\n  Phase 2: Running predictions...")
+        test_cases = [
+            ("test_a", "MKFLILLFNILCLFPVLAADNHGVGPLGITADAAQVKGATVFPKG", 
+             "MHHHHHHENLYFQGSMRVLVLDNIEDHSILFQRVLAQQFDPNQYKVHPVTLFSAWTTLFEVLVDPQGM"),
+            ("test_b", "GAMGSEIEHIEEAIANAKTKADHERLVAHYEEEAKRLEKKSEEYQELAEKNREMGEKLLERLKTVEK",
+             "MHHHHHHENLYFQGSMRVLVLDNIEDHSILFQRVLAQQFDPNQYKVHPVTLFSAWTTLFEVLVDPQGM"),
+        ]
+        
+        times = []
+        for design_id, binder_seq, target_seq in test_cases:
+            t0 = time.time()
+            result = runner.predict_holo(
+                design_id=design_id,
+                binder_seq=binder_seq,
+                target_seq=target_seq,
+                target_msas=None,
+            )
+            elapsed = time.time() - t0
+            times.append(elapsed)
+            
+            if result.get("error"):
+                print(f"    {design_id}: ✗ Error - {result['error']}")
+            else:
+                iptm = result.get('iptm', 0)
+                print(f"    {design_id}: ✓ {elapsed:.1f}s, ipTM={iptm:.3f}")
+        
+        print("\n  Phase 3: Shutting down...")
+        PersistentProtenixRunner.shutdown()
+        print("  ✓ Runner shutdown complete")
+        
+        print("\n  --- Performance Summary ---")
+        print(f"  Model load time: {load_time:.1f}s")
+        if times:
+            print(f"  First prediction: {times[0]:.1f}s")
+            if len(times) > 1:
+                print(f"  Second prediction: {times[1]:.1f}s")
+        
+        return True
+        
+    except Exception as e:
+        import traceback
+        print(f"  ✗ Exception: {e}")
+        traceback.print_exc()
+        return False
 
 
 # =============================================================================
@@ -461,12 +635,19 @@ def main():
     parser.add_argument("--synthetic", action="store_true", help="Run synthetic test (no input files)")
     parser.add_argument("--check-import", action="store_true", help="Only check if Protenix imports")
     parser.add_argument("--check-weights", action="store_true", help="Only check if weights are available")
+    parser.add_argument("--test-runner", action="store_true", help="Test persistent runner lifecycle")
+    parser.add_argument("--persistent", "-p", action="store_true", 
+                        help="Use persistent runner (model stays loaded, ~4x faster for batches)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     
     args = parser.parse_args()
     
     print("\n" + "=" * 70)
     print("PROTENIX LOCAL VALIDATION TEST")
+    if args.persistent:
+        print("MODE: PERSISTENT (model stays loaded in GPU memory)")
+    else:
+        print("MODE: SUBPROCESS (original, each validation spawns new process)")
     print("=" * 70)
     
     results = []
@@ -479,15 +660,23 @@ def main():
         pass
     elif args.check_weights:
         results.append(("Weights", test_protenix_weights()))
+    elif args.test_runner:
+        results.append(("Weights", test_protenix_weights()))
+        results.append(("Persistent Runner", test_persistent_runner()))
     elif args.synthetic:
         results.append(("Weights", test_protenix_weights()))
-        results.append(("Synthetic", test_protenix_synthetic()))
+        results.append(("Synthetic", test_protenix_synthetic(use_persistent=args.persistent)))
     elif args.pdb_path:
         results.append(("Weights", test_protenix_weights()))
-        results.append(("Single PDB", test_single_pdb(args.pdb_path, args.output_dir, args.verbose)))
+        results.append(("Single PDB", test_single_pdb(
+            args.pdb_path, args.output_dir, args.verbose, use_persistent=args.persistent
+        )))
     elif args.input_dir:
         results.append(("Weights", test_protenix_weights()))
-        results.append(("Folder", test_folder(args.input_dir, args.output_dir, args.max_designs, args.verbose)))
+        results.append(("Folder", test_folder(
+            args.input_dir, args.output_dir, args.max_designs, args.verbose, 
+            use_persistent=args.persistent
+        )))
     else:
         # Default: run basic tests
         results.append(("Weights", test_protenix_weights()))
