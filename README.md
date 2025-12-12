@@ -88,13 +88,13 @@ Protein Hunter uses iterative **structure-sequence cycling** with **diffusion ha
 - **Binder (Chain A)**: The protein being designed (initialized with X tokens)
 - **Target (Chain B, C, ...)**: What you want to bind (protein, ligand, DNA/RNA)
 - **Design run**: One complete optimization trajectory from initialization to final output
-- **Cycle** (`--num_cycles`): One iteration of structure prediction → sequence design
-- **Recycle** (`--recycling_steps`): Internal refinement passes within Boltz's structure prediction
+- **Cycle** (`--num-cycles`): One iteration of structure prediction → sequence design
+- **Recycle** (`--recycling-steps`): Internal refinement passes within Boltz's structure prediction
 - **Diffusion hallucination**: The model's ability to generate well-folded structures from undefined (X token) sequences
 
 **Cycles vs Recycles:**
 ```
-Design Run (1 of num_designs)
+Design Run (1 of num-designs)
 │
 ├── Cycle 0: Diffusion hallucination (X tokens → initial structure)
 │   └── [recycle 1] → [recycle 2] → [recycle 3] → hallucinated structure
@@ -105,7 +105,7 @@ Design Run (1 of num_designs)
 ├── Cycle 2: Sequence design → structure refinement
 │   └── ... (alanine content decreases, foldability improves)
 │
-└── ... (num_cycles iterations)
+└── ... (num-cycles iterations)
 ```
 
 ---
@@ -130,17 +130,17 @@ Design a binder for a target protein:
 ```bash
 python boltz_ph/design.py \
     --name my_first_design \
-    --protein_seqs "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALEHHHHHH" \
-    --num_designs 3 \
-    --num_cycles 7 \
-    --min_protein_length 80 \
-    --max_protein_length 120 \
-    --msa_mode mmseqs \
-    --high_iptm_threshold 0.7 \
-    --gpu_id 0
+    --protein-seqs "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALEHHHHHH" \
+    --num-designs 3 \
+    --num-cycles 7 \
+    --min-protein-length 80 \
+    --max-protein-length 120 \
+    --msa-mode mmseqs \
+    --high-iptm-threshold 0.7 \
+    --gpu-id 0
 ```
 
-> **Note**: `--alanine_bias` defaults to `True` in this fork. Use `--alanine_bias false` to disable.
+> **Note**: `--alanine-bias` defaults to `True` in this fork. Use `--alanine-bias false` to disable.
 
 ---
 
@@ -155,26 +155,26 @@ The binder starts as a random sequence (with optional "X" unknown residues) and 
 ```bash
 python boltz_ph/design.py \
     --name de_novo_binder \
-    --protein_seqs "YOUR_TARGET_SEQUENCE" \
-    --num_designs 5 \
-    --num_cycles 7 \
-    --min_protein_length 90 \
-    --max_protein_length 150 \
-    --percent_X 50 \
-    --msa_mode mmseqs \
-    --high_iptm_threshold 0.7 \
-    --gpu_id 0
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-designs 5 \
+    --num-cycles 7 \
+    --min-protein-length 90 \
+    --max-protein-length 150 \
+    --percent-x 50 \
+    --msa-mode mmseqs \
+    --high-iptm-threshold 0.7 \
+    --gpu-id 0
 ```
 
 **Key parameters for de novo design:**
 
 | Parameter | Description | Recommended |
 |-----------|-------------|-------------|
-| `--percent_X` | % of "unknown" residues in initial sequence | 50-100 |
-| `--min_protein_length` | Minimum binder length | 60-80 |
-| `--max_protein_length` | Maximum binder length | 120-150 |
-| `--num_designs` | Independent design attempts | 100+ for a full run (required) |
-| `--num_cycles` | Optimization iterations per design | 7 |
+| `--percent-x` | % of "unknown" residues in initial sequence | 50-100 |
+| `--min-protein-length` | Minimum binder length | 60-80 |
+| `--max-protein-length` | Maximum binder length | 120-150 |
+| `--num-designs` | Independent design attempts | 100+ for a full run (required) |
+| `--num-cycles` | Optimization iterations per design | 7 |
 
 ---
 
@@ -188,18 +188,18 @@ Provide a starting sequence via `--seq` to refine it further.
 python boltz_ph/design.py \
     --name refine_my_binder \
     --seq "GPDRERARELARILLKVIKLSDSPEARRQLLRNLEELAEKYKDPEVRRILEEAERYIK" \
-    --protein_seqs "YOUR_TARGET_SEQUENCE" \
-    --num_designs 3 \
-    --num_cycles 5 \
-    --msa_mode mmseqs \
-    --high_iptm_threshold 0.8 \
-    --gpu_id 0
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-designs 3 \
+    --num-cycles 5 \
+    --msa-mode mmseqs \
+    --high-iptm-threshold 0.8 \
+    --gpu-id 0
 ```
 
 **Key differences from de novo:**
 - `--seq` provides the starting binder sequence
-- `--min/max_protein_length` are ignored (length is fixed)
-- `--percent_X` is ignored (sequence is provided)
+- `--min-protein-length`/`--max-protein-length` are ignored (length is fixed)
+- `--percent-x` is ignored (sequence is provided)
 - Typically use fewer cycles and higher quality thresholds
 
 ---
@@ -216,20 +216,20 @@ Boltz will **predict the target structure** during design, using MSA information
 
 ```bash
 python boltz_ph/design.py \
-    --protein_seqs "YOUR_TARGET_SEQUENCE" \
-    --msa_mode mmseqs \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --msa-mode mmseqs \
     ...
 ```
 
 | Parameter | Description |
 |-----------|-------------|
-| `--protein_seqs` | Target protein sequence (required) |
-| `--msa_mode mmseqs` | Generate MSA for better structure prediction |
+| `--protein-seqs` | Target protein sequence (required) |
+| `--msa-mode mmseqs` | Generate MSA for better structure prediction |
 
 **For multi-chain targets** (e.g., dimers), separate sequences with `:`:
 
 ```bash
---protein_seqs "CHAIN_B_SEQUENCE:CHAIN_C_SEQUENCE"
+--protein-seqs "CHAIN_B_SEQUENCE:CHAIN_C_SEQUENCE"
 ```
 
 ---
@@ -242,22 +242,22 @@ The template provides **explicit coordinates** that anchor the target structure 
 
 ```bash
 python boltz_ph/design.py \
-    --template_path "7KPL" \
-    --template_cif_chain_id "A" \
-    --msa_mode single \
+    --template-path "7KPL" \
+    --template-cif-chain-id "A" \
+    --msa-mode single \
     ...
 ```
 
 | Parameter | Description |
 |-----------|-------------|
-| `--protein_seqs` | Target sequence(s) — optional if template contains full sequence |
-| `--template_path` | PDB code, file path, or AlphaFold ID |
-| `--template_cif_chain_id` | Which chain in template to use |
-| `--msa_mode single` | Often used with templates (MSA optional) |
+| `--protein-seqs` | Target sequence(s) — optional if template contains full sequence |
+| `--template-path` | PDB code, file path, or AlphaFold ID |
+| `--template-cif-chain-id` | Which chain in template to use |
+| `--msa-mode single` | Often used with templates (MSA optional) |
 
-**Sequence auto-extraction:** If you omit `--protein_seqs`, sequences are automatically extracted from the template structure. This works when the template contains the complete sequence you want to target.
+**Sequence auto-extraction:** If you omit `--protein-seqs`, sequences are automatically extracted from the template structure. This works when the template contains the complete sequence you want to target.
 
-**When to provide `--protein_seqs`:**
+**When to provide `--protein-seqs`:**
 - Template has missing residues resulting in gaps (e.g., disordered termini not in PDB)
 - You want to model additional regions beyond what's in the template
 - Template sequence doesn't match the exact target you want
@@ -275,10 +275,10 @@ When provided, Boltz uses template coordinates where available and predicts any 
 **Multi-chain templates:**
 
 ```bash
---template_path "7KPL:7KPL" \
---template_cif_chain_id "A:B"
+--template-path "7KPL:7KPL" \
+--template-cif-chain-id "A:B"
 # Sequences auto-extracted, or provide explicitly:
---protein_seqs "SEQ_B:SEQ_C"
+--protein-seqs "SEQ_B:SEQ_C"
 ```
 
 ---
@@ -290,7 +290,7 @@ When provided, Boltz uses template coordinates where available and predicts any 
 ### Basic Usage
 
 ```bash
---contact_residues "54,56,66,115,121"
+--contact-residues "54,56,66,115,121"
 ```
 
 This forces the binder to contact residues 54, 56, 66, 115, and 121 on the target.
@@ -300,8 +300,8 @@ This forces the binder to contact residues 54, 56, 66, 115, and 121 on the targe
 Use `|` to separate hotspots for different target chains:
 
 ```bash
---protein_seqs "SEQ_B:SEQ_C" \
---contact_residues "10,20,30|5,15"
+--protein-seqs "SEQ_B:SEQ_C" \
+--contact-residues "10,20,30|5,15"
 ```
 
 - Residues 10, 20, 30 on Chain B
@@ -309,12 +309,12 @@ Use `|` to separate hotspots for different target chains:
 
 ### Author vs Canonical Numbering
 
-By default, hotspot residue numbers use **canonical (1-indexed)** numbering. If your template has non-standard numbering (e.g., starting at residue 7), use `--use_auth_numbering`:
+By default, hotspot residue numbers use **canonical (1-indexed)** numbering. If your template has non-standard numbering (e.g., starting at residue 7), use `--use-auth-numbering`:
 
 ```bash
 # Template has residues numbered 7-16 (author numbering)
---contact_residues "|7,8,9,10,11,12,13,14,15,16" \
---use_auth_numbering
+--contact-residues "|7,8,9,10,11,12,13,14,15,16" \
+--use-auth-numbering
 ```
 
 The pipeline displays a **target sequence analysis** at startup showing the mapping:
@@ -343,10 +343,10 @@ This visualization helps verify your hotspots map correctly to the intended resi
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--contact_residues` | `""` | Comma-separated residue positions |
-| `--contact_cutoff` | `15.0` | Distance threshold (Å) for contact |
-| `--max_contact_filter_retries` | `6` | Retries if contacts not satisfied |
-| `--no_contact_filter` | `False` | Disable contact checking |
+| `--contact-residues` | `""` | Comma-separated residue positions |
+| `--contact-cutoff` | `15.0` | Distance threshold (Å) for contact |
+| `--max-contact-filter-retries` | `6` | Retries if contacts not satisfied |
+| `--no-contact-filter` | `False` | Disable contact checking |
 
 ### How Contact Filtering Works
 
@@ -359,14 +359,14 @@ This visualization helps verify your hotspots map correctly to the intended resi
 ```bash
 python boltz_ph/design.py \
     --name hotspot_design \
-    --protein_seqs "TARGET_SEQUENCE" \
-    --contact_residues "29,54,56,115,116,117" \
-    --contact_cutoff 12.0 \
-    --max_contact_filter_retries 10 \
-    --num_designs 5 \
-    --num_cycles 7 \
-    --msa_mode mmseqs \
-    --gpu_id 0
+    --protein-seqs "TARGET_SEQUENCE" \
+    --contact-residues "29,54,56,115,116,117" \
+    --contact-cutoff 12.0 \
+    --max-contact-filter-retries 10 \
+    --num-designs 5 \
+    --num-cycles 7 \
+    --msa-mode mmseqs \
+    --gpu-id 0
 ```
 
 ---
@@ -378,14 +378,14 @@ python boltz_ph/design.py \
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--name` | str | required | Job name (used for output folder) |
-| `--gpu_id` | int | `0` | GPU device ID |
-| `--num_designs` | int | — | Total designs to generate (at least one of `--num_designs` or `--num_accepted` required) |
-| `--num_accepted` | int | — | Stop after N designs pass filters (requires `--use_alphafold3_validation`) |
-| `--num_cycles` | int | `5` | Fold→design iterations per run |
-| `--num_gpus` | int | `1` | Number of GPUs for parallel design (multi-GPU mode) |
+| `--gpu-id` | int | `0` | GPU device ID |
+| `--num-designs` | int | — | Total designs to generate (at least one of `--num-designs` or `--num-accepted` required) |
+| `--num-accepted` | int | — | Stop after N designs pass filters (requires `--validation-model` != none) |
+| `--num-cycles` | int | `5` | Fold→design iterations per run |
+| `--num-gpus` | int | `1` | Number of GPUs for parallel design (multi-GPU mode) |
 | `--mode` | str | `"binder"` | `"binder"` or `"unconditional"` |
 
-**Stopping conditions:** You must specify at least one of `--num_designs` or `--num_accepted`. If both are provided, the pipeline stops when *either* target is reached (OR logic). See [Resumable Execution](#resumable-execution) for details.
+**Stopping conditions:** You must specify at least one of `--num-designs` or `--num-accepted`. If both are provided, the pipeline stops when *either* target is reached (OR logic). See [Resumable Execution](#resumable-execution) for details.
 
 ### Multi-GPU Parallelization (Local)
 
@@ -394,10 +394,10 @@ Run designs in parallel across multiple GPUs on a single machine:
 ```bash
 python boltz_ph/design.py \
     --name parallel_design \
-    --protein_seqs "TARGET_SEQUENCE" \
-    --num_designs 40 \
-    --num_gpus 8 \
-    --use_alphafold3_validation
+    --protein-seqs "TARGET_SEQUENCE" \
+    --num-designs 40 \
+    --num-gpus 8 \
+    --validation-model af3
 ```
 
 **How it works:**
@@ -421,75 +421,75 @@ python boltz_ph/design.py \
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--seq` | str | `""` | Starting binder sequence (empty = random) |
-| `--min_protein_length` | int | `100` | Minimum binder length (if random start) |
-| `--max_protein_length` | int | `150` | Maximum binder length (if random start) |
-| `--percent_X` | int | `90` | % of "X" (unknown) in initial sequence |
+| `--min-protein-length` | int | `100` | Minimum binder length (if random start) |
+| `--max-protein-length` | int | `150` | Maximum binder length (if random start) |
+| `--percent-x` | int | `90` | % of "X" (unknown) in initial sequence |
 | `--cyclic` | flag | `False` | Design cyclic peptide |
 
 ### Target Specification
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--protein_seqs` | str | `""` | Target protein sequence(s), `:` separated |
-| `--ligand_smiles` | str | `""` | Target ligand as SMILES |
-| `--ligand_ccd` | str | `""` | Target ligand as CCD code (e.g., `"SAM"`) |
-| `--nucleic_seq` | str | `""` | Target DNA/RNA sequence |
-| `--nucleic_type` | str | `"dna"` | `"dna"` or `"rna"` |
+| `--protein-seqs` | str | `""` | Target protein sequence(s), `:` separated |
+| `--ligand-smiles` | str | `""` | Target ligand as SMILES |
+| `--ligand-ccd` | str | `""` | Target ligand as CCD code (e.g., `"SAM"`) |
+| `--nucleic-seq` | str | `""` | Target DNA/RNA sequence |
+| `--nucleic-type` | str | `"dna"` | `"dna"` or `"rna"` |
 
 ### Template Settings
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--template_path` | str | `""` | PDB code, file path, or AlphaFold ID |
-| `--template_cif_chain_id` | str | `""` | Chain ID(s) in template for alignment |
-| `--msa_mode` | str | `"mmseqs"` | `"mmseqs"` (generate MSA) or `"single"` (no MSA) |
+| `--template-path` | str | `""` | PDB code, file path, or AlphaFold ID |
+| `--template-cif-chain-id` | str | `""` | Chain ID(s) in template for alignment |
+| `--msa-mode` | str | `"mmseqs"` | `"mmseqs"` (generate MSA) or `"single"` (no MSA) |
 
 ### Hotspot/Contact Settings
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--contact_residues` | str | `""` | Target residues to contact (e.g., `"10,20,30"`) |
-| `--use_auth_numbering` | flag | `False` | Use PDB "author" residue numbers for hotspots |
-| `--contact_cutoff` | float | `15.0` | Contact distance threshold (Å) |
-| `--max_contact_filter_retries` | int | `6` | Retries if contacts unsatisfied |
-| `--no_contact_filter` | flag | `False` | Disable contact filtering |
+| `--contact-residues` | str | `""` | Target residues to contact (e.g., `"10,20,30"`) |
+| `--use-auth-numbering` | flag | `False` | Use PDB "author" residue numbers for hotspots |
+| `--contact-cutoff` | float | `15.0` | Contact distance threshold (Å) |
+| `--max-contact-filter-retries` | int | `6` | Retries if contacts unsatisfied |
+| `--no-contact-filter` | flag | `False` | Disable contact filtering |
 
 ### Sequence Design (MPNN) Settings
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--temperature` | float | `0.1` | MPNN sampling temperature |
-| `--omit_AA` | str | `"C"` | Amino acids to exclude |
-| `--alanine_bias` | str | **`True`** | Penalize alanine (use `false` to disable) |
-| `--alanine_bias_start` | float | `-0.5` | Initial alanine penalty |
-| `--alanine_bias_end` | float | `-0.1` | Final alanine penalty |
+| `--omit-aa` | str | `"C"` | Amino acids to exclude |
+| `--alanine-bias` | str | **`True`** | Penalize alanine (use `false` to disable) |
+| `--alanine-bias-start` | float | `-0.5` | Initial alanine penalty |
+| `--alanine-bias-end` | float | `-0.1` | Final alanine penalty |
 
 ### Quality Thresholds
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--high_iptm_threshold` | float | `0.8` | Min ipTM to save design |
-| `--high_plddt_threshold` | float | `0.8` | Min pLDDT to save design |
+| `--high-iptm-threshold` | float | `0.8` | Min ipTM to save design |
+| `--high-plddt-threshold` | float | `0.8` | Min pLDDT to save design |
 
 ### Model Settings
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--boltz_model_version` | str | `"boltz2"` | `"boltz1"` or `"boltz2"` |
-| `--diffuse_steps` | int | `200` | Diffusion timesteps |
-| `--recycling_steps` | int | `3` | Model recycling passes per prediction |
+| `--boltz-model-version` | str | `"boltz2"` | `"boltz1"` or `"boltz2"` |
+| `--diffuse-steps` | int | `200` | Diffusion timesteps |
+| `--recycling-steps` | int | `3` | Model recycling passes per prediction |
 
-**Note on `--recycling_steps`:**
-This controls the number of internal refinement passes within each structure prediction. More recycles = more refined prediction per cycle, but slower. This is different from `--num_cycles` which controls the outer design loop (fold → redesign → fold → ...). Default of 3 is standard for AlphaFold-style models.
+**Note on `--recycling-steps`:**
+This controls the number of internal refinement passes within each structure prediction. More recycles = more refined prediction per cycle, but slower. This is different from `--num-cycles` which controls the outer design loop (fold → redesign → fold → ...). Default of 3 is standard for AlphaFold-style models.
 
 ### Output Settings
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--save_dir` | str | `""` | Custom output directory |
+| `--save-dir` | str | `""` | Custom output directory |
 | `--plot` | flag | `False` | Generate optimization plots |
 
-### AlphaFold3 Validation (Optional)
+### Validation (Optional)
 
 AF3 validation provides orthogonal structure prediction to verify Boltz designs hold up when re-predicted by a different model. This is crucial because self-consistency (Boltz predicting its own designs) can be optimistically biased.
 
@@ -511,9 +511,13 @@ When enabled, the pipeline:
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--use_alphafold3_validation` | flag | `False` | Enable AF3 cross-validation pipeline |
-| `--alphafold_dir` | str | `"~/alphafold3"` | AF3 installation path (local only) |
-| `--use_msa_for_af3` | bool | **`True`** | Reuse MSAs from design phase for AF3 |
+| `--validation-model` | choice | `"none"` | Validation backend: `none`, `af3` (AlphaFold3), or `protenix` (open-source AF3) |
+| `--scoring-method` | choice | `"pyrosetta"` | Interface scoring: `pyrosetta` or `opensource` (OpenMM + FreeSASA) |
+| `--alphafold-dir` | str | `"~/alphafold3"` | AF3 installation path (only for `--validation-model af3`) |
+| `--use-msa-for-validation` | bool | **`True`** | Reuse MSAs from design phase for validation |
+| `--verbose` | flag | `False` | Verbose logs for validation/scoring |
+
+> Deprecated aliases still work locally: `--use-alphafold3-validation`, `--use-msa-for-af3`, `--use-open-scoring`.
 
 #### APO Stability Check
 
@@ -563,11 +567,20 @@ Designs are accepted if they pass ALL of the following (protein targets):
 # Local — run until 5 designs pass all filters (or 100 total attempts)
 python boltz_ph/design.py \
     --name PDL1_validated \
-    --protein_seqs "AFTVTVPK..." \
-    --num_designs 100 \
-    --num_accepted 5 \
-    --use_alphafold3_validation \
-    --alphafold_dir ~/alphafold3
+    --protein-seqs "AFTVTVPK..." \
+    --num-designs 100 \
+    --num-accepted 5 \
+    --validation-model af3 \
+    --alphafold-dir ~/alphafold3
+
+# Local with Protenix + open-source scoring (fully open-source)
+python boltz_ph/design.py \
+    --name PDL1_open \
+    --protein-seqs "AFTVTVPK..." \
+    --num-designs 100 \
+    --num-accepted 5 \
+    --validation-model protenix \
+    --scoring-method opensource
 
 # Modal with Protenix (fully open-source, recommended)
 modal run modal_boltz_ph_cli.py::run_pipeline \
@@ -611,7 +624,7 @@ results_my_design/
 
 ### Full Output (With Validation)
 
-When using `--use_alphafold3_validation` (local) or `--validation-model {af3,protenix}` (Modal):
+When using `--validation-model {af3,protenix}` (local or Modal):
 
 ```
 results_my_design/
@@ -702,14 +715,14 @@ You must specify at least one stopping condition:
 
 | Flag | Description |
 |------|-------------|
-| `--num_designs N` | Stop after N total designs generated |
-| `--num_accepted N` | Stop after N designs pass all filters |
+| `--num-designs N` | Stop after N total designs generated |
+| `--num-accepted N` | Stop after N designs pass all filters |
 
 **Rules:**
 1. At least one required
 2. Both allowed — first condition met triggers exit (OR logic)
-3. `--num_accepted` requires `--use_alphafold3_validation`
-4. `--num_accepted` alone prints a warning (no upper limit on attempts)
+3. `--num-accepted` requires validation (`--validation-model` != none)
+4. `--num-accepted` alone prints a warning (no upper limit on attempts)
 
 ### Examples
 
@@ -717,29 +730,29 @@ You must specify at least one stopping condition:
 # Generate exactly 50 designs (classic mode, resumable)
 python boltz_ph/design.py \
     --name PDL1 \
-    --num_designs 50 \
-    --protein_seqs "..."
+    --num-designs 50 \
+    --protein-seqs "..."
 
 # Generate until 10 pass filters (warning: no upper limit)
 python boltz_ph/design.py \
     --name PDL1 \
-    --num_accepted 10 \
-    --use_alphafold3_validation \
-    --protein_seqs "..."
+    --num-accepted 10 \
+    --validation-model af3 \
+    --protein-seqs "..."
 
 # Recommended: Generate until 10 accepted OR 500 total (whichever comes first)
 python boltz_ph/design.py \
     --name PDL1 \
-    --num_designs 500 \
-    --num_accepted 10 \
-    --use_alphafold3_validation \
-    --protein_seqs "..."
+    --num-designs 500 \
+    --num-accepted 10 \
+    --validation-model af3 \
+    --protein-seqs "..."
 
 # Resume a crashed job (just re-run the same command)
 python boltz_ph/design.py \
     --name PDL1 \
-    --num_designs 50 \
-    --protein_seqs "..."
+    --num-designs 50 \
+    --protein-seqs "..."
 # → "Found 32 existing designs. Resuming from design 32..."
 ```
 
@@ -822,16 +835,16 @@ When AF3 validation is enabled for protein targets, PyRosetta calculates interfa
 ```bash
 python boltz_ph/design.py \
     --name PDL1_binder \
-    --protein_seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
-    --num_designs 5 \
-    --num_cycles 7 \
-    --min_protein_length 90 \
-    --max_protein_length 150 \
-    --percent_X 50 \
-    --msa_mode mmseqs \
-    --high_iptm_threshold 0.7 \
+    --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --num-designs 5 \
+    --num-cycles 7 \
+    --min-protein-length 90 \
+    --max-protein-length 150 \
+    --percent-x 50 \
+    --msa-mode mmseqs \
+    --high-iptm-threshold 0.7 \
     --plot \
-    --gpu_id 0
+    --gpu-id 0
 ```
 
 ### Example 2: Design with Template Structure
@@ -839,16 +852,16 @@ python boltz_ph/design.py \
 ```bash
 python boltz_ph/design.py \
     --name PDL1_template_design \
-    --protein_seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
-    --template_path "7KPL" \
-    --template_cif_chain_id "B" \
-    --msa_mode single \
-    --num_designs 3 \
-    --num_cycles 7 \
-    --min_protein_length 90 \
-    --max_protein_length 150 \
-    --high_iptm_threshold 0.7 \
-    --gpu_id 0
+    --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --template-path "7KPL" \
+    --template-cif-chain-id "B" \
+    --msa-mode single \
+    --num-designs 3 \
+    --num-cycles 7 \
+    --min-protein-length 90 \
+    --max-protein-length 150 \
+    --high-iptm-threshold 0.7 \
+    --gpu-id 0
 ```
 
 ### Example 3: Hotspot-Directed Design
@@ -856,14 +869,14 @@ python boltz_ph/design.py \
 ```bash
 python boltz_ph/design.py \
     --name PDL1_hotspot_design \
-    --protein_seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
-    --contact_residues "54,56,66,115,121" \
-    --contact_cutoff 12.0 \
-    --num_designs 5 \
-    --num_cycles 7 \
-    --msa_mode mmseqs \
-    --high_iptm_threshold 0.7 \
-    --gpu_id 0
+    --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --contact-residues "54,56,66,115,121" \
+    --contact-cutoff 12.0 \
+    --num-designs 5 \
+    --num-cycles 7 \
+    --msa-mode mmseqs \
+    --high-iptm-threshold 0.7 \
+    --gpu-id 0
 ```
 
 ### Example 4: Refine Existing Binder
@@ -872,12 +885,12 @@ python boltz_ph/design.py \
 python boltz_ph/design.py \
     --name refine_binder \
     --seq "MKAELRQRVQELAEQARQKLEEAEQKRVQELAEQARQKLEE" \
-    --protein_seqs "TARGET_SEQUENCE" \
-    --num_designs 3 \
-    --num_cycles 5 \
-    --msa_mode mmseqs \
-    --high_iptm_threshold 0.85 \
-    --gpu_id 0
+    --protein-seqs "TARGET_SEQUENCE" \
+    --num-designs 3 \
+    --num-cycles 5 \
+    --msa-mode mmseqs \
+    --high-iptm-threshold 0.85 \
+    --gpu-id 0
 ```
 
 ### Example 5: Small Molecule Binder
@@ -885,13 +898,13 @@ python boltz_ph/design.py \
 ```bash
 python boltz_ph/design.py \
     --name SAM_binder \
-    --ligand_ccd SAM \
-    --num_designs 5 \
-    --num_cycles 7 \
-    --min_protein_length 130 \
-    --max_protein_length 150 \
-    --high_iptm_threshold 0.7 \
-    --gpu_id 0
+    --ligand-ccd SAM \
+    --num-designs 5 \
+    --num-cycles 7 \
+    --min-protein-length 130 \
+    --max-protein-length 150 \
+    --high-iptm-threshold 0.7 \
+    --gpu-id 0
 ```
 
 ### Example 6: Cyclic Peptide Binder
@@ -899,16 +912,16 @@ python boltz_ph/design.py \
 ```bash
 python boltz_ph/design.py \
     --name cyclic_peptide \
-    --protein_seqs "TARGET_SEQUENCE" \
+    --protein-seqs "TARGET_SEQUENCE" \
     --cyclic \
-    --num_designs 5 \
-    --num_cycles 7 \
-    --min_protein_length 10 \
-    --max_protein_length 20 \
-    --percent_X 100 \
-    --msa_mode mmseqs \
-    --high_iptm_threshold 0.8 \
-    --gpu_id 0
+    --num-designs 5 \
+    --num-cycles 7 \
+    --min-protein-length 10 \
+    --max-protein-length 20 \
+    --percent-x 100 \
+    --msa-mode mmseqs \
+    --high-iptm-threshold 0.8 \
+    --gpu-id 0
 ```
 
 ### Example 7: Multimer Target (Homodimer)
@@ -916,14 +929,14 @@ python boltz_ph/design.py \
 ```bash
 python boltz_ph/design.py \
     --name dimer_binder \
-    --protein_seqs "CHAIN_B_SEQ:CHAIN_B_SEQ" \
-    --num_designs 3 \
-    --num_cycles 7 \
-    --min_protein_length 90 \
-    --max_protein_length 150 \
-    --msa_mode mmseqs \
-    --high_iptm_threshold 0.7 \
-    --gpu_id 0
+    --protein-seqs "CHAIN_B_SEQ:CHAIN_B_SEQ" \
+    --num-designs 3 \
+    --num-cycles 7 \
+    --min-protein-length 90 \
+    --max-protein-length 150 \
+    --msa-mode mmseqs \
+    --high-iptm-threshold 0.7 \
+    --gpu-id 0
 ```
 
 ### Example 8: Multi-GPU Parallel Design with Template
@@ -931,32 +944,32 @@ python boltz_ph/design.py \
 ```bash
 python boltz_ph/design.py \
     --name parallel_pMHC \
-    --template_path "./pmhc_structure.pdb" \
-    --template_cif_chain_id "A,B" \
-    --contact_residues "|7,8,9,10,11,12,13,14,15,16" \
-    --use_auth_numbering \
-    --num_designs 40 \
-    --num_cycles 5 \
-    --num_gpus 8 \
-    --use_alphafold3_validation \
-    --alphafold_dir ~/alphafold3
+    --template-path "./pmhc_structure.pdb" \
+    --template-cif-chain-id "A,B" \
+    --contact-residues "|7,8,9,10,11,12,13,14,15,16" \
+    --use-auth-numbering \
+    --num-designs 40 \
+    --num-cycles 5 \
+    --num-gpus 8 \
+    --validation-model af3 \
+    --alphafold-dir ~/alphafold3
 ```
 
 ---
 
 ## Tips & Best Practices
 
-1. **Start with lower thresholds** (`--high_iptm_threshold 0.6-0.7`) for initial exploration, then increase for production runs.
+1. **Start with lower thresholds** (`--high-iptm-threshold 0.6-0.7`) for initial exploration, then increase for production runs.
 
-2. **Alanine bias is ON by default** to avoid poly-alanine sequences. Use `--alanine_bias false` only if you specifically want to allow high alanine content.
+2. **Alanine bias is ON by default** to avoid poly-alanine sequences. Use `--alanine-bias false` only if you specifically want to allow high alanine content.
 
 3. **More designs > more cycles**: Running 10 designs × 5 cycles often gives better diversity than 3 designs × 15 cycles.
 
-4. **For difficult targets**, increase `--max_contact_filter_retries` and use hotspots to guide the design.
+4. **For difficult targets**, increase `--max-contact-filter-retries` and use hotspots to guide the design.
 
 5. **Template mode** is recommended when you have high-confidence structures; sequence-only mode is better for exploring conformational flexibility.
 
-6. **Use dual stopping conditions** for production runs: `--num_designs 500 --num_accepted 20` stops when you have 20 good designs OR after 500 attempts, whichever comes first.
+6. **Use dual stopping conditions** for production runs: `--num-designs 500 --num-accepted 20` stops when you have 20 good designs OR after 500 attempts, whichever comes first.
 
 7. **Jobs are resumable**: If a job crashes, just re-run the same command. The pipeline detects existing progress and continues from where it left off.
 
@@ -1020,7 +1033,7 @@ modal run modal_boltz_ph_cli.py::list_gpus
 
 The Modal CLI uses the same arguments as the local pipeline with these differences:
 
-**Syntax:** Use kebab-case (`--protein-seqs`) instead of underscores (`--protein_seqs`)
+**Syntax:** Use kebab-case (`--protein-seqs`). Underscore flags remain as deprecated aliases locally.
 
 **Boolean flags:** Use `--flag=true` or `--flag=false` syntax (e.g., `--alanine-bias=false`)
 
@@ -1321,4 +1334,3 @@ The Chai pathway from upstream. This fork focuses exclusively on Boltz with Moda
   year={2025}
 }
 ```
-

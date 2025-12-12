@@ -1,22 +1,27 @@
 # Local Setup Guide — Protein Hunter (Boltz Edition)
 
-Complete instructions for setting up the Protein Hunter pipeline locally with AlphaFold 3 validation and PyRosetta scoring.
+Complete instructions for setting up the Protein Hunter pipeline locally with multiple validation and scoring options.
 
 ---
 
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
-- [Quick Setup (Basic Pipeline)](#quick-setup-basic-pipeline)
-- [Full Setup (With AF3 Validation)](#full-setup-with-af3-validation)
-  - [Step 1: AlphaFold 3 Docker Setup](#step-1-alphafold-3-docker-setup)
-  - [Step 2: AF3 Weights](#step-2-af3-weights)
+- [Installation Options](#installation-options)
+- [Quick Setup](#quick-setup)
+  - [Full Installation (Recommended)](#full-installation-recommended)
+  - [Open-Source Only (No License Required)](#open-source-only-no-license-required)
+  - [Minimal Installation](#minimal-installation)
+- [Validation Setup](#validation-setup)
+  - [Option A: Protenix (Open-Source)](#option-a-protenix-open-source)
+  - [Option B: AlphaFold 3 (Requires Weights)](#option-b-alphafold-3-requires-weights)
 - [Running the Pipeline](#running-the-pipeline)
   - [Basic Design (No Validation)](#basic-design-no-validation)
-  - [Full Pipeline (With AF3 + PyRosetta)](#full-pipeline-with-af3--pyrosetta)
+  - [With Protenix Validation (Open-Source)](#with-protenix-validation-open-source)
+  - [With AF3 Validation](#with-af3-validation)
 - [Output Structure](#output-structure)
 - [Troubleshooting](#troubleshooting)
-- [GPU Cloud Setup (DataCrunch/Lambda)](#gpu-cloud-setup-datacrunchlambda)
+- [GPU Cloud Setup](#gpu-cloud-setup)
 
 ---
 
@@ -26,21 +31,49 @@ Complete instructions for setting up the Protein Hunter pipeline locally with Al
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| GPU | NVIDIA GPU with 40GB VRAM | A100/H100 (80GB+) |
-| Storage | 100GB | 200GB+ (for AF3 weights + artifactrs) |
+| GPU | NVIDIA GPU with 24GB VRAM | A100/H100 (40GB+) |
+| Storage | 50GB | 200GB+ (for all weights) |
 
 ### Software Requirements
 
 - **Linux** (Ubuntu 20.04/22.04/24.04 recommended)
 - **NVIDIA Driver** (525+ for CUDA 12)
-- **Docker** with NVIDIA Container Toolkit (for AF3)
 - **Conda** (Miniconda or Anaconda)
+- **Docker** with NVIDIA Container Toolkit (only if using AF3 validation)
 
 ---
 
-## Quick Setup (Basic Pipeline)
+## Installation Options
 
-This installs the Boltz design pipeline **without** AlphaFold 3 validation.
+The setup script installs all components by default. Use flags to customize:
+
+| Flag | Effect |
+|------|--------|
+| (default) | Install everything: Boltz, LigandMPNN, PyRosetta, Protenix, OpenMM |
+| `--no-pyrosetta` | Skip PyRosetta (use OpenMM/FreeSASA for scoring instead) |
+| `--no-protenix` | Skip Protenix (use AF3 for validation instead) |
+| `--install-chai` | Install Chai-lab (opt-in, not needed for standard workflows) |
+| `--pkg-manager mamba` | Use mamba instead of conda (faster) |
+| `--fix-channels` | Fix conda channel priority issues |
+
+### Component Overview
+
+| Component | Purpose | License | Installed By Default |
+|-----------|---------|---------|---------------------|
+| **Boltz** | Structure prediction & design | Open-source | ✓ |
+| **LigandMPNN** | Sequence optimization | Open-source | ✓ |
+| **Protenix** | Validation (open-source AF3) | Open-source | ✓ |
+| **OpenMM + FreeSASA** | Structure relaxation & scoring | Open-source | ✓ |
+| **PyRosetta** | Interface scoring (optional) | Academic/Commercial | ✓ |
+| **Chai-lab** | Alternative design engine | Open-source | ✗ (opt-in) |
+
+---
+
+## Quick Setup
+
+### Full Installation (Recommended)
+
+Installs all components including PyRosetta (requires license) and Protenix:
 
 ```bash
 # Clone the repository
@@ -55,36 +88,81 @@ chmod +x setup.sh
 conda activate proteinhunter
 ```
 
-The setup script will:
-1. Create a conda environment (`proteinhunter`)
-2. Install Boltz and LigandMPNN
-3. Install PyRosetta
-4. Download Boltz model weights (~5GB to `~/.boltz/`)
+This installs:
+- Boltz (core design engine)
+- LigandMPNN (sequence design)
+- PyRosetta (interface scoring)
+- Protenix (open-source validation)
+- OpenMM + FreeSASA (structure relaxation)
 
-### Test Basic Installation
+### Open-Source Only (No License Required)
+
+Skip PyRosetta if you don't have a license. Uses OpenMM + FreeSASA for scoring:
 
 ```bash
-conda activate proteinhunter
+./setup.sh --no-pyrosetta
 
+# Activate
+conda activate proteinhunter
+```
+
+When running designs, use `--scoring-method opensource`:
+
+```bash
 python boltz_ph/design.py \
-    --name test_design \
-    --protein_seqs "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALEHHHHHH" \
-    --num_designs 1 \
-    --num_cycles 3 \
-    --min_protein_length 60 \
-    --max_protein_length 90 \
-    --gpu_id 0
+    --name my_design \
+    --protein-seqs "YOUR_SEQUENCE" \
+    --validation-model protenix \
+    --scoring-method opensource \
+    --num-designs 5
+```
+
+### Minimal Installation
+
+For basic design without validation (fastest setup):
+
+```bash
+./setup.sh --no-pyrosetta --no-protenix
+
+# Activate
+conda activate proteinhunter
 ```
 
 ---
 
-## Full Setup (With AF3 Validation)
+## Validation Setup
 
-For production use, enable AlphaFold 3 validation and PyRosetta filtering to verify your designs.
+Protein Hunter supports two validation backends:
 
-### Step 1: AlphaFold 3 Docker Setup
+| Backend | Requirements | Weights | License |
+|---------|--------------|---------|---------|
+| **Protenix** | Included in setup | Auto-download (~1.4GB) | Open-source |
+| **AlphaFold 3** | Docker + manual setup | Request from Google (~5GB) | Research only |
 
-#### Install Docker with NVIDIA Support
+### Option A: Protenix (Open-Source)
+
+Protenix is installed by default. Weights are automatically downloaded on first use to `~/.protein-hunter/protenix_weights/`.
+
+**No additional setup required!**
+
+Test Protenix validation:
+
+```bash
+python boltz_ph/design.py \
+    --name protenix_test \
+    --protein-seqs "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALEHHHHHH" \
+    --num-designs 1 \
+    --num-cycles 3 \
+    --validation-model protenix \
+    --scoring-method opensource \
+    --gpu-id 0
+```
+
+### Option B: AlphaFold 3 (Requires Weights)
+
+AF3 requires manual Docker setup and weights from Google DeepMind.
+
+#### Step 1: Install Docker with NVIDIA Support
 
 ```bash
 # Install Docker
@@ -105,45 +183,28 @@ sudo systemctl restart docker
 docker run --rm --gpus all nvidia/cuda:12.1-base nvidia-smi
 ```
 
-#### Clone and Build AlphaFold 3
+#### Step 2: Clone and Build AlphaFold 3
 
 ```bash
-# Clone AlphaFold 3
 git clone https://github.com/google-deepmind/alphafold3.git ~/alphafold3
 cd ~/alphafold3
-
-# Build the Docker image (takes 10-20 minutes)
-docker build -t alphafold3 .
+docker build -t alphafold3 .  # Takes 10-20 minutes
 ```
 
-### Step 2: AF3 Weights
+#### Step 3: Download AF3 Weights
 
-AlphaFold 3 requires model weights (~5GB). You must request access from Google DeepMind.
-
-#### Option A: Using Pre-downloaded Weights
-
-If you have `af3.bin.zst`:
+Request access from Google DeepMind, then:
 
 ```bash
-# Create models directory
 mkdir -p ~/alphafold3/models
-
-# Copy and decompress weights
-cp /path/to/af3.bin.zst ~/alphafold3/models/
+# Copy your af3.bin.zst to ~/alphafold3/models/
 cd ~/alphafold3/models
 zstd -d af3.bin.zst  # Creates af3.bin (~5GB)
 ```
 
-#### Option B: Request from Google
-
-1. Visit: https://github.com/google-deepmind/alphafold3
-2. Follow their instructions to request weights
-3. Download and place in `~/alphafold3/models/af3.bin`
-
-### Verify AF3 Installation
+#### Verify AF3 Installation
 
 ```bash
-# Test AF3 Docker container
 docker run --rm --gpus all alphafold3 python -c "print('AF3 container works!')"
 ```
 
@@ -160,52 +221,93 @@ conda activate proteinhunter
 
 python boltz_ph/design.py \
     --name my_binder \
-    --protein_seqs "YOUR_TARGET_SEQUENCE" \
-    --num_designs 5 \
-    --num_cycles 7 \
-    --min_protein_length 80 \
-    --max_protein_length 120 \
-    --alanine_bias \
-    --gpu_id 0
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-designs 5 \
+    --num-cycles 7 \
+    --min-protein-length 80 \
+    --max-protein-length 120 \
+    --alanine-bias \
+    --gpu-id 0
 ```
 
-### Full Pipeline (With AF3 + PyRosetta)
+### With Protenix Validation (Open-Source)
 
-Enable validation to filter and score designs:
+**Recommended for most users** - no external dependencies or licenses:
 
 ```bash
-conda activate proteinhunter
-
 python boltz_ph/design.py \
     --name my_binder_validated \
-    --protein_seqs "YOUR_TARGET_SEQUENCE" \
-    --num_designs 10 \
-    --num_cycles 7 \
-    --min_protein_length 80 \
-    --max_protein_length 120 \
-    --alanine_bias \
-    --use_alphafold3_validation \
-    --alphafold_dir ~/alphafold3 \
-    --af3_docker_name alphafold3 \
-    --gpu_id 0
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-designs 10 \
+    --num-cycles 7 \
+    --min-protein-length 80 \
+    --max-protein-length 120 \
+    --alanine-bias \
+    --validation-model protenix \
+    --scoring-method opensource \
+    --gpu-id 0
 ```
 
-### PDL1 Example (Tested)
+With PyRosetta scoring (if installed):
+
+```bash
+python boltz_ph/design.py \
+    --name my_binder_validated \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-designs 10 \
+    --validation-model protenix \
+    --scoring-method pyrosetta \
+    --gpu-id 0
+```
+
+### With AF3 Validation
+
+For highest accuracy (requires AF3 setup):
+
+```bash
+python boltz_ph/design.py \
+    --name my_binder_af3 \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-designs 10 \
+    --num-cycles 7 \
+    --alanine-bias \
+    --validation-model af3 \
+    --alphafold-dir ~/alphafold3 \
+    --af3-docker-name alphafold3 \
+    --gpu-id 0
+```
+
+### PDL1 Example
 
 ```bash
 python boltz_ph/design.py \
     --name PDL1_design \
-    --protein_seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
-    --num_designs 5 \
-    --num_cycles 7 \
-    --alanine_bias \
-    --use_alphafold3_validation \
-    --alphafold_dir ~/alphafold3 \
-    --af3_docker_name alphafold3 \
-    --min_protein_length 60 \
-    --max_protein_length 90 \
-    --gpu_id 0
+    --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
+    --num-designs 5 \
+    --num-cycles 7 \
+    --alanine-bias \
+    --validation-model protenix \
+    --scoring-method opensource \
+    --min-protein-length 60 \
+    --max-protein-length 90 \
+    --gpu-id 0
 ```
+
+### Validation & Scoring Options
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `--validation-model` | `none`, `af3`, `protenix` | Structure validation method |
+| `--scoring-method` | `pyrosetta`, `opensource` | Interface scoring method |
+
+**Recommended combinations:**
+
+| Use Case | Validation | Scoring |
+|----------|------------|---------|
+| Fully open-source | `protenix` | `opensource` |
+| Best accuracy | `af3` | `pyrosetta` |
+| No PyRosetta license | `protenix` or `af3` | `opensource` |
+| Fast iteration | `none` | N/A |
 
 ---
 
@@ -238,7 +340,31 @@ results_{name}/
 
 ### Common Issues
 
-#### 1. `libgfortran.so.5: cannot open shared object file`
+#### 1. `PyRosetta not installed` error
+
+You selected `--scoring-method pyrosetta` but PyRosetta isn't installed:
+
+```bash
+# Option 1: Re-run setup with PyRosetta
+./setup.sh  # Full install includes PyRosetta
+
+# Option 2: Use open-source scoring instead
+python boltz_ph/design.py ... --scoring-method opensource
+```
+
+#### 2. `Protenix repository not found` error
+
+You selected `--validation-model protenix` but Protenix isn't installed:
+
+```bash
+# Option 1: Re-run setup with Protenix
+./setup.sh  # Full install includes Protenix
+
+# Option 2: Manually clone Protenix
+git clone https://github.com/bytedance/Protenix.git ~/Protein-Hunter/Protenix
+```
+
+#### 3. `libgfortran.so.5: cannot open shared object file`
 
 PyRosetta's DAlphaBall requires libgfortran:
 
@@ -250,26 +376,31 @@ sudo apt-get install libgfortran5
 sudo yum install libgfortran
 ```
 
-#### 2. `CUDA out of memory`
+#### 4. `CUDA out of memory`
 
-Reduce batch size or use a larger GPU:
+Reduce binder size or use a larger GPU:
 
 ```bash
-# Try smaller designs
---min_protein_length 50 --max_protein_length 80
+--min-protein-length 50 --max-protein-length 80
 ```
 
-#### 3. AF3 Docker Permission Denied
+#### 5. AF3 Docker Permission Denied
 
 ```bash
 # Add user to docker group
 sudo usermod -aG docker $USER
 newgrp docker
-
-# Or run with sudo (not recommended for production)
 ```
 
-#### 4. `conda: command not found` in setup.sh
+#### 6. Conda dependency resolution slow/failing
+
+Use mamba for faster resolution:
+
+```bash
+./setup.sh --pkg-manager mamba --fix-channels
+```
+
+#### 7. `conda: command not found`
 
 Install Miniconda first:
 
@@ -283,7 +414,7 @@ source ~/.bashrc
 
 ## GPU Cloud Setup
 
-For cloud GPU instances, follow this setup sequence:
+For cloud GPU instances (DataCrunch, Lambda, etc.):
 
 ### 1. SSH to Instance
 
@@ -291,25 +422,11 @@ For cloud GPU instances, follow this setup sequence:
 ssh root@YOUR_INSTANCE_IP -i /path/to/ssh_key
 ```
 
-### 2. Install Dependencies
+### 2. Install System Dependencies
 
 ```bash
-# Update system
 apt-get update && apt-get upgrade -y
-
-# Install required packages
 apt-get install -y git wget curl zstd libgfortran5
-
-# Install Docker (if not pre-installed)
-curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
-
-# Install NVIDIA Container Toolkit
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
-curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | \
-    sudo tee /etc/apt/sources.list.d/nvidia-docker.list
-apt-get update && apt-get install -y nvidia-container-toolkit
-systemctl restart docker
 ```
 
 ### 3. Install Miniconda
@@ -328,66 +445,62 @@ source ~/.bashrc
 git clone https://github.com/cytokineking/Protein-Hunter.git ~/Protein-Hunter
 cd ~/Protein-Hunter
 
-# Accept Conda TOS if needed
-conda tos accept
-
-# Run setup
-chmod +x setup.sh
+# Full installation (with PyRosetta)
 ./setup.sh
+
+# OR open-source only (no license needed)
+./setup.sh --no-pyrosetta
 ```
 
-### 5. Setup AlphaFold 3
+### 5. (Optional) Setup AF3 for Validation
+
+If using AF3 instead of Protenix:
 
 ```bash
-# Clone AF3
-git clone https://github.com/google-deepmind/alphafold3.git ~/alphafold3
+# Install Docker
+curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
 
-# Build Docker image
+# Install NVIDIA Container Toolkit
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | \
+    sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+apt-get update && apt-get install -y nvidia-container-toolkit
+systemctl restart docker
+
+# Build AF3
+git clone https://github.com/google-deepmind/alphafold3.git ~/alphafold3
 cd ~/alphafold3
 docker build -t alphafold3 .
 
-# Create models directory
+# Transfer weights from local machine
 mkdir -p ~/alphafold3/models
+# (transfer af3.bin.zst via rsync/scp)
+cd ~/alphafold3/models && zstd -d af3.bin.zst
 ```
 
-### 6. Transfer AF3 Weights (from local)
-
-```bash
-# On your LOCAL machine
-rsync -avz --progress -e "ssh -i /path/to/ssh_key" \
-    /path/to/af3.bin.zst \
-    root@YOUR_INSTANCE_IP:~/alphafold3/models/
-
-# On REMOTE instance
-cd ~/alphafold3/models
-zstd -d af3.bin.zst
-```
-
-### 7. Run a Test Job
+### 6. Run a Test Job
 
 ```bash
 source ~/miniconda/etc/profile.d/conda.sh
 conda activate proteinhunter
 cd ~/Protein-Hunter
 
+# Using Protenix (simplest)
 python boltz_ph/design.py \
     --name cloud_test \
-    --protein_seqs "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALEHHHHHH" \
-    --num_designs 2 \
-    --num_cycles 5 \
-    --alanine_bias \
-    --use_alphafold3_validation \
-    --alphafold_dir ~/alphafold3 \
-    --af3_docker_name alphafold3 \
-    --min_protein_length 60 \
-    --max_protein_length 90 \
-    --gpu_id 0
+    --protein-seqs "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALEHHHHHH" \
+    --num-designs 2 \
+    --num-cycles 5 \
+    --validation-model protenix \
+    --scoring-method opensource \
+    --gpu-id 0
 ```
 
-### 8. Sync Results Back (from local)
+### 7. Sync Results Back
 
 ```bash
-# On LOCAL machine - one-time sync
+# On LOCAL machine
 rsync -avz --progress -e "ssh -i /path/to/ssh_key" \
     root@YOUR_INSTANCE_IP:~/Protein-Hunter/results_*/ \
     ./local_results/
@@ -404,4 +517,3 @@ done
 ---
 
 *Last updated: December 2025*
-

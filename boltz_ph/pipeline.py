@@ -16,7 +16,7 @@ from LigandMPNN.wrapper import LigandMPNNWrapper
 
 from boltz_ph.constants import CHAIN_TO_NUMBER, UNIFIED_DESIGN_COLUMNS
 from utils.metrics import get_CA_and_sequence # Used implicitly in design.py
-from utils.convert import calculate_holo_apo_rmsd, convert_cif_files_to_pdb
+from utils.convert import calculate_holo_apo_rmsd, convert_cif_files_to_pdb, convert_cif_to_pdb
 from utils.ipsae_utils import calculate_ipsae_from_boltz_output
 from utils.csv_utils import append_to_csv_safe, update_csv_row
 
@@ -661,7 +661,7 @@ class ProteinHunter_Boltz:
         # Set initial binder sequence
         if a.seq =="":
             initial_seq = sample_seq(
-                binder_length, exclude_P=a.exclude_P, frac_X=a.percent_X/100
+                binder_length, exclude_P=a.exclude_p, frac_X=a.percent_x/100
             )
         else:
             initial_seq = a.seq
@@ -739,7 +739,7 @@ class ProteinHunter_Boltz:
                 break
 
             # Resample initial sequence
-            new_seq = sample_seq(binder_length, exclude_P=a.exclude_P, frac_X=a.percent_X/100)
+            new_seq = sample_seq(binder_length, exclude_P=a.exclude_p, frac_X=a.percent_x/100)
             update_binder_sequence(new_seq)
             clean_memory()
 
@@ -840,7 +840,7 @@ class ProteinHunter_Boltz:
                 "pdb_file": pdb_filename,
                 "temperature": a.temperature,
                 "chains_to_design": self.binder_chain,
-                "omit_AA": f"{a.omit_AA},P" if cycle == 0 else a.omit_AA,
+                "omit_AA": f"{a.omit_aa},P" if cycle == 0 else a.omit_aa,
                 "bias_AA": f"A:{alpha}" if a.alanine_bias else "",
             }
 
@@ -1118,12 +1118,182 @@ class ProteinHunter_Boltz:
             print(f"No best_designs.csv found at {best_designs_csv}. Skipping downstream validation.")
             return
 
-        print("Starting downstream validation (AlphaFold3 and Rosetta)...")
         print(f"Using designs from: {best_designs_csv}")
 
         # Load design metadata for later joining
         best_designs_df = pd.read_csv(best_designs_csv)
         design_metadata = {row["design_id"]: row.to_dict() for _, row in best_designs_df.iterrows()}
+
+        validation_model = getattr(a, "validation_model", "none")
+        scoring_method = getattr(a, "scoring_method", "pyrosetta")
+        print(f"Starting downstream validation (validation={validation_model}, scoring={scoring_method})...")
+
+        # -------------------------------------------------------------------
+        # Protenix downstream validation (design-by-design)
+        # -------------------------------------------------------------------
+        if validation_model == "protenix":
+            from boltz_ph.validation.protenix_local import run_protenix_validation_local
+            from boltz_ph.scoring.opensource_local import run_opensource_scoring_local
+
+            refolded_dir = Path(self.save_dir) / "refolded"
+            accepted_dir = Path(self.save_dir) / "accepted_designs"
+            rejected_dir = Path(self.save_dir) / "rejected"
+            refolded_dir.mkdir(parents=True, exist_ok=True)
+            accepted_dir.mkdir(parents=True, exist_ok=True)
+            rejected_dir.mkdir(parents=True, exist_ok=True)
+
+            target_msas = self._load_target_msas_for_validation()
+
+            for _, row in best_designs_df.iterrows():
+                design_id = row.get("design_id")
+                binder_seq = row.get("binder_sequence", "") or row.get("binder_seq", "")
+                target_seq = row.get("target_seqs", "") or row.get("protein_seqs", "")
+
+                val_result = run_protenix_validation_local(
+                    design_id=design_id,
+                    binder_seq=binder_seq,
+                    target_seq=target_seq,
+                    target_msas=target_msas if target_msas else None,
+                    verbose=getattr(a, "verbose", False),
+                )
+
+                if val_result.get("error"):
+                    merged = {**row.to_dict(), **val_result}
+                    merged["accepted"] = False
+                    merged["rejection_reason"] = val_result["error"]
+                else:
+                    # Save refolded CIF
+                    holo_cif = val_result.get("af3_structure")
+                    if holo_cif:
+                        (refolded_dir / f"{design_id}_refolded.cif").write_text(holo_cif)
+
+                    if target_type != "protein":
+                        merged = {**row.to_dict(), **val_result, "accepted": True, "rejection_reason": ""}
+                    else:
+                        if getattr(a, "scoring_method", "pyrosetta") == "opensource":
+                            scoring = run_opensource_scoring_local(
+                                design_id=design_id,
+                                af3_structure=holo_cif,
+                                af3_iptm=val_result.get("af3_iptm", 0.0),
+                                af3_ptm=val_result.get("af3_ptm", 0.0),
+                                af3_plddt=val_result.get("af3_plddt", 0.0),
+                                binder_chain="A",
+                                target_chain="B",
+                                apo_structure=val_result.get("apo_structure"),
+                                af3_confidence_json=val_result.get("af3_confidence_json"),
+                                target_type=target_type,
+                                verbose=getattr(a, "verbose", False),
+                            )
+                            # Persist relaxed PDB
+                            relaxed_text = scoring.pop("relaxed_pdb", None)
+                            if relaxed_text:
+                                out_dir = accepted_dir if scoring.get("accepted") else rejected_dir
+                                (out_dir / f"{design_id}_relaxed.pdb").write_text(relaxed_text)
+                            merged = {**row.to_dict(), **val_result, **scoring}
+                        else:
+                            # PyRosetta scoring for Protenix batch validation
+                            from utils.pyrosetta_utils import run_rosetta_step
+
+                            # Create per-design work directory
+                            design_work_dir = os.path.join(work_dir_validation, design_id)
+                            os.makedirs(design_work_dir, exist_ok=True)
+
+                            # Create temp PDB directories for PyRosetta
+                            protenix_pdb_dir = os.path.join(design_work_dir, "protenix_pdb_holo")
+                            protenix_pdb_dir_apo = os.path.join(design_work_dir, "protenix_pdb_apo")
+                            os.makedirs(protenix_pdb_dir, exist_ok=True)
+                            os.makedirs(protenix_pdb_dir_apo, exist_ok=True)
+
+                            # Convert HOLO CIF to PDB
+                            holo_cif_path = refolded_dir / f"{design_id}_refolded.cif"
+                            holo_pdb_path = os.path.join(protenix_pdb_dir, f"{design_id}.pdb")
+                            if holo_cif_path.exists():
+                                convert_cif_to_pdb(str(holo_cif_path), holo_pdb_path)
+
+                            # Convert APO CIF to PDB if available
+                            apo_cif = val_result.get("apo_structure")
+                            if apo_cif:
+                                apo_cif_path = os.path.join(design_work_dir, f"{design_id}_apo.cif")
+                                Path(apo_cif_path).write_text(apo_cif)
+                                apo_pdb_path = os.path.join(protenix_pdb_dir_apo, f"{design_id}_apo.pdb")
+                                convert_cif_to_pdb(apo_cif_path, apo_pdb_path)
+
+                            # Run PyRosetta scoring
+                            pyrosetta_result = None
+                            if os.path.exists(holo_pdb_path):
+                                run_rosetta_step(
+                                    design_work_dir,
+                                    protenix_pdb_dir,
+                                    protenix_pdb_dir_apo,
+                                    binder_id=self.binder_chain,
+                                    target_type=target_type,
+                                )
+
+                                # Parse PyRosetta results
+                                rosetta_success_dir = os.path.join(design_work_dir, "af_pdb_rosetta_success")
+                                success_csv_path = os.path.join(rosetta_success_dir, "success_designs.csv")
+                                failed_csv_path = os.path.join(rosetta_success_dir, "failed_designs.csv")
+
+                                if os.path.exists(success_csv_path) and os.path.getsize(success_csv_path) > 0:
+                                    try:
+                                        success_df = pd.read_csv(success_csv_path)
+                                        if len(success_df) > 0:
+                                            pr_row = success_df.iloc[0]
+                                            pyrosetta_result = {
+                                                "accepted": True,
+                                                "rejection_reason": "",
+                                                "pdb_path": pr_row.get("PDB", ""),
+                                                "model_name": pr_row.get("Model", ""),
+                                                **{k: pr_row.get(k) for k in pr_row.index},
+                                            }
+                                    except pd.errors.EmptyDataError:
+                                        pass
+
+                                if pyrosetta_result is None and os.path.exists(failed_csv_path) and os.path.getsize(failed_csv_path) > 0:
+                                    try:
+                                        failed_df = pd.read_csv(failed_csv_path)
+                                        if len(failed_df) > 0:
+                                            pr_row = failed_df.iloc[0]
+                                            pyrosetta_result = {
+                                                "accepted": False,
+                                                "rejection_reason": pr_row.get("failure_reason", "pyrosetta_filter_failed"),
+                                                "pdb_path": pr_row.get("PDB", ""),
+                                                "model_name": pr_row.get("Model", ""),
+                                                **{k: pr_row.get(k) for k in pr_row.index},
+                                            }
+                                    except pd.errors.EmptyDataError:
+                                        pass
+
+                            if pyrosetta_result is None:
+                                pyrosetta_result = {"accepted": False, "rejection_reason": "pyrosetta_failed"}
+
+                            # Persist relaxed PDB
+                            if pyrosetta_result.get("pdb_path") and pyrosetta_result.get("model_name"):
+                                src_pdb = os.path.join(pyrosetta_result["pdb_path"], pyrosetta_result["model_name"])
+                                if os.path.exists(src_pdb):
+                                    out_dir = accepted_dir if pyrosetta_result.get("accepted") else rejected_dir
+                                    shutil.copy(src_pdb, out_dir / f"{design_id}_relaxed.pdb")
+
+                            merged = {**row.to_dict(), **val_result, **pyrosetta_result}
+
+                            # Clean up per-design work directory
+                            try:
+                                shutil.rmtree(design_work_dir, ignore_errors=True)
+                            except Exception:
+                                pass
+
+                # Strip large blobs before CSV output
+                for k in ("af3_structure", "af3_confidence_json", "apo_structure"):
+                    merged.pop(k, None)
+
+                self._save_design_result(merged)
+                self._update_design_status(
+                    design_id,
+                    merged.get("accepted", False),
+                    merged.get("rejection_reason", ""),
+                )
+
+            return
 
         # --- AlphaFold Step ---
         # Note: high_iptm=False to convert ALL CIFs without filtering.
@@ -1141,7 +1311,7 @@ class ProteinHunter_Boltz:
                 binder_id=self.binder_chain,
                 gpu_id=getattr(a, 'physical_gpu_id', a.gpu_id),  # Use physical GPU for Docker
                 high_iptm=False,  # Don't filter at AF3 stage - let PyRosetta handle all filtering
-                use_msa_for_af3=a.use_msa_for_af3,
+                use_msa_for_af3=getattr(a, "use_msa_for_validation", a.use_msa_for_af3),
                 msa_cache_dir=self.designs_dir,  # Use cached MSAs from Boltz design
             )
         )
@@ -1447,6 +1617,467 @@ class ProteinHunter_Boltz:
         print(f"      ├── rejected_stats.csv")
         print(f"      └── *_relaxed.pdb")
 
+    def _run_single_design_validation_v2(self, design_metrics: dict) -> dict:
+        """
+        Run validation + interface scoring for a SINGLE design using the selected backends.
+
+        Supports:
+          - AF3 validation via local docker (`validation_model=af3`)
+          - Protenix validation via local subprocess (`validation_model=protenix`)
+
+        Scoring:
+          - PyRosetta (AF3 only locally)
+          - Open-source scoring (OpenMM + FreeSASA)
+        """
+        import json
+        import glob
+
+        from utils.alphafold_utils import run_alphafold_step_from_csv, calculate_af3_ipsae
+        from utils.pyrosetta_utils import run_rosetta_step
+
+        a = self.args
+        validation_model = getattr(a, "validation_model", "none")
+        scoring_method = getattr(a, "scoring_method", "pyrosetta")
+        verbose = getattr(a, "verbose", False)
+
+        design_idx = int(design_metrics.get("run_id", 0))
+        best_cycle = design_metrics.get("best_cycle", 0)
+        design_id = f"{a.name}_d{design_idx}_c{best_cycle}"
+
+        binder_seq = design_metrics.get("best_seq", "")
+        binder_length = len(binder_seq)
+
+        # Initialize result with design metrics
+        result = {
+            "design_id": design_id,
+            "design_num": design_idx,
+            "cycle": best_cycle,
+            "binder_sequence": binder_seq,
+            "binder_length": binder_length,
+            "cyclic": a.cyclic,
+            "alanine_count": design_metrics.get("best_alanine_count", 0),
+            "alanine_pct": 0.0,
+            "boltz_iptm": design_metrics.get("best_iptm", 0.0),
+            "boltz_ipsae": design_metrics.get("best_ipsae", 0.0),
+            "boltz_plddt": design_metrics.get("best_plddt", 0.0),
+            "boltz_iplddt": design_metrics.get("best_iplddt", 0.0),
+            # Validation metrics (aliased to af3_* for unified schema)
+            "af3_iptm": 0.0,
+            "af3_ipsae": 0.0,
+            "af3_ptm": 0.0,
+            "af3_plddt": 0.0,
+            # Acceptance status
+            "accepted": False,
+            "rejection_reason": "validation_not_run",
+        }
+
+        if binder_length > 0:
+            result["alanine_pct"] = round(result["alanine_count"] / binder_length * 100, 2)
+
+        best_pdb = design_metrics.get("best_pdb_filename")
+        if not best_pdb or not os.path.exists(best_pdb):
+            result["rejection_reason"] = "no_valid_design"
+            return result
+
+        # Determine target type
+        any_ligand_or_nucleic = a.ligand_smiles or a.ligand_ccd or a.nucleic_seq
+        if a.nucleic_type.strip() and a.nucleic_seq.strip():
+            target_type = "nucleic"
+        elif any_ligand_or_nucleic:
+            target_type = "small_molecule"
+        else:
+            target_type = "protein"
+
+        work_dir_validation = os.path.join(self.save_dir, "_validation_work", design_id)
+        os.makedirs(work_dir_validation, exist_ok=True)
+
+        try:
+            if validation_model == "af3":
+                print(f"  Running AF3 validation for {design_id}...")
+
+                # STEP 1: create single-design CSV for AF3
+                temp_csv_dir = os.path.join(work_dir_validation, "temp_csv")
+                os.makedirs(temp_csv_dir, exist_ok=True)
+                temp_csv_path = os.path.join(temp_csv_dir, "single_design.csv")
+
+                csv_row = {
+                    "design_id": design_id,
+                    "design_num": design_idx,
+                    "cycle": best_cycle,
+                    "binder_sequence": binder_seq,
+                    "binder_length": binder_length,
+                    "cyclic": a.cyclic,
+                    "boltz_iptm": result["boltz_iptm"],
+                    "boltz_ipsae": result["boltz_ipsae"],
+                    "boltz_plddt": result["boltz_plddt"],
+                    "boltz_iplddt": result["boltz_iplddt"],
+                    "target_seqs": self.data_builder.target_seqs_used,
+                    "contact_residues": a.contact_residues or "",
+                    "msa_mode": a.msa_mode,
+                    "ligand_smiles": a.ligand_smiles or "",
+                    "ligand_ccd": a.ligand_ccd or "",
+                    "nucleic_seq": a.nucleic_seq or "",
+                    "nucleic_type": a.nucleic_type or "",
+                    "template_path": a.template_path or "",
+                    "template_mapping": a.template_cif_chain_id or "",
+                }
+                pd.DataFrame([csv_row]).to_csv(temp_csv_path, index=False)
+
+                # STEP 2: run AF3 for this design
+                af_output_dir, af_output_apo_dir, af_pdb_dir, af_pdb_dir_apo = (
+                    run_alphafold_step_from_csv(
+                        csv_path=temp_csv_path,
+                        alphafold_dir=os.path.expanduser(a.alphafold_dir),
+                        af3_docker_name=a.af3_docker_name,
+                        af3_database_settings=os.path.expanduser(a.af3_database_settings),
+                        hmmer_path=os.path.expanduser(a.hmmer_path),
+                        ligandmpnn_dir=work_dir_validation,
+                        work_dir=os.path.expanduser(a.work_dir) or os.getcwd(),
+                        binder_id=self.binder_chain,
+                        gpu_id=getattr(a, "physical_gpu_id", a.gpu_id),
+                        high_iptm=False,
+                        use_msa_for_af3=getattr(a, "use_msa_for_validation", True),
+                        msa_cache_dir=self.designs_dir,
+                    )
+                )
+
+                # STEP 3: parse AF3 output
+                af3_cif_path = None
+                conf_json_text = None
+                if af_output_dir and os.path.exists(af_output_dir):
+                    for design_subdir in os.listdir(af_output_dir):
+                        design_path = os.path.join(af_output_dir, design_subdir)
+                        if not os.path.isdir(design_path):
+                            continue
+                        cif_files = [
+                            f for f in glob.glob(os.path.join(design_path, "*_model.cif"))
+                            if "_seed-" not in f and "_sample-" not in f
+                        ]
+                        summary_conf_files = [
+                            f for f in glob.glob(os.path.join(design_path, "*_summary_confidences.json"))
+                            if "_seed-" not in f and "_sample-" not in f
+                        ]
+                        conf_files = [
+                            f for f in glob.glob(os.path.join(design_path, "*_confidences.json"))
+                            if "_seed-" not in f and "_sample-" not in f
+                        ]
+                        if cif_files:
+                            af3_cif_path = cif_files[0]
+                            if summary_conf_files:
+                                try:
+                                    summary = json.loads(Path(summary_conf_files[0]).read_text())
+                                    result["af3_iptm"] = round(summary.get("iptm", 0.0), 4)
+                                    result["af3_ptm"] = round(summary.get("ptm", 0.0), 4)
+                                except Exception as e:
+                                    print(f"    Warning: Could not read summary confidence: {e}")
+                            if conf_files:
+                                try:
+                                    conf_json_text = Path(conf_files[0]).read_text()
+                                    conf = json.loads(conf_json_text)
+                                    atom_plddts = conf.get("atom_plddts", [])
+                                    if atom_plddts:
+                                        result["af3_plddt"] = round(sum(atom_plddts) / len(atom_plddts), 2)
+
+                                    target_seqs = a.protein_seqs or ""
+                                    target_length = len(target_seqs.split(":")[0]) if target_seqs else 0
+                                    if binder_length > 0 and target_length > 0:
+                                        ipsae_result = calculate_af3_ipsae(
+                                            conf_json_text, binder_length, target_length
+                                        )
+                                        result["af3_ipsae"] = ipsae_result.get("af3_ipsae", 0.0)
+                                except Exception as e:
+                                    print(f"    Warning: Could not read confidence: {e}")
+                            break
+
+                # STEP 4: copy AF3 CIF to refolded/
+                refolded_dir = os.path.join(self.save_dir, "refolded")
+                os.makedirs(refolded_dir, exist_ok=True)
+                af3_structure_text = None
+                if af3_cif_path and os.path.exists(af3_cif_path):
+                    dest_cif = os.path.join(refolded_dir, f"{design_id}_refolded.cif")
+                    shutil.copy(af3_cif_path, dest_cif)
+                    if scoring_method == "opensource":
+                        try:
+                            af3_structure_text = Path(af3_cif_path).read_text()
+                        except Exception:
+                            af3_structure_text = None
+
+                # STEP 5: scoring
+                if target_type != "protein":
+                    result["accepted"] = True
+                    result["rejection_reason"] = ""
+                    return result
+
+                if scoring_method == "opensource":
+                    from boltz_ph.scoring.opensource_local import run_opensource_scoring_local
+
+                    scoring_result = run_opensource_scoring_local(
+                        design_id=design_id,
+                        af3_structure=af3_structure_text,
+                        af3_iptm=result["af3_iptm"],
+                        af3_ptm=result["af3_ptm"],
+                        af3_plddt=result["af3_plddt"],
+                        binder_chain="A",
+                        target_chain="B",
+                        apo_structure=None,
+                        af3_confidence_json=conf_json_text,
+                        target_type=target_type,
+                        verbose=verbose,
+                    )
+
+                    result["accepted"] = scoring_result.get("accepted", False)
+                    result["rejection_reason"] = scoring_result.get("rejection_reason", "")
+                    for k, v in scoring_result.items():
+                        if k in ("design_id", "relaxed_pdb"):
+                            continue
+                        result[k] = v
+                    if scoring_result.get("relaxed_pdb"):
+                        dest_dir = "accepted_designs" if result["accepted"] else "rejected"
+                        out_dir = Path(self.save_dir) / dest_dir
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        (out_dir / f"{design_id}_relaxed.pdb").write_text(scoring_result["relaxed_pdb"])
+                else:
+                    pyrosetta_result = None
+                    if af_pdb_dir and os.path.exists(af_pdb_dir):
+                        pdb_files = [f for f in os.listdir(af_pdb_dir) if f.endswith(".pdb")]
+                        if pdb_files:
+                            run_rosetta_step(
+                                work_dir_validation,
+                                af_pdb_dir,
+                                af_pdb_dir_apo,
+                                binder_id=self.binder_chain,
+                                target_type=target_type,
+                            )
+
+                            rosetta_success_dir = os.path.join(work_dir_validation, "af_pdb_rosetta_success")
+                            success_csv = os.path.join(rosetta_success_dir, "success_designs.csv")
+                            failed_csv = os.path.join(rosetta_success_dir, "failed_designs.csv")
+
+                            if os.path.exists(success_csv) and os.path.getsize(success_csv) > 0:
+                                try:
+                                    success_df = pd.read_csv(success_csv)
+                                    if len(success_df) > 0:
+                                        row = success_df.iloc[0]
+                                        pyrosetta_result = {
+                                            "accepted": True,
+                                            "rejection_reason": "",
+                                            "pdb_path": row.get("PDB", ""),
+                                            "model_name": row.get("Model", ""),
+                                            **{k: row.get(k) for k in row.index},
+                                        }
+                                except pd.errors.EmptyDataError:
+                                    pass
+
+                            if pyrosetta_result is None and os.path.exists(failed_csv) and os.path.getsize(failed_csv) > 0:
+                                try:
+                                    failed_df = pd.read_csv(failed_csv)
+                                    if len(failed_df) > 0:
+                                        row = failed_df.iloc[0]
+                                        pyrosetta_result = {
+                                            "accepted": False,
+                                            "rejection_reason": row.get("failure_reason", "pyrosetta_filter_failed"),
+                                            "pdb_path": row.get("PDB", ""),
+                                            "model_name": row.get("Model", ""),
+                                            **{k: row.get(k) for k in row.index},
+                                        }
+                                except pd.errors.EmptyDataError:
+                                    pass
+
+                    if pyrosetta_result is None:
+                        pyrosetta_result = {"accepted": False, "rejection_reason": "pyrosetta_failed"}
+
+                    result["accepted"] = pyrosetta_result.get("accepted", False)
+                    result["rejection_reason"] = pyrosetta_result.get("rejection_reason", "")
+                    for key in [
+                        "binder_score", "total_score", "interface_sc", "interface_packstat",
+                        "interface_dG", "interface_dSASA", "interface_dG_SASA_ratio",
+                        "interface_nres", "interface_hbonds", "interface_hbond_percentage",
+                        "interface_delta_unsat_hbonds", "interface_delta_unsat_hbonds_percentage",
+                        "interface_hydrophobicity", "surface_hydrophobicity", "binder_sasa",
+                        "interface_fraction", "apo_holo_rmsd", "i_pae", "rg",
+                    ]:
+                        if key in pyrosetta_result:
+                            result[key] = pyrosetta_result[key]
+
+                    if pyrosetta_result.get("pdb_path") and pyrosetta_result.get("model_name"):
+                        src_pdb = os.path.join(pyrosetta_result["pdb_path"], pyrosetta_result["model_name"])
+                        if os.path.exists(src_pdb):
+                            dest_dir = "accepted_designs" if result["accepted"] else "rejected"
+                            out_dir = Path(self.save_dir) / dest_dir
+                            out_dir.mkdir(parents=True, exist_ok=True)
+                            shutil.copy(src_pdb, out_dir / f"{design_id}_relaxed.pdb")
+
+            elif validation_model == "protenix":
+                print(f"  Running Protenix validation for {design_id}...")
+                from boltz_ph.validation.protenix_local import run_protenix_validation_local
+
+                target_seq = self.data_builder.target_seqs_used
+                target_msas = self._load_target_msas_for_validation()
+                protenix_result = run_protenix_validation_local(
+                    design_id=design_id,
+                    binder_seq=binder_seq,
+                    target_seq=target_seq,
+                    target_msas=target_msas if target_msas else None,
+                    verbose=verbose,
+                )
+
+                if protenix_result.get("error"):
+                    result["rejection_reason"] = protenix_result["error"]
+                    return result
+
+                for k in ("af3_iptm", "af3_ptm", "af3_plddt", "af3_ipsae"):
+                    result[k] = protenix_result.get(k, 0.0)
+
+                holo_cif = protenix_result.get("af3_structure")
+                conf_json_text = protenix_result.get("af3_confidence_json")
+                apo_cif = protenix_result.get("apo_structure")
+
+                refolded_dir = Path(self.save_dir) / "refolded"
+                refolded_dir.mkdir(parents=True, exist_ok=True)
+                if holo_cif:
+                    (refolded_dir / f"{design_id}_refolded.cif").write_text(holo_cif)
+
+                if target_type != "protein":
+                    result["accepted"] = True
+                    result["rejection_reason"] = ""
+                    return result
+
+                if scoring_method == "opensource":
+                    from boltz_ph.scoring.opensource_local import run_opensource_scoring_local
+                    scoring_result = run_opensource_scoring_local(
+                        design_id=design_id,
+                        af3_structure=holo_cif,
+                        af3_iptm=result["af3_iptm"],
+                        af3_ptm=result["af3_ptm"],
+                        af3_plddt=result["af3_plddt"],
+                        binder_chain="A",
+                        target_chain="B",
+                        apo_structure=apo_cif,
+                        af3_confidence_json=conf_json_text,
+                        target_type=target_type,
+                        verbose=verbose,
+                    )
+                    result["accepted"] = scoring_result.get("accepted", False)
+                    result["rejection_reason"] = scoring_result.get("rejection_reason", "")
+                    for k, v in scoring_result.items():
+                        if k in ("design_id", "relaxed_pdb"):
+                            continue
+                        result[k] = v
+                    if scoring_result.get("relaxed_pdb"):
+                        dest_dir = "accepted_designs" if result["accepted"] else "rejected"
+                        out_dir = Path(self.save_dir) / dest_dir
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        (out_dir / f"{design_id}_relaxed.pdb").write_text(scoring_result["relaxed_pdb"])
+                else:
+                    # PyRosetta scoring for Protenix - convert CIF to PDB and run
+                    from utils.pyrosetta_utils import run_rosetta_step
+
+                    # Create temp PDB directories for PyRosetta
+                    protenix_pdb_dir = os.path.join(work_dir_validation, "protenix_pdb_holo")
+                    protenix_pdb_dir_apo = os.path.join(work_dir_validation, "protenix_pdb_apo")
+                    os.makedirs(protenix_pdb_dir, exist_ok=True)
+                    os.makedirs(protenix_pdb_dir_apo, exist_ok=True)
+
+                    # Convert HOLO CIF to PDB
+                    holo_cif_path = refolded_dir / f"{design_id}_refolded.cif"
+                    holo_pdb_path = os.path.join(protenix_pdb_dir, f"{design_id}.pdb")
+                    if holo_cif_path.exists():
+                        convert_cif_to_pdb(str(holo_cif_path), holo_pdb_path)
+
+                    # Convert APO CIF to PDB if available
+                    if apo_cif:
+                        apo_cif_path = os.path.join(work_dir_validation, f"{design_id}_apo.cif")
+                        Path(apo_cif_path).write_text(apo_cif)
+                        apo_pdb_path = os.path.join(protenix_pdb_dir_apo, f"{design_id}_apo.pdb")
+                        convert_cif_to_pdb(apo_cif_path, apo_pdb_path)
+
+                    # Run PyRosetta scoring
+                    pyrosetta_result = None
+                    if os.path.exists(holo_pdb_path):
+                        run_rosetta_step(
+                            work_dir_validation,
+                            protenix_pdb_dir,
+                            protenix_pdb_dir_apo,
+                            binder_id=self.binder_chain,
+                            target_type=target_type,
+                        )
+
+                        # Parse PyRosetta results (same pattern as AF3 path)
+                        rosetta_success_dir = os.path.join(work_dir_validation, "af_pdb_rosetta_success")
+                        success_csv = os.path.join(rosetta_success_dir, "success_designs.csv")
+                        failed_csv = os.path.join(rosetta_success_dir, "failed_designs.csv")
+
+                        if os.path.exists(success_csv) and os.path.getsize(success_csv) > 0:
+                            try:
+                                success_df = pd.read_csv(success_csv)
+                                if len(success_df) > 0:
+                                    row = success_df.iloc[0]
+                                    pyrosetta_result = {
+                                        "accepted": True,
+                                        "rejection_reason": "",
+                                        "pdb_path": row.get("PDB", ""),
+                                        "model_name": row.get("Model", ""),
+                                        **{k: row.get(k) for k in row.index},
+                                    }
+                            except pd.errors.EmptyDataError:
+                                pass
+
+                        if pyrosetta_result is None and os.path.exists(failed_csv) and os.path.getsize(failed_csv) > 0:
+                            try:
+                                failed_df = pd.read_csv(failed_csv)
+                                if len(failed_df) > 0:
+                                    row = failed_df.iloc[0]
+                                    pyrosetta_result = {
+                                        "accepted": False,
+                                        "rejection_reason": row.get("failure_reason", "pyrosetta_filter_failed"),
+                                        "pdb_path": row.get("PDB", ""),
+                                        "model_name": row.get("Model", ""),
+                                        **{k: row.get(k) for k in row.index},
+                                    }
+                            except pd.errors.EmptyDataError:
+                                pass
+
+                    if pyrosetta_result is None:
+                        pyrosetta_result = {"accepted": False, "rejection_reason": "pyrosetta_failed"}
+
+                    result["accepted"] = pyrosetta_result.get("accepted", False)
+                    result["rejection_reason"] = pyrosetta_result.get("rejection_reason", "")
+                    for key in [
+                        "binder_score", "total_score", "interface_sc", "interface_packstat",
+                        "interface_dG", "interface_dSASA", "interface_dG_SASA_ratio",
+                        "interface_nres", "interface_hbonds", "interface_hbond_percentage",
+                        "interface_delta_unsat_hbonds", "interface_delta_unsat_hbonds_percentage",
+                        "interface_hydrophobicity", "surface_hydrophobicity", "binder_sasa",
+                        "interface_fraction", "apo_holo_rmsd", "i_pae", "rg",
+                    ]:
+                        if key in pyrosetta_result:
+                            result[key] = pyrosetta_result[key]
+
+                    if pyrosetta_result.get("pdb_path") and pyrosetta_result.get("model_name"):
+                        src_pdb = os.path.join(pyrosetta_result["pdb_path"], pyrosetta_result["model_name"])
+                        if os.path.exists(src_pdb):
+                            dest_dir = "accepted_designs" if result["accepted"] else "rejected"
+                            out_dir = Path(self.save_dir) / dest_dir
+                            out_dir.mkdir(parents=True, exist_ok=True)
+                            shutil.copy(src_pdb, out_dir / f"{design_id}_relaxed.pdb")
+
+            else:
+                result["rejection_reason"] = "validation_not_run"
+
+        except Exception as e:
+            import traceback
+            print(f"    Error during validation: {e}")
+            traceback.print_exc()
+            result["rejection_reason"] = f"validation_error: {str(e)}"
+
+        finally:
+            try:
+                shutil.rmtree(work_dir_validation, ignore_errors=True)
+            except Exception:
+                pass
+
+        return result
+
     def _run_single_design_validation(self, design_metrics: dict) -> dict:
         """
         Run AF3 + PyRosetta validation for a SINGLE design.
@@ -1562,7 +2193,7 @@ class ProteinHunter_Boltz:
                     binder_id=self.binder_chain,
                     gpu_id=getattr(a, 'physical_gpu_id', a.gpu_id),  # Use physical GPU for Docker
                     high_iptm=False,
-                    use_msa_for_af3=a.use_msa_for_af3,
+                    use_msa_for_af3=getattr(a, "use_msa_for_validation", a.use_msa_for_af3),
                     msa_cache_dir=self.designs_dir,  # Use cached MSAs from Boltz design
                 )
             )
@@ -1859,6 +2490,36 @@ class ProteinHunter_Boltz:
         
         return 0
 
+    def _load_target_msas_for_validation(self) -> Dict[str, str]:
+        """
+        Load cached ColabFold MSAs for target chains for validation backends.
+
+        Local Boltz design caches MSAs under:
+            designs_dir/{chain_id}_env/msa.a3m
+
+        Returns:
+            Dict mapping chain letter -> A3M content.
+        """
+        a = self.args
+        if not getattr(a, "use_msa_for_validation", True):
+            return {}
+
+        target_seqs = getattr(self.data_builder, "target_seqs_used", "") or (a.protein_seqs or "")
+        if not target_seqs:
+            return {}
+
+        msas: Dict[str, str] = {}
+        target_chains = target_seqs.split(":")
+        for i, _seq in enumerate(target_chains):
+            chain_id = chr(ord("B") + i)
+            msa_a3m = Path(self.designs_dir) / f"{chain_id}_env" / "msa.a3m"
+            if msa_a3m.exists():
+                try:
+                    msas[chain_id] = msa_a3m.read_text()
+                except Exception:
+                    continue
+        return msas
+
     def _should_continue(self) -> bool:
         """
         Check if pipeline should continue based on stopping conditions.
@@ -1928,8 +2589,8 @@ class ProteinHunter_Boltz:
             result["rejection_reason"] = f"no cycle passed all criteria (alanine <= 20%, ipTM >= {self.args.high_iptm_threshold}, pLDDT >= {self.args.high_plddt_threshold})"
             return result
         
-        # Check if AF3 validation is enabled
-        if not self.args.use_alphafold3_validation:
+        # Check if validation is enabled
+        if getattr(self.args, "validation_model", "none") == "none":
             return result
         
         # Check Boltz thresholds before expensive AF3 validation
@@ -1951,7 +2612,7 @@ class ProteinHunter_Boltz:
             return result
         
         # Run full AF3 + PyRosetta validation
-        validation_result = self._run_single_design_validation(run_metrics)
+        validation_result = self._run_single_design_validation_v2(run_metrics)
         self._save_design_result(validation_result)
         
         result["validation_result"] = validation_result
@@ -2013,7 +2674,7 @@ class ProteinHunter_Boltz:
                 print(f"  ✗ Design {design_idx} failed: no cycle passed all criteria (alanine/ipTM/pLDDT)")
             
             # 5. Run validation for THIS design (design-by-design execution)
-            if self.args.use_alphafold3_validation and has_valid_pdb:
+            if getattr(self.args, "validation_model", "none") != "none" and has_valid_pdb:
                 # Check if design meets minimum Boltz thresholds before expensive AF3 validation
                 boltz_iptm = run_metrics.get("best_iptm", 0.0)
                 boltz_plddt = run_metrics.get("best_plddt", 0.0)
@@ -2037,7 +2698,7 @@ class ProteinHunter_Boltz:
                     continue  # Move to next design
                 
                 # Run full AF3 + PyRosetta validation
-                validation_result = self._run_single_design_validation(run_metrics)
+                validation_result = self._run_single_design_validation_v2(run_metrics)
                 self._save_design_result(validation_result)
                 
                 # Update best_designs.csv with final validation result
@@ -2064,7 +2725,7 @@ class ProteinHunter_Boltz:
         self._print_summary(all_run_metrics)
         
         # 7. Print final validation summary
-        if self.args.use_alphafold3_validation:
+        if getattr(self.args, "validation_model", "none") != "none":
             total = self._count_completed_designs()
             accepted = self._count_accepted_designs()
             rejected = total - accepted if total > accepted else 0
@@ -2588,7 +3249,7 @@ class MultiGPUOrchestrator:
         print(f"  ├── worker_gpu*.log       # Detailed per-worker logs")
         print(f"  ├── designs/              # All cycle PDBs + design_stats.csv")
         print(f"  ├── best_designs/         # Best per design + best_designs.csv")
-        if self.args.use_alphafold3_validation:
+        if getattr(self.args, "validation_model", "none") != "none":
             print(f"  ├── refolded/             # Refolded structures + metrics")
             print(f"  ├── accepted_designs/     # Passed filters")
             print(f"  └── rejected/             # Failed filters")
