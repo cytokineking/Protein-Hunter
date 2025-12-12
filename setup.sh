@@ -377,10 +377,15 @@ if [ "$install_protenix" = true ]; then
     }
     cd ..
     
-    # Install additional Protenix runtime dependencies (not in their setup.py)
+    # Install additional Protenix runtime dependencies (not always in their setup.py)
     echo "  Installing additional Protenix dependencies..."
-    pip install biotite || {
-        echo "  ⚠ Warning: biotite install failed"
+    pip install biotite optree ml-collections dm-tree modelcif gemmi einops hydra-core || {
+        echo "  ⚠ Warning: Some Protenix dependencies failed to install"
+    }
+    
+    # Install cuEquivariance (CUDA extension, may fail on CPU-only systems)
+    pip install cuequivariance-torch cuequivariance-ops-torch-cu12 2>/dev/null || {
+        echo "  ⚠ Note: cuEquivariance not available (will use fallback)"
     }
     
     # Download Protenix weights (~1.4GB)
