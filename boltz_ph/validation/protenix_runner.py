@@ -102,13 +102,18 @@ class PersistentProtenixRunner:
         if self._protenix_imported:
             return
         
+        # Save original CWD - we'll restore it after Protenix operations
+        # to avoid breaking other tools like LigandMPNN that use relative paths
+        self._original_cwd = os.getcwd()
+        
         # Add Protenix to path
         sys.path.insert(0, str(PROTENIX_REPO_ROOT))
         os.chdir(str(PROTENIX_REPO_ROOT))
         
         # Set environment
         os.environ["LAYERNORM_TYPE"] = "torch"
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device)
+        # NOTE: Don't set CUDA_VISIBLE_DEVICES here - the GPU worker already sets it
+        # Setting it here would override the worker's GPU assignment and break multi-GPU
         
         # Suppress verbose Protenix logging (keeps only ERRORS)
         import logging
@@ -126,6 +131,28 @@ class PersistentProtenixRunner:
         warnings.filterwarnings("ignore", category=UserWarning, module="torch")
         
         self._protenix_imported = True
+    
+    def _restore_warning_filters(self) -> None:
+        """
+        Re-apply warning filters after Protenix operations.
+        
+        Protenix imports can reset Python's warning state, so we need to
+        re-apply our filters after each prediction to keep subsequent
+        Boltz operations clean.
+        """
+        import logging
+        import warnings
+        
+        # Suppress deprecation/user warnings from numpy, torch, prody, etc.
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        warnings.filterwarnings("ignore", message=".*use_reentrant.*")
+        warnings.filterwarnings("ignore", message=".*requires_grad.*")
+        warnings.filterwarnings("ignore", message=".*__array_wrap__.*")
+        
+        # Suppress noisy loggers (ProDy DEBUG logging)
+        for logger_name in ["prody", ".prody", "root"]:
+            logging.getLogger(logger_name).setLevel(logging.WARNING)
     
     def ensure_loaded(self) -> float:
         """
@@ -256,7 +283,7 @@ class PersistentProtenixRunner:
         self.runner.dumper.base_dir = str(work_dir / "output")
         os.makedirs(self.configs.dump_dir, exist_ok=True)
         
-        # Load data
+        # Load data (featurization - CPU intensive)
         data_start = time.time()
         dataset = InferenceDataset(
             input_json_path=str(json_path),
@@ -302,6 +329,13 @@ class PersistentProtenixRunner:
         
         # Clear CUDA cache
         torch.cuda.empty_cache()
+        
+        # Restore original CWD so other tools (LigandMPNN) work correctly
+        if hasattr(self, '_original_cwd'):
+            os.chdir(self._original_cwd)
+        
+        # Re-apply warning filters (Protenix may have reset them)
+        self._restore_warning_filters()
         
         return result
     
@@ -402,6 +436,13 @@ class PersistentProtenixRunner:
             self.configs.use_msa = original_use_msa
         
         torch.cuda.empty_cache()
+        
+        # Restore original CWD so other tools (LigandMPNN) work correctly
+        if hasattr(self, '_original_cwd'):
+            os.chdir(self._original_cwd)
+        
+        # Re-apply warning filters (Protenix may have reset them)
+        self._restore_warning_filters()
         
         return result
     

@@ -4,7 +4,9 @@ import random
 import sys
 import shutil
 from collections import defaultdict
-from multiprocessing import Process, Queue, Manager
+import multiprocessing as mp
+# Use spawn context to avoid CUDA context inheritance issues in multi-GPU mode
+_mp_ctx = mp.get_context('spawn')
 from pathlib import Path
 from typing import Dict
 import numpy as np
@@ -1964,7 +1966,7 @@ class ProteinHunter_Boltz:
 # Multi-GPU Orchestrator
 # =============================================================================
 
-def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutdown_event):
+def _gpu_worker(gpu_id: int, args, task_queue, result_queue, shutdown_event):
     """
     Worker process that runs on a specific GPU.
 
@@ -1983,10 +1985,23 @@ def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutd
     """
     import copy
     import sys
+    import warnings
+    import logging
     
-    # CRITICAL: Set CUDA_VISIBLE_DEVICES for this worker process
-    # This ensures all child processes (LigandMPNN, etc.) use the correct GPU
+    # CRITICAL: Set CUDA_VISIBLE_DEVICES FIRST, before any CUDA imports
+    # This ensures the worker only sees its assigned GPU
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    
+    # Suppress noisy warnings globally for this worker
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+    warnings.filterwarnings("ignore", message=".*use_reentrant.*")
+    warnings.filterwarnings("ignore", message=".*requires_grad.*")
+    warnings.filterwarnings("ignore", message=".*__array_wrap__.*")
+    
+    # Suppress noisy loggers (ProDy, etc.)
+    logging.getLogger("prody").setLevel(logging.WARNING)
+    logging.getLogger(".prody").setLevel(logging.WARNING)
 
     # Set GPU for this worker
     worker_args = copy.deepcopy(args)
@@ -2196,8 +2211,9 @@ class MultiGPUOrchestrator:
         print(f"{'='*70}\n")
         print("Starting workers... (detailed logs in worker_gpu*.log files)\n")
         
-        # Create shared queues and shutdown event
-        manager = Manager()
+        # Create shared queues and shutdown event using spawn context
+        # spawn avoids CUDA context inheritance issues in multi-GPU mode
+        manager = _mp_ctx.Manager()
         task_queue = manager.Queue()
         result_queue = manager.Queue()
         shutdown_event = manager.Event()
@@ -2213,10 +2229,11 @@ class MultiGPUOrchestrator:
         
         next_design_idx = existing_count
         
-        # Spawn worker processes
+        # Spawn worker processes using spawn context
+        # This ensures each worker gets a fresh CUDA context without inheritance
         workers = []
         for gpu_id in range(self.num_gpus):
-            p = Process(
+            p = _mp_ctx.Process(
                 target=_gpu_worker,
                 args=(gpu_id, self.args, task_queue, result_queue, shutdown_event)
             )
