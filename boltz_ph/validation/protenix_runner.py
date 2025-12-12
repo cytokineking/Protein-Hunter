@@ -15,6 +15,7 @@ automatically get one runner per GPU worker.
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
@@ -25,6 +26,22 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
+
+
+def _aggressive_cuda_cleanup():
+    """
+    Aggressively clear CUDA memory to prevent fragmentation.
+    
+    This is more thorough than just empty_cache() and helps prevent OOM
+    errors when other GPU tools (like LigandMPNN) need to load after Protenix.
+    """
+    # First, collect Python garbage to release any references to CUDA tensors
+    gc.collect()
+    
+    # Synchronize to ensure all CUDA operations are complete
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
 # Protenix repo path
 PROTENIX_REPO_ROOT = Path(__file__).resolve().parents[2] / "Protenix"
@@ -331,8 +348,8 @@ class PersistentProtenixRunner:
             "forward_time": forward_time,
         })
         
-        # Clear CUDA cache
-        torch.cuda.empty_cache()
+        # Aggressively clear CUDA cache to prevent OOM in subsequent tools (LigandMPNN)
+        _aggressive_cuda_cleanup()
         
         # Restore original CWD so other tools (LigandMPNN) work correctly
         if hasattr(self, '_original_cwd'):
@@ -439,7 +456,8 @@ class PersistentProtenixRunner:
             # Restore MSA setting
             self.configs.use_msa = original_use_msa
         
-        torch.cuda.empty_cache()
+        # Aggressively clear CUDA cache to prevent OOM in subsequent tools (LigandMPNN)
+        _aggressive_cuda_cleanup()
         
         # Restore original CWD so other tools (LigandMPNN) work correctly
         if hasattr(self, '_original_cwd'):
@@ -632,7 +650,7 @@ class PersistentProtenixRunner:
         self.configs = None
         self._loaded = False
         
-        torch.cuda.empty_cache()
+        _aggressive_cuda_cleanup()
         print("  ✓ Protenix model unloaded")
     
     @property

@@ -1251,6 +1251,9 @@ class ProteinHunter_Boltz:
                         out_dir.mkdir(parents=True, exist_ok=True)
                         (out_dir / f"{design_id}_relaxed.pdb").write_text(scoring_result["relaxed_pdb"])
                 else:
+                    # PyRosetta scoring for AF3 - deferred import to avoid init when not needed
+                    from utils.pyrosetta_utils import run_rosetta_step
+
                     pyrosetta_result = None
                     if af_pdb_dir and os.path.exists(af_pdb_dir):
                         pdb_files = [f for f in os.listdir(af_pdb_dir) if f.endswith(".pdb")]
