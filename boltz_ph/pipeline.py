@@ -1046,7 +1046,7 @@ class ProteinHunter_Boltz:
         import json
         import glob
 
-        from utils.alphafold_utils import run_alphafold_step_from_csv, calculate_af3_ipsae
+        from utils.alphafold_utils import run_alphafold_step_from_csv, calculate_val_ipsae
         # Note: pyrosetta_utils import is deferred to avoid init when not needed
 
         a = self.args
@@ -1075,11 +1075,11 @@ class ProteinHunter_Boltz:
             "boltz_ipsae": design_metrics.get("best_ipsae", 0.0),
             "boltz_plddt": design_metrics.get("best_plddt", 0.0),
             "boltz_iplddt": design_metrics.get("best_iplddt", 0.0),
-            # Validation metrics (aliased to af3_* for unified schema)
-            "af3_iptm": 0.0,
-            "af3_ipsae": 0.0,
-            "af3_ptm": 0.0,
-            "af3_plddt": 0.0,
+            # Validation metrics
+            "val_iptm": 0.0,
+            "val_ipsae": 0.0,
+            "val_ptm": 0.0,
+            "val_plddt": 0.0,
             # Acceptance status
             "accepted": False,
             "rejection_reason": "validation_not_run",
@@ -1180,8 +1180,8 @@ class ProteinHunter_Boltz:
                             if summary_conf_files:
                                 try:
                                     summary = json.loads(Path(summary_conf_files[0]).read_text())
-                                    result["af3_iptm"] = round(summary.get("iptm", 0.0), 4)
-                                    result["af3_ptm"] = round(summary.get("ptm", 0.0), 4)
+                                    result["val_iptm"] = round(summary.get("iptm", 0.0), 4)
+                                    result["val_ptm"] = round(summary.get("ptm", 0.0), 4)
                                 except Exception as e:
                                     print(f"    Warning: Could not read summary confidence: {e}")
                             if conf_files:
@@ -1190,15 +1190,15 @@ class ProteinHunter_Boltz:
                                     conf = json.loads(conf_json_text)
                                     atom_plddts = conf.get("atom_plddts", [])
                                     if atom_plddts:
-                                        result["af3_plddt"] = round(sum(atom_plddts) / len(atom_plddts), 2)
+                                        result["val_plddt"] = round(sum(atom_plddts) / len(atom_plddts), 2)
 
                                     target_seqs = a.protein_seqs or ""
                                     target_length = len(target_seqs.split(":")[0]) if target_seqs else 0
                                     if binder_length > 0 and target_length > 0:
-                                        ipsae_result = calculate_af3_ipsae(
+                                        ipsae_result = calculate_val_ipsae(
                                             conf_json_text, binder_length, target_length
                                         )
-                                        result["af3_ipsae"] = ipsae_result.get("af3_ipsae", 0.0)
+                                        result["val_ipsae"] = ipsae_result.get("val_ipsae", 0.0)
                                 except Exception as e:
                                     print(f"    Warning: Could not read confidence: {e}")
                             break
@@ -1206,15 +1206,15 @@ class ProteinHunter_Boltz:
                 # STEP 4: copy AF3 CIF to refolded/
                 refolded_dir = os.path.join(self.save_dir, "refolded")
                 os.makedirs(refolded_dir, exist_ok=True)
-                af3_structure_text = None
+                val_structure_text = None
                 if af3_cif_path and os.path.exists(af3_cif_path):
                     dest_cif = os.path.join(refolded_dir, f"{design_id}_refolded.cif")
                     shutil.copy(af3_cif_path, dest_cif)
                     if scoring_method == "opensource":
                         try:
-                            af3_structure_text = Path(af3_cif_path).read_text()
+                            val_structure_text = Path(af3_cif_path).read_text()
                         except Exception:
-                            af3_structure_text = None
+                            val_structure_text = None
 
                 # STEP 5: scoring
                 if target_type != "protein":
@@ -1227,14 +1227,14 @@ class ProteinHunter_Boltz:
 
                     scoring_result = run_opensource_scoring_local(
                         design_id=design_id,
-                        af3_structure=af3_structure_text,
-                        af3_iptm=result["af3_iptm"],
-                        af3_ptm=result["af3_ptm"],
-                        af3_plddt=result["af3_plddt"],
+                        val_structure=val_structure_text,
+                        val_iptm=result["val_iptm"],
+                        val_ptm=result["val_ptm"],
+                        val_plddt=result["val_plddt"],
                         binder_chain="A",
                         target_chain="B",
                         apo_structure=None,
-                        af3_confidence_json=conf_json_text,
+                        val_confidence_json=conf_json_text,
                         target_type=target_type,
                         verbose=verbose,
                     )
@@ -1340,14 +1340,14 @@ class ProteinHunter_Boltz:
                     result["rejection_reason"] = protenix_result["error"]
                     return result
 
-                for k in ("af3_iptm", "af3_ptm", "af3_plddt", "af3_ipsae"):
+                for k in ("val_iptm", "val_ptm", "val_plddt", "val_ipsae"):
                     result[k] = protenix_result.get(k, 0.0)
 
                 # Log HOLO results
-                print(f"  ✓ HOLO: iptm={result['af3_iptm']:.3f}, plddt={result['af3_plddt']:.2f}, ipsae={result['af3_ipsae']:.3f}")
+                print(f"  ✓ HOLO: iptm={result['val_iptm']:.3f}, plddt={result['val_plddt']:.2f}, ipsae={result['val_ipsae']:.3f}")
 
-                holo_cif = protenix_result.get("af3_structure")
-                conf_json_text = protenix_result.get("af3_confidence_json")
+                holo_cif = protenix_result.get("val_structure")
+                conf_json_text = protenix_result.get("val_confidence_json")
                 apo_cif = protenix_result.get("apo_structure")
 
                 refolded_dir = Path(self.save_dir) / "refolded"
@@ -1364,14 +1364,14 @@ class ProteinHunter_Boltz:
                     from boltz_ph.scoring.opensource_local import run_opensource_scoring_local
                     scoring_result = run_opensource_scoring_local(
                         design_id=design_id,
-                        af3_structure=holo_cif,
-                        af3_iptm=result["af3_iptm"],
-                        af3_ptm=result["af3_ptm"],
-                        af3_plddt=result["af3_plddt"],
+                        val_structure=holo_cif,
+                        val_iptm=result["val_iptm"],
+                        val_ptm=result["val_ptm"],
+                        val_plddt=result["val_plddt"],
                         binder_chain="A",
                         target_chain="B",
                         apo_structure=apo_cif,
-                        af3_confidence_json=conf_json_text,
+                        val_confidence_json=conf_json_text,
                         target_type=target_type,
                         verbose=verbose,
                     )
@@ -1521,10 +1521,10 @@ class ProteinHunter_Boltz:
         
         validation_row = {
             "design_id": result.get("design_id"),
-            "af3_iptm": result.get("af3_iptm", 0.0),
-            "af3_ipsae": result.get("af3_ipsae", 0.0),
-            "af3_ptm": result.get("af3_ptm", 0.0),
-            "af3_plddt": result.get("af3_plddt", 0.0),
+            "val_iptm": result.get("val_iptm", 0.0),
+            "val_ipsae": result.get("val_ipsae", 0.0),
+            "val_ptm": result.get("val_ptm", 0.0),
+            "val_plddt": result.get("val_plddt", 0.0),
         }
         append_to_csv_safe(Path(refolded_dir) / "validation_results.csv", validation_row)
         
@@ -1795,8 +1795,8 @@ class ProteinHunter_Boltz:
                 
                 # Print validation summary for this design
                 if validation_result.get("accepted"):
-                    print(f"  ✓ ACCEPTED: af3_iptm={validation_result.get('af3_iptm', 0):.3f}, "
-                          f"af3_ipsae={validation_result.get('af3_ipsae', 0):.3f}, "
+                    print(f"  ✓ ACCEPTED: val_iptm={validation_result.get('val_iptm', 0):.3f}, "
+                          f"val_ipsae={validation_result.get('val_ipsae', 0):.3f}, "
                           f"dG={validation_result.get('interface_dG', 0):.1f}")
                 else:
                     reason = validation_result.get("rejection_reason", "unknown")
@@ -2193,12 +2193,12 @@ class MultiGPUOrchestrator:
         elif validation_result:
             # Validation was run (Protenix or AF3)
             val_label = self.args.validation_model.capitalize()
-            af3_iptm = validation_result.get("af3_iptm", 0)
-            af3_ipsae = validation_result.get("af3_ipsae", 0)
+            val_iptm = validation_result.get("val_iptm", 0)
+            val_ipsae = validation_result.get("val_ipsae", 0)
             interface_dG = validation_result.get("interface_dG", 0)
             interface_hbonds = validation_result.get("interface_hbonds", 0)
             
-            print(f"  ├─ {val_label}: iptm={af3_iptm:.3f}, ipsae={af3_ipsae:.3f}, dG={interface_dG:.1f}, hbonds={interface_hbonds}", flush=True)
+            print(f"  ├─ {val_label}: iptm={val_iptm:.3f}, ipsae={val_ipsae:.3f}, dG={interface_dG:.1f}, hbonds={interface_hbonds}", flush=True)
             
             if accepted:
                 print(f"  └─ ✓✓ ACCEPTED", flush=True)

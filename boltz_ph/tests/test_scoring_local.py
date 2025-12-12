@@ -173,10 +173,10 @@ def test_scoring_synthetic():
         # The function expects structure content as string, not a file path
         result = run_opensource_scoring_local(
             design_id="synthetic_test",
-            af3_structure=SYNTHETIC_PDB,
-            af3_iptm=0.8,
-            af3_ptm=0.8,
-            af3_plddt=85.0,
+            val_structure=SYNTHETIC_PDB,
+            val_iptm=0.8,
+            val_ptm=0.8,
+            val_plddt=85.0,
             binder_chain="A",
             target_chain="B",
             target_type="protein",
@@ -256,10 +256,10 @@ def test_single_structure(
         
         result = run_opensource_scoring_local(
             design_id=design_id,
-            af3_structure=structure_content,
-            af3_iptm=0.8,  # Placeholder
-            af3_ptm=0.8,  # Placeholder
-            af3_plddt=85.0,  # Placeholder
+            val_structure=structure_content,
+            val_iptm=0.8,  # Placeholder
+            val_ptm=0.8,  # Placeholder
+            val_plddt=85.0,  # Placeholder
             binder_chain=binder_chain,
             target_chain=target_chain,
             target_type="protein",
@@ -362,10 +362,10 @@ def test_folder(
             
             result = run_opensource_scoring_local(
                 design_id=design_id,
-                af3_structure=structure_content,
-                af3_iptm=0.8,
-                af3_ptm=0.8,
-                af3_plddt=85.0,
+                val_structure=structure_content,
+                val_iptm=0.8,
+                val_ptm=0.8,
+                val_plddt=85.0,
                 binder_chain=binder_chain,
                 target_chain=target_chain,
                 target_type="protein",

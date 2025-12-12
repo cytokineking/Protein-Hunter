@@ -454,19 +454,19 @@ def run_protenix_validation_persistent(
         model_name: Protenix model name (default: protenix_base_default_v0.5.0)
     
     Returns:
-        Dict compatible with unified af3_* schema
+        Dict compatible with unified val_* schema
     """
     global _PROTENIX_VERBOSE
     _PROTENIX_VERBOSE = verbose
     
     # Initialize result with defaults
     result: Dict[str, Any] = {
-        "af3_iptm": 0.0,
-        "af3_ipsae": 0.0,
-        "af3_ptm": 0.0,
-        "af3_plddt": 0.0,
-        "af3_structure": None,
-        "af3_confidence_json": None,
+        "val_iptm": 0.0,
+        "val_ipsae": 0.0,
+        "val_ptm": 0.0,
+        "val_plddt": 0.0,
+        "val_structure": None,
+        "val_confidence_json": None,
         "apo_structure": None,
     }
     
@@ -528,12 +528,12 @@ def run_protenix_validation_persistent(
         "protenix_ptm": holo_result.get("ptm", 0.0),
         "protenix_plddt": holo_result.get("plddt", 0.0),
         "protenix_ipsae": ipsae_result.get("protenix_ipsae", 0.0),
-        "af3_iptm": holo_result.get("iptm", 0.0),
-        "af3_ptm": holo_result.get("ptm", 0.0),
-        "af3_plddt": holo_result.get("plddt", 0.0),
-        "af3_ipsae": ipsae_result.get("protenix_ipsae", 0.0),
-        "af3_structure": holo_result.get("structure_cif"),
-        "af3_confidence_json": holo_result.get("confidence_json"),
+        "val_iptm": holo_result.get("iptm", 0.0),
+        "val_ptm": holo_result.get("ptm", 0.0),
+        "val_plddt": holo_result.get("plddt", 0.0),
+        "val_ipsae": ipsae_result.get("protenix_ipsae", 0.0),
+        "val_structure": holo_result.get("structure_cif"),
+        "val_confidence_json": holo_result.get("confidence_json"),
         "chain_pair_iptm": holo_result.get("chain_pair_iptm", {}),
         "ranking_score": holo_result.get("ranking_score", 0.0),
         "has_clash": holo_result.get("has_clash", False),

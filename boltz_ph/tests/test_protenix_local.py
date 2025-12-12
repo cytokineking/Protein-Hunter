@@ -225,10 +225,10 @@ def test_protenix_synthetic():
             return False
         
         print(f"\n  --- Results ---")
-        print(f"  ipTM: {result.get('af3_iptm', 'N/A')}")
-        print(f"  pTM: {result.get('af3_ptm', 'N/A')}")
-        print(f"  pLDDT: {result.get('af3_plddt', 'N/A')}")
-        print(f"  ipSAE: {result.get('af3_ipsae', 'N/A')}")
+        print(f"  ipTM: {result.get('val_iptm', 'N/A')}")
+        print(f"  pTM: {result.get('val_ptm', 'N/A')}")
+        print(f"  pLDDT: {result.get('val_plddt', 'N/A')}")
+        print(f"  ipSAE: {result.get('val_ipsae', 'N/A')}")
         
         holo_time = result.get('holo_time', 0)
         apo_time = result.get('apo_time', 0)
@@ -237,7 +237,7 @@ def test_protenix_synthetic():
         if apo_time > 0:
             print(f"  APO time: {apo_time:.1f}s")
         
-        if result.get('af3_iptm', 0) > 0:
+        if result.get('val_iptm', 0) > 0:
             print(f"  ✓ Protenix validation succeeded")
             return True
         else:
@@ -318,13 +318,13 @@ def test_single_pdb(
         
         # Display results
         print(f"\n  --- Protenix Confidence ---")
-        print(f"  ipTM: {result.get('af3_iptm', 0):.4f}")
-        print(f"  pTM: {result.get('af3_ptm', 0):.4f}")
-        print(f"  pLDDT: {result.get('af3_plddt', 0):.2f}")
-        print(f"  ipSAE: {result.get('af3_ipsae', 0):.4f}")
+        print(f"  ipTM: {result.get('val_iptm', 0):.4f}")
+        print(f"  pTM: {result.get('val_ptm', 0):.4f}")
+        print(f"  pLDDT: {result.get('val_plddt', 0):.2f}")
+        print(f"  ipSAE: {result.get('val_ipsae', 0):.4f}")
         
         # Save structure if available
-        holo_struct = result.get('af3_structure') or result.get('holo_structure')
+        holo_struct = result.get('val_structure') or result.get('holo_structure')
         if holo_struct:
             struct_path = output_path / f"{design_id}_protenix.cif"
             struct_path.write_text(holo_struct)
@@ -425,12 +425,12 @@ def test_folder(
                         "elapsed_time": elapsed,
                     }
                 else:
-                    iptm = result.get('af3_iptm', 0)
-                    plddt = result.get('af3_plddt', 0)
+                    iptm = result.get('val_iptm', 0)
+                    plddt = result.get('val_plddt', 0)
                     
                     print(f"    ✓ Success ({elapsed:.1f}s): ipTM={iptm:.3f}, pLDDT={plddt:.1f}")
                     
-                    holo_struct = result.get('af3_structure') or result.get('holo_structure')
+                    holo_struct = result.get('val_structure') or result.get('holo_structure')
                     if holo_struct:
                         struct_path = structures_dir / f"{design_id}_protenix.cif"
                         struct_path.write_text(holo_struct)
@@ -439,10 +439,10 @@ def test_folder(
                         "design_id": design_id,
                         "binder_length": len(design["binder_seq"]),
                         "binder_seq": design["binder_seq"],
-                        "protenix_iptm": result.get('af3_iptm'),
-                        "protenix_ptm": result.get('af3_ptm'),
-                        "protenix_plddt": result.get('af3_plddt'),
-                        "protenix_ipsae": result.get('af3_ipsae'),
+                        "protenix_iptm": result.get('val_iptm'),
+                        "protenix_ptm": result.get('val_ptm'),
+                        "protenix_plddt": result.get('val_plddt'),
+                        "protenix_ipsae": result.get('val_ipsae'),
                         "elapsed_time": elapsed,
                         "holo_time": result.get('holo_time', 0),
                         "apo_time": result.get('apo_time', 0),

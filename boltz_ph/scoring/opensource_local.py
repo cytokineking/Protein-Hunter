@@ -1458,14 +1458,14 @@ def opensource_score_interface(
 
 def _run_opensource_scoring_impl(
     design_id: str,
-    af3_structure: str,
-    af3_iptm: float,
-    af3_ptm: float,
-    af3_plddt: float,
+    val_structure: str,
+    val_iptm: float,
+    val_ptm: float,
+    val_plddt: float,
     binder_chain: str = "A",
     target_chain: str = "B",
     apo_structure: Optional[str] = None,
-    af3_confidence_json: Optional[str] = None,
+    val_confidence_json: Optional[str] = None,
     target_type: str = "protein",
     verbose: bool = False,
 ) -> Dict[str, Any]:
@@ -1483,9 +1483,9 @@ def _run_opensource_scoring_impl(
 
     result = {
         "design_id": design_id,
-        "af3_iptm": float(af3_iptm),
-        "af3_ptm": float(af3_ptm),
-        "af3_plddt": float(af3_plddt),
+        "val_iptm": float(val_iptm),
+        "val_ptm": float(val_ptm),
+        "val_plddt": float(val_plddt),
         "accepted": False,
         "rejection_reason": None,
         "relaxed_pdb": None,
@@ -1512,8 +1512,8 @@ def _run_opensource_scoring_impl(
         "rg": None,
     }
 
-    if not af3_structure:
-        result["rejection_reason"] = "No AF3 structure"
+    if not val_structure:
+        result["rejection_reason"] = "No validation structure"
         return result
 
     work_dir = Path(tempfile.mkdtemp())
@@ -1524,7 +1524,7 @@ def _run_opensource_scoring_impl(
         # internal consistency with the force field and avoids conversion artifacts
         # that can cause NaN errors during relaxation.
         cif_file = work_dir / f"{design_id}.cif"
-        cif_file.write_text(af3_structure)
+        cif_file.write_text(val_structure)
 
         pdb_file = work_dir / f"{design_id}.pdb"
         try:
@@ -1603,9 +1603,9 @@ def _run_opensource_scoring_impl(
             vprint(f"[Open-Score] Rg calculation failed: {e}")
 
         # ========== i_pae CALCULATION ==========
-        if af3_confidence_json:
+        if val_confidence_json:
             try:
-                confidence = json.loads(af3_confidence_json)
+                confidence = json.loads(val_confidence_json)
                 pae_matrix = np.array(confidence.get("pae", []))
 
                 if len(pae_matrix) > 0:
@@ -1676,11 +1676,11 @@ def _run_opensource_scoring_impl(
             return default if val is None else val
 
         # Primary filters
-        if af3_iptm < 0.7:
-            rejection_reasons.append(f"Low AF3 ipTM: {af3_iptm:.3f}")
+        if val_iptm < 0.7:
+            rejection_reasons.append(f"Low val ipTM: {val_iptm:.3f}")
 
-        if af3_plddt < 80:
-            rejection_reasons.append(f"Low AF3 pLDDT: {af3_plddt:.1f}")
+        if val_plddt < 80:
+            rejection_reasons.append(f"Low val pLDDT: {val_plddt:.1f}")
 
         if safe_get("binder_score", float("inf")) >= 0:
             rejection_reasons.append(f"binder_score >= 0: {result.get('binder_score')}")
@@ -1769,28 +1769,28 @@ def _collapse_chains(pdb_in: str, pdb_out: str, binder_chain: str, collapse_to: 
 
 def run_opensource_scoring_local(
     design_id: str,
-    af3_structure: str,
-    af3_iptm: float,
-    af3_ptm: float,
-    af3_plddt: float,
+    val_structure: str,
+    val_iptm: float,
+    val_ptm: float,
+    val_plddt: float,
     binder_chain: str = "A",
     target_chain: str = "B",
     apo_structure: Optional[str] = None,
-    af3_confidence_json: Optional[str] = None,
+    val_confidence_json: Optional[str] = None,
     target_type: str = "protein",
     verbose: bool = False,
 ) -> Dict[str, Any]:
     """Run open-source relaxation + interface scoring locally."""
     return _run_opensource_scoring_impl(
         design_id,
-        af3_structure,
-        af3_iptm,
-        af3_ptm,
-        af3_plddt,
+        val_structure,
+        val_iptm,
+        val_ptm,
+        val_plddt,
         binder_chain,
         target_chain,
         apo_structure,
-        af3_confidence_json,
+        val_confidence_json,
         target_type,
         verbose,
     )

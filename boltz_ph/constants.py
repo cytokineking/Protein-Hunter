@@ -62,8 +62,8 @@ UNIFIED_DESIGN_COLUMNS = [
     "target_seqs", "contact_residues", "contact_residues_auth", "template_first_residue",
     # Boltz design metrics (prefixed for clarity)
     "boltz_iptm", "boltz_ipsae", "boltz_plddt", "boltz_iplddt",
-    # AF3 validation metrics
-    "af3_iptm", "af3_ipsae", "af3_ptm", "af3_plddt",
+    # Validation metrics (Protenix or AF3)
+    "val_iptm", "val_ipsae", "val_ptm", "val_plddt",
     # PyRosetta interface metrics
     "interface_dG", "interface_sc", "interface_nres", "interface_dSASA",
     "interface_packstat", "interface_hbonds", "interface_delta_unsat_hbonds",
