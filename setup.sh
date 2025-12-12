@@ -379,7 +379,7 @@ if [ "$install_protenix" = true ]; then
     
     # Install additional Protenix runtime dependencies (not always in their setup.py)
     echo "  Installing additional Protenix dependencies..."
-    pip install biotite optree ml-collections dm-tree modelcif gemmi einops hydra-core || {
+    pip install biotite optree ml-collections dm-tree modelcif gemmi einops hydra-core fair-esm || {
         echo "  ⚠ Warning: Some Protenix dependencies failed to install"
     }
     
@@ -392,9 +392,24 @@ if [ "$install_protenix" = true ]; then
     PROTENIX_WEIGHTS_DIR="$HOME/.protein-hunter/protenix_weights"
     PROTENIX_WEIGHTS_FILE="$PROTENIX_WEIGHTS_DIR/protenix_base_default_v0.5.0.pt"
     PROTENIX_WEIGHTS_URL="https://af3-dev.tos-cn-beijing.volces.com/release_model/protenix_base_default_v0.5.0.pt"
+    PROTENIX_MIN_SIZE=1400000000  # ~1.4GB minimum expected size
     
     mkdir -p "$PROTENIX_WEIGHTS_DIR"
-    if [ ! -f "$PROTENIX_WEIGHTS_FILE" ]; then
+    
+    # Check if weights exist and are valid (not a partial download)
+    NEED_DOWNLOAD=true
+    if [ -f "$PROTENIX_WEIGHTS_FILE" ]; then
+        FILE_SIZE=$(stat -f%z "$PROTENIX_WEIGHTS_FILE" 2>/dev/null || stat -c%s "$PROTENIX_WEIGHTS_FILE" 2>/dev/null || echo "0")
+        if [ "$FILE_SIZE" -ge "$PROTENIX_MIN_SIZE" ]; then
+            echo "  ✓ Protenix weights already present ($(echo "scale=2; $FILE_SIZE/1024/1024/1024" | bc 2>/dev/null || echo "~1.4") GB)"
+            NEED_DOWNLOAD=false
+        else
+            echo "  ⚠ Incomplete Protenix weights detected, re-downloading..."
+            rm -f "$PROTENIX_WEIGHTS_FILE"
+        fi
+    fi
+    
+    if [ "$NEED_DOWNLOAD" = true ]; then
         echo "  Downloading Protenix weights (~1.4GB)..."
         if command -v wget &> /dev/null; then
             wget -q --show-progress -O "$PROTENIX_WEIGHTS_FILE" "$PROTENIX_WEIGHTS_URL" || {
@@ -412,8 +427,6 @@ if [ "$install_protenix" = true ]; then
             echo "  ⚠ Warning: Neither wget nor curl found, skipping weight download"
             echo "    Weights will be downloaded on first use"
         fi
-    else
-        echo "  ✓ Protenix weights already present"
     fi
     
     echo "  ✓ Protenix configured"

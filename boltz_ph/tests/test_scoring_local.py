@@ -162,12 +162,7 @@ def test_scoring_synthetic():
         print(f"  ✗ Failed to import scoring module: {e}")
         return False
     
-    # Write synthetic PDB to temp file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
-        f.write(SYNTHETIC_PDB)
-        pdb_path = f.name
-    
-    print(f"  Synthetic PDB: {pdb_path}")
+    print(f"  Synthetic PDB content")
     print(f"  Binder: chain A (4 residues)")
     print(f"  Target: chain B (4 residues)")
     
@@ -175,14 +170,16 @@ def test_scoring_synthetic():
         print("\n  Running open-source scoring...")
         t0 = time.time()
         
+        # The function expects structure content as string, not a file path
         result = run_opensource_scoring_local(
             design_id="synthetic_test",
-            holo_pdb_path=pdb_path,
+            af3_structure=SYNTHETIC_PDB,
+            af3_iptm=0.8,
+            af3_ptm=0.8,
+            af3_plddt=85.0,
             binder_chain="A",
             target_chain="B",
             target_type="protein",
-            af3_iptm=0.8,
-            af3_plddt=85.0,
             verbose=True,
         )
         
@@ -213,12 +210,6 @@ def test_scoring_synthetic():
         print(f"  ✗ Exception: {e}")
         traceback.print_exc()
         return False
-    finally:
-        # Cleanup
-        try:
-            os.unlink(pdb_path)
-        except:
-            pass
 
 
 def test_single_structure(
@@ -260,34 +251,22 @@ def test_single_structure(
         # Determine if CIF or PDB
         is_cif = struct_file.suffix.lower() in ['.cif', '.mmcif']
         
-        if is_cif:
-            # Convert CIF to PDB first
-            from utils.convert import convert_cif_to_pdb
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
-                pdb_path = f.name
-            convert_cif_to_pdb(str(struct_file), pdb_path)
-        else:
-            pdb_path = str(struct_file)
+        # Read structure content
+        structure_content = struct_file.read_text()
         
         result = run_opensource_scoring_local(
             design_id=design_id,
-            holo_pdb_path=pdb_path,
+            af3_structure=structure_content,
+            af3_iptm=0.8,  # Placeholder
+            af3_ptm=0.8,  # Placeholder
+            af3_plddt=85.0,  # Placeholder
             binder_chain=binder_chain,
             target_chain=target_chain,
             target_type="protein",
-            af3_iptm=0.8,  # Placeholder
-            af3_plddt=85.0,  # Placeholder
             verbose=verbose,
         )
         
         elapsed = time.time() - t0
-        
-        # Cleanup temp file if we converted
-        if is_cif:
-            try:
-                os.unlink(pdb_path)
-            except:
-                pass
         
         print(f"\n  Completed in {elapsed:.1f}s")
         
@@ -378,35 +357,22 @@ def test_folder(
         
         t0 = time.time()
         try:
-            # Handle CIF vs PDB
-            is_cif = struct_file.suffix.lower() in ['.cif', '.mmcif']
-            
-            if is_cif:
-                from utils.convert import convert_cif_to_pdb
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
-                    pdb_path = f.name
-                convert_cif_to_pdb(str(struct_file), pdb_path)
-            else:
-                pdb_path = str(struct_file)
+            # Read structure content
+            structure_content = struct_file.read_text()
             
             result = run_opensource_scoring_local(
                 design_id=design_id,
-                holo_pdb_path=pdb_path,
+                af3_structure=structure_content,
+                af3_iptm=0.8,
+                af3_ptm=0.8,
+                af3_plddt=85.0,
                 binder_chain=binder_chain,
                 target_chain=target_chain,
                 target_type="protein",
-                af3_iptm=0.8,
-                af3_plddt=85.0,
                 verbose=verbose,
             )
             
             elapsed = time.time() - t0
-            
-            if is_cif:
-                try:
-                    os.unlink(pdb_path)
-                except:
-                    pass
             
             if "error" in result:
                 print(f"    ✗ Error ({elapsed:.1f}s): {result['error']}")
