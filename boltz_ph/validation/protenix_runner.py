@@ -621,16 +621,26 @@ class PersistentProtenixRunner:
                         result["structure_cif"] = matches[0].read_text()
                         break
                 
-                # Find full data JSON (for PAE/ipSAE)
-                for pattern in [
-                    "full_data_sample_0.json",
+                # Find full data JSON (for PAE/ipSAE) - robust patterns matching Modal
+                full_data_patterns = [
                     f"{name}_full_data_sample_0.json",
+                    f"{name}_{SEED}_full_data_sample_0.json",
+                    f"{name}_seed_{SEED}_full_data_sample_0.json",
+                    "full_data_sample_0.json",
                     "full_data.json",
-                ]:
-                    full_data_file = check_dir / pattern
-                    if full_data_file.exists():
-                        result["full_data_json"] = full_data_file.read_text()
-                        break
+                    "*full_data*.json",  # Glob fallback
+                ]
+                for pattern in full_data_patterns:
+                    if "*" in pattern:
+                        matches = list(check_dir.glob(pattern))
+                        if matches:
+                            result["full_data_json"] = matches[0].read_text()
+                            break
+                    else:
+                        full_data_file = check_dir / pattern
+                        if full_data_file.exists():
+                            result["full_data_json"] = full_data_file.read_text()
+                            break
                 
                 if result["confidence_json"]:
                     return result

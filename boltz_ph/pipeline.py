@@ -1190,7 +1190,7 @@ class ProteinHunter_Boltz:
                         ]
                         conf_files = [
                             f for f in glob.glob(os.path.join(design_path, "*_confidences.json"))
-                            if "_seed-" not in f and "_sample-" not in f
+                            if "_seed-" not in f and "_sample-" not in f and "_summary_confidences.json" not in f
                         ]
                         if cif_files:
                             af3_cif_path = cif_files[0]
@@ -1209,11 +1209,13 @@ class ProteinHunter_Boltz:
                                     if atom_plddts:
                                         result["val_plddt"] = round(sum(atom_plddts) / len(atom_plddts), 2)
 
-                                    target_seqs = a.protein_seqs or ""
-                                    target_length = len(target_seqs.split(":")[0]) if target_seqs else 0
-                                    if binder_length > 0 and target_length > 0:
+                                    # Use actual target sequences and sum ALL chains (not just first)
+                                    # This matches Modal's implementation for correct PAE matrix indexing
+                                    target_seqs = self.data_builder.target_seqs_used or a.protein_seqs or ""
+                                    total_target_length = sum(len(s) for s in target_seqs.split(":") if s)
+                                    if binder_length > 0 and total_target_length > 0:
                                         ipsae_result = calculate_af3_ipsae(
-                                            conf_json_text, binder_length, target_length
+                                            conf_json_text, binder_length, total_target_length
                                         )
                                         result["val_ipsae"] = ipsae_result.get("af3_ipsae", 0.0)
                                 except Exception as e:

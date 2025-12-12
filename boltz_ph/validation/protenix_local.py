@@ -1,16 +1,32 @@
 """
 Local Protenix validation utilities.
 
-This is a local-port of `modal_boltz_ph/validation/protenix.py` with Modal-specific
-decorators/volumes removed. It runs Protenix via subprocess, manages local
-weight caching, and returns results using the unified `af3_*` schema.
+This module provides Protenix-based structure validation for the local Boltz pipeline.
+It uses PersistentProtenixRunner to run Protenix directly via Python API (not subprocess),
+keeping the model loaded in GPU memory across multiple predictions for ~4x faster throughput.
+
+Key features:
+  - Direct Python API integration with Protenix (no subprocess overhead)
+  - Persistent model loading via singleton PersistentProtenixRunner
+  - HOLO (binder+target) and APO (binder-only) predictions
+  - ipSAE calculation from PAE matrices
+  - Results returned using unified `val_*` schema (val_iptm, val_plddt, etc.)
+
+Weight management:
+  Protenix weights are normally downloaded during setup.sh installation to
+  ~/.protein-hunter/protenix_weights/. The ensure_protenix_weights() function
+  provides a fallback for environments where setup.sh wasn't run or weights
+  need re-downloading.
+
+See also:
+  - boltz_ph/validation/protenix_runner.py: PersistentProtenixRunner implementation
+  - modal_boltz_ph/validation/protenix.py: Modal cloud version (uses subprocess CLI)
 """
 
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 import tempfile
 import time
 import sys
