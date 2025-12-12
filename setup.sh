@@ -377,8 +377,41 @@ if [ "$install_protenix" = true ]; then
     }
     cd ..
     
+    # Install additional Protenix runtime dependencies (not in their setup.py)
+    echo "  Installing additional Protenix dependencies..."
+    pip install biotite || {
+        echo "  ⚠ Warning: biotite install failed"
+    }
+    
+    # Download Protenix weights (~1.4GB)
+    PROTENIX_WEIGHTS_DIR="$HOME/.protein-hunter/protenix_weights"
+    PROTENIX_WEIGHTS_FILE="$PROTENIX_WEIGHTS_DIR/protenix_base_default_v0.5.0.pt"
+    PROTENIX_WEIGHTS_URL="https://af3-dev.tos-cn-beijing.volces.com/release_model/protenix_base_default_v0.5.0.pt"
+    
+    mkdir -p "$PROTENIX_WEIGHTS_DIR"
+    if [ ! -f "$PROTENIX_WEIGHTS_FILE" ]; then
+        echo "  Downloading Protenix weights (~1.4GB)..."
+        if command -v wget &> /dev/null; then
+            wget -q --show-progress -O "$PROTENIX_WEIGHTS_FILE" "$PROTENIX_WEIGHTS_URL" || {
+                echo "  ⚠ Warning: Failed to download Protenix weights"
+                echo "    Weights will be downloaded on first use"
+                rm -f "$PROTENIX_WEIGHTS_FILE"
+            }
+        elif command -v curl &> /dev/null; then
+            curl -L --progress-bar -o "$PROTENIX_WEIGHTS_FILE" "$PROTENIX_WEIGHTS_URL" || {
+                echo "  ⚠ Warning: Failed to download Protenix weights"
+                echo "    Weights will be downloaded on first use"
+                rm -f "$PROTENIX_WEIGHTS_FILE"
+            }
+        else
+            echo "  ⚠ Warning: Neither wget nor curl found, skipping weight download"
+            echo "    Weights will be downloaded on first use"
+        fi
+    else
+        echo "  ✓ Protenix weights already present"
+    fi
+    
     echo "  ✓ Protenix configured"
-    echo "    Note: Protenix weights (~1.4GB) will be downloaded on first use."
 else
     echo "⏭️  Skipping Protenix installation (--no-protenix)"
 fi

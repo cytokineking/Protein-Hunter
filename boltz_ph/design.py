@@ -194,10 +194,14 @@ def parse_args():
     return parser.parse_args()
 
 def print_args(args):
+    # Deprecated flags to exclude from config print
+    deprecated_flags = {"use_alphafold3_validation", "use_msa_for_af3", "use_open_scoring"}
+    
     print("="*40)
     print("Design Configuration:")
     for k, v in vars(args).items():
-        print(f"{k:30}: {v}")
+        if k not in deprecated_flags:
+            print(f"{k:30}: {v}")
     print("="*40)
 
 def validate_args(args):

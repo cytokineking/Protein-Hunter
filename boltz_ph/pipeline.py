@@ -1096,7 +1096,7 @@ class ProteinHunter_Boltz:
         
         sys.path.append(os.path.join(os.path.dirname(__file__), "utils"))
         from utils.alphafold_utils import run_alphafold_step_from_csv, calculate_af3_ipsae
-        from utils.pyrosetta_utils import run_rosetta_step
+        # Note: pyrosetta_utils import is deferred to avoid init when not needed
 
         a = self.args
 
@@ -1634,7 +1634,7 @@ class ProteinHunter_Boltz:
         import glob
 
         from utils.alphafold_utils import run_alphafold_step_from_csv, calculate_af3_ipsae
-        from utils.pyrosetta_utils import run_rosetta_step
+        # Note: pyrosetta_utils import is deferred to avoid init when not needed
 
         a = self.args
         validation_model = getattr(a, "validation_model", "none")
@@ -2099,7 +2099,7 @@ class ProteinHunter_Boltz:
         import glob
         
         from utils.alphafold_utils import run_alphafold_step_from_csv, calculate_af3_ipsae
-        from utils.pyrosetta_utils import run_rosetta_step
+        # Note: pyrosetta_utils import is deferred to avoid init when not needed
         
         a = self.args
         design_idx = int(design_metrics.get("run_id", 0))
