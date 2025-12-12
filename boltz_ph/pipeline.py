@@ -107,8 +107,20 @@ class InputDataBuilder:
         )
         
         if not template_cif_chain_id_list:
-            print("⚠ Warning: No --template_cif_chain_id specified, defaulting to chain 'A'")
-            template_cif_chain_id_list = ["A"]
+            # Auto-detect protein chains from template file
+            from model_utils import detect_protein_chains
+            template_file = get_cif(template_path_list[0]) if template_path_list else None
+            if template_file:
+                detected_chains = detect_protein_chains(template_file)
+                if detected_chains:
+                    template_cif_chain_id_list = detected_chains
+                    print(f"✓ Auto-detected {len(detected_chains)} protein chain(s) from template: {', '.join(detected_chains)}")
+                else:
+                    print("⚠ Warning: Could not detect protein chains, defaulting to chain 'A'")
+                    template_cif_chain_id_list = ["A"]
+            else:
+                print("⚠ Warning: No template file found, defaulting to chain 'A'")
+                template_cif_chain_id_list = ["A"]
         
         all_analysis = {}
         auto_seqs = []
@@ -581,7 +593,9 @@ class ProteinHunter_Boltz:
         
         # 2. Initialize Models
         self.boltz_model = self._load_boltz_model()
-        self.designer = LigandMPNNWrapper("./LigandMPNN/run.py")
+        # Use absolute path for LigandMPNN to work regardless of CWD
+        ligandmpnn_path = os.path.join(os.path.dirname(__file__), "..", "LigandMPNN", "run.py")
+        self.designer = LigandMPNNWrapper(ligandmpnn_path)
 
         # 3. Setup Directories
         self.save_dir = self.data_builder.save_dir
@@ -1046,7 +1060,7 @@ class ProteinHunter_Boltz:
         import json
         import glob
 
-        from utils.alphafold_utils import run_alphafold_step_from_csv, calculate_val_ipsae
+        from utils.alphafold_utils import run_alphafold_step_from_csv, calculate_af3_ipsae
         # Note: pyrosetta_utils import is deferred to avoid init when not needed
 
         a = self.args
@@ -1138,6 +1152,9 @@ class ProteinHunter_Boltz:
                 pd.DataFrame([csv_row]).to_csv(temp_csv_path, index=False)
 
                 # STEP 2: run AF3 for this design
+                # Use project root for work_dir (where utils/alphafold.sh lives)
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                af_work_dir = os.path.expanduser(a.work_dir) if a.work_dir else project_root
                 af_output_dir, af_output_apo_dir, af_pdb_dir, af_pdb_dir_apo = (
                     run_alphafold_step_from_csv(
                         csv_path=temp_csv_path,
@@ -1146,7 +1163,7 @@ class ProteinHunter_Boltz:
                         af3_database_settings=os.path.expanduser(a.af3_database_settings),
                         hmmer_path=os.path.expanduser(a.hmmer_path),
                         ligandmpnn_dir=work_dir_validation,
-                        work_dir=os.path.expanduser(a.work_dir) or os.getcwd(),
+                        work_dir=af_work_dir,
                         binder_id=self.binder_chain,
                         gpu_id=getattr(a, "physical_gpu_id", a.gpu_id),
                         high_iptm=False,
@@ -1195,10 +1212,10 @@ class ProteinHunter_Boltz:
                                     target_seqs = a.protein_seqs or ""
                                     target_length = len(target_seqs.split(":")[0]) if target_seqs else 0
                                     if binder_length > 0 and target_length > 0:
-                                        ipsae_result = calculate_val_ipsae(
+                                        ipsae_result = calculate_af3_ipsae(
                                             conf_json_text, binder_length, target_length
                                         )
-                                        result["val_ipsae"] = ipsae_result.get("val_ipsae", 0.0)
+                                        result["val_ipsae"] = ipsae_result.get("af3_ipsae", 0.0)
                                 except Exception as e:
                                     print(f"    Warning: Could not read confidence: {e}")
                             break

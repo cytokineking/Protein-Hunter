@@ -824,6 +824,93 @@ THREE_TO_ONE = {
 }
 
 
+def detect_protein_chains(template_path: str) -> list[str]:
+    """
+    Auto-detect all protein chain IDs in a PDB/CIF template file.
+    
+    Returns chain IDs that contain amino acid residues, in the order they appear.
+    This is useful for auto-populating --template-cif-chain-id when not specified.
+    
+    Args:
+        template_path: Path to PDB or CIF file
+    
+    Returns:
+        List of chain IDs containing protein residues (e.g., ['A', 'B'])
+    """
+    is_cif = template_path.lower().endswith('.cif')
+    
+    if is_cif:
+        return _detect_cif_protein_chains(template_path)
+    else:
+        return _detect_pdb_protein_chains(template_path)
+
+
+def _detect_pdb_protein_chains(template_path: str) -> list[str]:
+    """Detect protein chains in PDB file using gemmi."""
+    try:
+        structure = gemmi.read_structure(template_path)
+    except Exception as e:
+        print(f"⚠ Warning: Could not parse {template_path}: {e}")
+        return []
+    
+    model = structure[0]  # First model
+    protein_chains = []
+    
+    for chain in model:
+        # Check if chain has any amino acid residues
+        for residue in chain:
+            if residue.name in THREE_TO_ONE:
+                protein_chains.append(chain.name)
+                break  # Found protein, move to next chain
+    
+    return protein_chains
+
+
+def _detect_cif_protein_chains(template_path: str) -> list[str]:
+    """Detect protein chains in CIF file using gemmi."""
+    try:
+        doc = gemmi.cif.read(template_path)
+        block = doc.sole_block()
+    except Exception as e:
+        print(f"⚠ Warning: Could not parse {template_path}: {e}")
+        return []
+    
+    # Get chain IDs from _struct_asym and their entity types from _entity
+    struct_asym = block.find(['_struct_asym.id', '_struct_asym.entity_id'])
+    entity_table = block.find(['_entity.id', '_entity.type'])
+    
+    # Build entity_id -> type mapping
+    entity_types = {}
+    for row in entity_table:
+        entity_types[row[0]] = row[1]
+    
+    # Find chains that are polymers (proteins)
+    protein_chains = []
+    for row in struct_asym:
+        chain_id = row[0]
+        entity_id = row[1]
+        entity_type = entity_types.get(entity_id, '')
+        
+        # 'polymer' type indicates protein/nucleic acid; we verify with residues
+        if entity_type == 'polymer':
+            protein_chains.append(chain_id)
+    
+    # If struct_asym approach didn't work, fall back to structure parsing
+    if not protein_chains:
+        try:
+            structure = gemmi.read_structure(template_path)
+            model = structure[0]
+            for chain in model:
+                for residue in chain:
+                    if residue.name in THREE_TO_ONE:
+                        protein_chains.append(chain.name)
+                        break
+        except Exception:
+            pass
+    
+    return protein_chains
+
+
 def analyze_template_structure(
     template_path: str, 
     chain_ids: list[str]
