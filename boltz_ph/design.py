@@ -2,6 +2,25 @@ import argparse
 import os
 import sys
 import warnings
+import resource
+
+# ============================================================================
+# FILE DESCRIPTOR LIMIT - Increase to prevent "Too many open files" errors
+# ============================================================================
+def _increase_file_limit(target: int = 65536) -> None:
+    """Try to increase the open file descriptor limit."""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft >= target:
+            return  # Already high enough
+        new_soft = min(target, hard)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+        print(f"✓ File descriptor limit increased: {soft} → {new_soft}")
+    except Exception as e:
+        print(f"⚠ Could not increase file descriptor limit: {e}")
+        print(f"  Consider running: ulimit -n 65536")
+
+_increase_file_limit()
 
 # ============================================================================
 # LOG SUPPRESSION - Must be set before any JAX/TensorFlow imports

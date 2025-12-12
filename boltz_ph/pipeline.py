@@ -1343,6 +1343,9 @@ class ProteinHunter_Boltz:
                 for k in ("af3_iptm", "af3_ptm", "af3_plddt", "af3_ipsae"):
                     result[k] = protenix_result.get(k, 0.0)
 
+                # Log HOLO results
+                print(f"  ✓ HOLO: iptm={result['af3_iptm']:.3f}, plddt={result['af3_plddt']:.2f}, ipsae={result['af3_ipsae']:.3f}")
+
                 holo_cif = protenix_result.get("af3_structure")
                 conf_json_text = protenix_result.get("af3_confidence_json")
                 apo_cif = protenix_result.get("apo_structure")
@@ -1378,6 +1381,12 @@ class ProteinHunter_Boltz:
                         if k in ("design_id", "relaxed_pdb"):
                             continue
                         result[k] = v
+                    
+                    # Log scoring results
+                    print(f"  ✓ Scored: dG={scoring_result.get('interface_dG', 0):.1f}, "
+                          f"sc={scoring_result.get('interface_sc', 0):.2f}, "
+                          f"hbonds={scoring_result.get('interface_hbonds', 0)}")
+                    
                     if scoring_result.get("relaxed_pdb"):
                         dest_dir = "accepted_designs" if result["accepted"] else "rejected"
                         out_dir = Path(self.save_dir) / dest_dir
@@ -2014,13 +2023,19 @@ def _gpu_worker(gpu_id: int, args, task_queue, result_queue, shutdown_event):
     save_dir = os.path.abspath(save_dir_rel)
     os.makedirs(save_dir, exist_ok=True)
     log_path = os.path.join(save_dir, f"worker_gpu{gpu_id}.log")
-    log_file = open(log_path, "w", buffering=1)  # Line-buffered for real-time updates
+    log_file = open(log_path, "a", buffering=1)  # Append mode, line-buffered for real-time updates
     
     # Redirect stdout/stderr to log file (captures all output including subprocesses)
     sys.stdout = log_file
     sys.stderr = log_file
 
     try:
+        # Print session separator for appended logs
+        import datetime
+        print(f"\n{'='*70}")
+        print(f"[GPU {gpu_id}] NEW SESSION - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'='*70}")
+        
         # Initialize model on this GPU
         print(f"[GPU {gpu_id}] Initializing worker...")
         print(f"[GPU {gpu_id}] Log file: {log_path}")
@@ -2176,13 +2191,14 @@ class MultiGPUOrchestrator:
             # Rejected before validation (thresholds not met)
             print(f"  └─ ✗ SKIPPED validation: {rejection_reason}", flush=True)
         elif validation_result:
-            # AF3 validation was run
+            # Validation was run (Protenix or AF3)
+            val_label = self.args.validation_model.capitalize()
             af3_iptm = validation_result.get("af3_iptm", 0)
             af3_ipsae = validation_result.get("af3_ipsae", 0)
             interface_dG = validation_result.get("interface_dG", 0)
             interface_hbonds = validation_result.get("interface_hbonds", 0)
             
-            print(f"  ├─ AF3: iptm={af3_iptm:.3f}, ipsae={af3_ipsae:.3f}, dG={interface_dG:.1f}, hbonds={interface_hbonds}", flush=True)
+            print(f"  ├─ {val_label}: iptm={af3_iptm:.3f}, ipsae={af3_ipsae:.3f}, dG={interface_dG:.1f}, hbonds={interface_hbonds}", flush=True)
             
             if accepted:
                 print(f"  └─ ✓✓ ACCEPTED", flush=True)

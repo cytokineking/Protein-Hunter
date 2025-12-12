@@ -122,13 +122,15 @@ class PersistentProtenixRunner:
             "protenix", "runner", "runner.inference", 
             "protenix.data", "protenix.data.infer_data_pipeline",
             "protenix.data.constraint_featurizer", "protenix.data.msa_featurizer",
+            "prody", ".prody", "root",
         ]:
             logging.getLogger(logger_name).setLevel(logging.ERROR)
-        # Also suppress root logger INFO from Protenix
-        logging.getLogger("root").setLevel(logging.ERROR)
-        # Suppress deprecation warnings from torch/numpy
+        
+        # Aggressively suppress deprecation/user warnings from torch/numpy/etc.
         warnings.filterwarnings("ignore", category=DeprecationWarning)
-        warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        warnings.filterwarnings("ignore", message=".*get_autocast_gpu_dtype.*")
         
         self._protenix_imported = True
     
@@ -143,16 +145,18 @@ class PersistentProtenixRunner:
         import logging
         import warnings
         
-        # Suppress deprecation/user warnings from numpy, torch, prody, etc.
+        # Aggressively suppress all deprecation and user warnings
         warnings.filterwarnings("ignore", category=DeprecationWarning)
-        warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
         warnings.filterwarnings("ignore", message=".*use_reentrant.*")
         warnings.filterwarnings("ignore", message=".*requires_grad.*")
         warnings.filterwarnings("ignore", message=".*__array_wrap__.*")
+        warnings.filterwarnings("ignore", message=".*get_autocast_gpu_dtype.*")
         
-        # Suppress noisy loggers (ProDy DEBUG logging)
-        for logger_name in ["prody", ".prody", "root"]:
-            logging.getLogger(logger_name).setLevel(logging.WARNING)
+        # Suppress noisy loggers (ProDy, Protenix internals)
+        for logger_name in ["prody", ".prody", "root", "protenix", "runner", "runner.inference"]:
+            logging.getLogger(logger_name).setLevel(logging.ERROR)
     
     def ensure_loaded(self) -> float:
         """

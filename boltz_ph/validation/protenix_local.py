@@ -166,7 +166,8 @@ def ensure_protenix_weights(model_name: str = DEFAULT_PROTENIX_MODEL) -> Path:
                 ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
                 if isinstance(ckpt, dict) and "model" in ckpt:
                     del ckpt
-                    print(f"  ✓ Protenix weights verified: {checkpoint_path}")
+                    if _PROTENIX_VERBOSE:
+                        print(f"  ✓ Protenix weights verified: {checkpoint_path}")
                     return weights_dir
             except Exception:
                 pass
