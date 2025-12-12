@@ -57,9 +57,9 @@ class InputDataBuilder:
     def __init__(self, args):
         self.args = args
         # New output structure: results_{name}/
-        self.save_dir = (
-            args.save_dir if args.save_dir else f"./results_{args.name}"
-        )
+        # CRITICAL: Use absolute paths to avoid issues if CWD changes (e.g., Protenix)
+        save_dir_rel = args.save_dir if args.save_dir else f"./results_{args.name}"
+        self.save_dir = os.path.abspath(save_dir_rel)
         # Flat designs directory (replaces 0_protein_hunter_design/run_X/)
         self.designs_dir = f"{self.save_dir}/designs"
         os.makedirs(self.designs_dir, exist_ok=True)
@@ -1488,7 +1488,7 @@ class ProteinHunter_Boltz:
                 shutil.rmtree(work_dir_validation, ignore_errors=True)
             except Exception:
                 pass
-
+        
         return result
 
     def _save_design_result(self, result: dict) -> None:
@@ -1994,7 +1994,9 @@ def _gpu_worker(gpu_id: int, args, task_queue: Queue, result_queue: Queue, shutd
     worker_args.physical_gpu_id = gpu_id  # Keep track of actual GPU for Docker (AF3)
     
     # Create per-worker log file for detailed output
-    save_dir = args.save_dir if args.save_dir else f"./results_{args.name}"
+    # CRITICAL: Use absolute paths to avoid issues if CWD changes (e.g., Protenix)
+    save_dir_rel = args.save_dir if args.save_dir else f"./results_{args.name}"
+    save_dir = os.path.abspath(save_dir_rel)
     os.makedirs(save_dir, exist_ok=True)
     log_path = os.path.join(save_dir, f"worker_gpu{gpu_id}.log")
     log_file = open(log_path, "w", buffering=1)  # Line-buffered for real-time updates
@@ -2081,7 +2083,9 @@ class MultiGPUOrchestrator:
         self.num_gpus = args.num_gpus
         
         # Create save directory structure
-        self.save_dir = args.save_dir if args.save_dir else f"./results_{args.name}"
+        # CRITICAL: Use absolute paths to avoid issues if CWD changes (e.g., Protenix)
+        save_dir_rel = args.save_dir if args.save_dir else f"./results_{args.name}"
+        self.save_dir = os.path.abspath(save_dir_rel)
         os.makedirs(self.save_dir, exist_ok=True)
         os.makedirs(f"{self.save_dir}/designs", exist_ok=True)
         os.makedirs(f"{self.save_dir}/best_designs", exist_ok=True)

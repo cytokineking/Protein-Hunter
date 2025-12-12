@@ -110,6 +110,21 @@ class PersistentProtenixRunner:
         os.environ["LAYERNORM_TYPE"] = "torch"
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.device)
         
+        # Suppress verbose Protenix logging (keeps only ERRORS)
+        import logging
+        import warnings
+        for logger_name in [
+            "protenix", "runner", "runner.inference", 
+            "protenix.data", "protenix.data.infer_data_pipeline",
+            "protenix.data.constraint_featurizer", "protenix.data.msa_featurizer",
+        ]:
+            logging.getLogger(logger_name).setLevel(logging.ERROR)
+        # Also suppress root logger INFO from Protenix
+        logging.getLogger("root").setLevel(logging.ERROR)
+        # Suppress deprecation warnings from torch/numpy
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        
         self._protenix_imported = True
     
     def ensure_loaded(self) -> float:
