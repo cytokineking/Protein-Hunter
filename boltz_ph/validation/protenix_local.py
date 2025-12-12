@@ -46,7 +46,7 @@ PROTENIX_MODEL_SIZES = {
 # Local repo root for Protenix
 PROTENIX_REPO_ROOT = Path(__file__).resolve().parents[2] / "Protenix"
 
-# Global verbose toggle set by run_protenix_validation_local
+# Global verbose toggle set by run_protenix_validation_persistent
 _PROTENIX_VERBOSE = False
 
 
@@ -395,157 +395,6 @@ def _parse_protenix_output(
     }
 
 
-def _run_protenix_prediction(
-    input_json_path: Path,
-    output_dir: Path,
-    seed: int = 101,
-    model_name: str = DEFAULT_PROTENIX_MODEL,
-    n_sample: int = 1,
-    n_cycle: int = 10,
-    n_step: int = 200,
-    use_msa: bool = True,
-    timeout: int = 1800,
-    checkpoint_dir: Optional[str] = None,
-) -> subprocess.CompletedProcess:
-    """Run Protenix `runner.inference` via subprocess."""
-    if checkpoint_dir is None:
-        checkpoint_dir = str(_get_weights_dir())
-
-    python_bin = os.environ.get("PROTENIX_PYTHON", sys.executable)
-
-    cmd = [
-        python_bin,
-        "-m", "runner.inference",
-        "--input_json_path", str(input_json_path),
-        "--dump_dir", str(output_dir),
-        "--seeds", str(seed),
-        "--model_name", model_name,
-        "--load_checkpoint_dir", checkpoint_dir,
-        "--sample_diffusion.N_sample", str(n_sample),
-        "--model.N_cycle", str(n_cycle),
-        "--sample_diffusion.N_step", str(n_step),
-        "--enable_tf32", "true",
-        "--enable_efficient_fusion", "true",
-        "--enable_diffusion_shared_vars_cache", "true",
-        "--need_atom_confidence", "true",
-        "--use_msa", str(use_msa).lower(),
-    ]
-
-    env = os.environ.copy()
-    env["LAYERNORM_TYPE"] = "torch"
-    env["PYTHONPATH"] = str(PROTENIX_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-
-    return subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-        cwd=str(PROTENIX_REPO_ROOT),
-    )
-
-
-def _run_protenix_holo_impl(
-    design_id: str,
-    binder_seq: str,
-    target_seq: str,
-    msa_dir: Optional[Path] = None,
-    model_name: str = DEFAULT_PROTENIX_MODEL,
-) -> Dict[str, Any]:
-    work_dir = Path(tempfile.mkdtemp())
-    output_dir = work_dir / "output"
-    output_dir.mkdir()
-
-    holo_name = f"{design_id}_holo"
-    input_json = _build_protenix_input(
-        design_id=holo_name,
-        binder_seq=binder_seq,
-        target_seq=target_seq,
-        msa_dir=msa_dir,
-        work_dir=work_dir,
-    )
-
-    print(f"  [{design_id}] Running Protenix HOLO prediction...")
-    t0 = time.time()
-    try:
-        proc = _run_protenix_prediction(
-            input_json_path=input_json,
-            output_dir=output_dir,
-            model_name=model_name,
-            n_sample=1,
-            use_msa=bool(msa_dir),
-        )
-    except subprocess.TimeoutExpired:
-        return {"error": "Protenix HOLO timed out after 30 minutes"}
-    except Exception as e:
-        return {"error": f"Protenix HOLO failed: {e}"}
-
-    elapsed = time.time() - t0
-    show_output = proc.returncode != 0 or _PROTENIX_VERBOSE
-    if show_output:
-        if proc.stdout:
-            print(f"  [{design_id}] Protenix stdout (tail):\n{proc.stdout[-1500:]}")
-        if proc.stderr:
-            print(f"  [{design_id}] Protenix stderr (tail):\n{proc.stderr[-1500:]}")
-
-    if proc.returncode != 0:
-        return {"error": f"Protenix HOLO failed (rc={proc.returncode})"}
-
-    try:
-        parsed = _parse_protenix_output(output_dir, holo_name)
-        parsed["elapsed"] = elapsed
-        return parsed
-    except Exception as e:
-        return {"error": f"Failed to parse Protenix HOLO output: {e}"}
-
-
-def _run_protenix_apo_impl(
-    design_id: str,
-    binder_seq: str,
-    model_name: str = DEFAULT_PROTENIX_MODEL,
-) -> Dict[str, Any]:
-    work_dir = Path(tempfile.mkdtemp())
-    output_dir = work_dir / "output"
-    output_dir.mkdir()
-
-    apo_name = f"{design_id}_apo"
-    protenix_input = [{
-        "name": apo_name,
-        "sequences": [{"proteinChain": {"sequence": binder_seq, "count": 1}}],
-        "use_msa": False,
-    }]
-    input_json = work_dir / "query.json"
-    input_json.write_text(json.dumps(protenix_input, indent=2))
-
-    print(f"  [{design_id}] Running Protenix APO prediction...")
-    try:
-        proc = _run_protenix_prediction(
-            input_json_path=input_json,
-            output_dir=output_dir,
-            model_name=model_name,
-            n_sample=1,
-            use_msa=False,
-            timeout=1200,
-        )
-    except subprocess.TimeoutExpired:
-        return {"error": "Protenix APO timed out"}
-    except Exception as e:
-        return {"error": f"Protenix APO failed: {e}"}
-
-    show_output = proc.returncode != 0 or _PROTENIX_VERBOSE
-    if show_output:
-        if proc.stdout:
-            print(f"  [{design_id}] Protenix APO stdout (tail):\n{proc.stdout[-1500:]}")
-        if proc.stderr:
-            print(f"  [{design_id}] Protenix APO stderr (tail):\n{proc.stderr[-1500:]}")
-
-    if proc.returncode != 0:
-        return {"error": f"Protenix APO failed (rc={proc.returncode})"}
-
-    try:
-        return _parse_protenix_output(output_dir, apo_name)
-    except Exception as e:
-        return {"error": f"Failed to parse Protenix APO output: {e}"}
 
 
 def calculate_protenix_ipsae(
@@ -577,91 +426,7 @@ def calculate_protenix_ipsae(
 
 
 # =============================================================================
-# PUBLIC ENTRY POINT
-# =============================================================================
-
-def run_protenix_validation_local(
-    design_id: str,
-    binder_seq: str,
-    target_seq: str,
-    target_msas: Optional[Dict[str, str]] = None,
-    verbose: bool = False,
-    model_name: str = DEFAULT_PROTENIX_MODEL,
-) -> Dict[str, Any]:
-    """
-    Run Protenix HOLO (+ optional APO) validation locally.
-
-    Returns a dict compatible with the unified `af3_*` schema.
-    """
-    global _PROTENIX_VERBOSE
-    _PROTENIX_VERBOSE = verbose
-
-    result: Dict[str, Any] = {
-        "af3_iptm": 0.0,
-        "af3_ipsae": 0.0,
-        "af3_ptm": 0.0,
-        "af3_plddt": 0.0,
-        "af3_structure": None,
-        "af3_confidence_json": None,
-        "apo_structure": None,
-    }
-
-    # Ensure weights
-    try:
-        ensure_protenix_weights(model_name)
-    except Exception as e:
-        return {**result, "error": f"Protenix weights unavailable: {e}"}
-
-    msa_dir: Optional[Path] = None
-    if target_msas:
-        msa_dir = Path(tempfile.mkdtemp()) / "msas"
-        msa_dir.mkdir(parents=True)
-        ensure_msa_files(msa_dir, target_msas)
-
-    target_chains = target_seq.split(":") if target_seq else []
-    total_target_length = sum(len(seq) for seq in target_chains)
-
-    holo_result = _run_protenix_holo_impl(
-        design_id, binder_seq, target_seq, msa_dir, model_name=model_name
-    )
-    if "error" in holo_result:
-        return {**result, "error": holo_result["error"]}
-
-    ipsae_result: Dict[str, float] = {}
-    if holo_result.get("full_data_json"):
-        ipsae_result = calculate_protenix_ipsae(
-            holo_result["full_data_json"],
-            binder_length=len(binder_seq),
-            target_length=total_target_length,
-        )
-
-    result.update({
-        "protenix_iptm": holo_result.get("iptm", 0.0),
-        "protenix_ptm": holo_result.get("ptm", 0.0),
-        "protenix_plddt": holo_result.get("plddt", 0.0),
-        "protenix_ipsae": ipsae_result.get("protenix_ipsae", 0.0),
-        "af3_iptm": holo_result.get("iptm", 0.0),
-        "af3_ptm": holo_result.get("ptm", 0.0),
-        "af3_plddt": holo_result.get("plddt", 0.0),
-        "af3_ipsae": ipsae_result.get("protenix_ipsae", 0.0),
-        "af3_structure": holo_result.get("structure_cif"),
-        "af3_confidence_json": holo_result.get("confidence_json"),
-        "chain_pair_iptm": holo_result.get("chain_pair_iptm", {}),
-        "ranking_score": holo_result.get("ranking_score", 0.0),
-        "has_clash": holo_result.get("has_clash", False),
-    })
-
-    # APO prediction (binder only)
-    apo_result = _run_protenix_apo_impl(design_id, binder_seq, model_name=model_name)
-    if "error" not in apo_result:
-        result["apo_structure"] = apo_result.get("structure_cif")
-        result["apo_plddt"] = apo_result.get("plddt", 0.0)
-
-    return result
-
-
-# =============================================================================
-# PERSISTENT RUNNER ENTRY POINT (Model Stays Loaded - ~6x Faster)
+# PUBLIC ENTRY POINT (Persistent Runner - Model Stays Loaded, ~6x Faster)
 # =============================================================================
 
 def run_protenix_validation_persistent(
@@ -676,10 +441,8 @@ def run_protenix_validation_persistent(
     Run Protenix HOLO (+ APO) validation using persistent runner.
     
     This keeps the Protenix model loaded in GPU memory across multiple
-    predictions, reducing per-design time from ~105s to ~15s after the
+    predictions, reducing per-design time from ~105s to ~25s after the
     first load (~70s one-time cost).
-    
-    API-compatible with run_protenix_validation_local() - same input/output schema.
     
     Args:
         design_id: Unique identifier for this design

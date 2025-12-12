@@ -1321,11 +1321,12 @@ class ProteinHunter_Boltz:
 
             elif validation_model == "protenix":
                 print(f"  Running Protenix validation for {design_id}...")
-                from boltz_ph.validation.protenix_local import run_protenix_validation_local
+                # Use persistent runner (~4x faster - model stays loaded in GPU memory)
+                from boltz_ph.validation.protenix_local import run_protenix_validation_persistent
 
                 target_seq = self.data_builder.target_seqs_used
                 target_msas = self._load_target_msas_for_validation()
-                protenix_result = run_protenix_validation_local(
+                protenix_result = run_protenix_validation_persistent(
                     design_id=design_id,
                     binder_seq=binder_seq,
                     target_seq=target_seq,
