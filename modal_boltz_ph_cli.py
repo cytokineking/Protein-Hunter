@@ -192,7 +192,7 @@ def run_pipeline(
     logmd: str = "false",
     # Execution
     gpu: str = DEFAULT_GPU,
-    max_concurrent: int = 0,  # 0 = unlimited
+    max_concurrent: int = 1,  # 0 = unlimited
     output_dir: Optional[str] = None,
     no_stream: str = "false",
     sync_interval: float = 5.0,

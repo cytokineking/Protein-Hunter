@@ -1082,7 +1082,7 @@ The Modal CLI uses the same arguments as the local pipeline with these differenc
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--gpu` | str | `"H100"` | GPU type for Boltz design (see below) |
-| `--max-concurrent` | int | `0` | Max parallel GPUs (0 = unlimited) |
+| `--max-concurrent` | int | `1` | Max parallel GPUs (0 = unlimited) |
 | `--no-stream` | str | `"false"` | Disable real-time result streaming |
 | `--sync-interval` | float | `5.0` | Sync polling interval (seconds) |
 | `--output-dir` | str | `"./results_{name}"` | Local output directory |
@@ -1143,8 +1143,9 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
 
 **How it works:**
 - Each design run executes as an independent Modal container
-- `--max-concurrent 0` (default): All designs run simultaneously
+- `--max-concurrent 1` (default): Designs run sequentially (one at a time)
 - `--max-concurrent N`: Designs run in batches of N
+- `--max-concurrent 0`: Unlimited parallelism (all designs run simultaneously)
 
 ### Template Structures on Modal
 
