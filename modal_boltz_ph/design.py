@@ -41,7 +41,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
     
     Args:
         task_dict: Dictionary containing all design parameters including:
-            - run_id, design_idx, total_designs
+            - run_id, design_idx, total_attempts
             - protein_seqs, ligand_ccd, ligand_smiles, etc.
             - num_cycles, temperature, contact_residues
             - Model parameters (diffuse_steps, recycling_steps, etc.)
@@ -75,7 +75,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
     # Extract task parameters
     run_id = task_dict["run_id"]
     design_idx = task_dict["design_idx"]
-    total_designs = task_dict["total_designs"]
+    total_attempts = task_dict.get("total_attempts", task_dict.get("total_designs", 1))  # Backward compat
     stream_to_dict = task_dict.get("stream_to_dict", True)
     
     # Design parameters
@@ -142,7 +142,7 @@ def _run_design_impl(task_dict: Dict[str, Any]) -> Dict[str, Any]:
     
     try:
         print(f"\n{'='*60}")
-        print(f"Design {design_idx + 1}/{total_designs} for run {run_id}")
+        print(f"Attempt {design_idx + 1}/{total_attempts} for run {run_id}")
         print(f"{'='*60}")
         
         # Setup paths

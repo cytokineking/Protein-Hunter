@@ -998,7 +998,7 @@ class ProteinHunter_Boltz:
             clean_memory()
 
             print(
-                f"ipTM: {current_iptm:.3f} ipSAE: {current_ipsae:.3f} pLDDT: {curr_plddt:.2f} iPLDDT: {curr_iplddt:.2f} Ala: {alanine_count}"
+                f"ipTM: {current_iptm:.3f} ipSAE: {current_ipsae:.3f} pLDDT: {curr_plddt:.2f} iPLDDT: {curr_iplddt:.2f} Ala: {alanine_count} ({alanine_percentage*100:.0f}%)"
             )
 
             # Note: high_iptm_yaml and high_iptm_pdb folders are eliminated.
@@ -1577,6 +1577,13 @@ class ProteinHunter_Boltz:
             return 0
         return len(list(accepted_dir.glob("*_relaxed.pdb")))
 
+    def _count_rejected_designs(self) -> int:
+        """Count rejected designs by checking rejected/ folder."""
+        rejected_dir = Path(self.save_dir) / "rejected"
+        if not rejected_dir.exists():
+            return 0
+        return len(list(rejected_dir.glob("*_relaxed.pdb")))
+
     def _get_next_design_index(self) -> int:
         """Determine next design index from design_stats.csv (all attempts).
         
@@ -1631,20 +1638,30 @@ class ProteinHunter_Boltz:
         """
         Check if pipeline should continue based on stopping conditions.
         
-        Stopping conditions (OR logic):
-        - num_designs: Stop after N total designs generated
-        - num_accepted: Stop after N designs pass all filters
+        Stopping conditions (OR logic - first to trigger stops):
+        - num_attempts: Stop after N design attempts (compute-budget mode)
+        - num_designs: Stop after N valid designs (passed initial filters)
+        - num_accepted: Stop after N accepted designs (passed validation)
         
         Returns:
             True if should continue, False if target reached
         """
-        total = self._count_completed_designs()
+        attempts = self._get_next_design_index()  # Current attempt count
+        valid = self._count_completed_designs()   # Valid designs (passed initial filters)
         accepted = self._count_accepted_designs()
         
-        if self.args.num_designs is not None and total >= self.args.num_designs:
-            print(f"✓ Target reached: {total}/{self.args.num_designs} designs generated")
+        # Check num_attempts (compute-budget mode)
+        num_attempts = getattr(self.args, 'num_attempts', None)
+        if num_attempts is not None and attempts >= num_attempts:
+            print(f"✓ Target reached: {attempts}/{num_attempts} attempts")
             return False
         
+        # Check num_designs (valid designs target)
+        if self.args.num_designs is not None and valid >= self.args.num_designs:
+            print(f"✓ Target reached: {valid}/{self.args.num_designs} valid designs")
+            return False
+        
+        # Check num_accepted (accepted designs target)
         if hasattr(self.args, 'num_accepted') and self.args.num_accepted is not None and accepted >= self.args.num_accepted:
             print(f"✓ Target reached: {accepted}/{self.args.num_accepted} accepted designs")
             return False
@@ -1752,19 +1769,34 @@ class ProteinHunter_Boltz:
         while self._should_continue():
             design_idx = self._get_next_design_index()
             
-            # Build progress display
-            total = self._count_completed_designs()
+            # Build progress display with clear semantics:
+            # - Attempts: every design cycle run (design_idx)
+            # - Valid designs: attempts that passed initial filters (PDBs in best_designs/)
+            # - Accepted: valid designs that passed validation
+            # - Rejected: valid designs that failed validation
+            valid = self._count_completed_designs()
             accepted = self._count_accepted_designs()
+            rejected = self._count_rejected_designs()
+            num_attempts = getattr(self.args, 'num_attempts', None)
+            
             progress_parts = []
+            # Valid designs count
             if self.args.num_designs is not None:
-                progress_parts.append(f"{total}/{self.args.num_designs} designs")
+                progress_parts.append(f"{valid}/{self.args.num_designs} valid designs")
             else:
-                progress_parts.append(f"{total} designs")
+                progress_parts.append(f"{valid} valid designs")
+            # Attempts count
+            if num_attempts is not None:
+                progress_parts.append(f"({design_idx}/{num_attempts} attempts)")
+            else:
+                progress_parts.append(f"({design_idx} attempts)")
+            # Accepted/rejected counts
             if hasattr(self.args, 'num_accepted') and self.args.num_accepted is not None:
                 progress_parts.append(f"{accepted}/{self.args.num_accepted} accepted")
+            progress_parts.append(f"{rejected} rejected")
             
             print(f"\n{'='*60}")
-            print(f"Starting Design {design_idx} | Progress: {', '.join(progress_parts)}")
+            print(f"Progress: {' | '.join(progress_parts)}")
             print(f"{'='*60}")
 
             data_cp = copy.deepcopy(base_data)
@@ -1833,16 +1865,18 @@ class ProteinHunter_Boltz:
         
         # 7. Print final validation summary
         if getattr(self.args, "validation_model", "none") != "none":
-            total = self._count_completed_designs()
+            attempts = self._get_next_design_index()
+            valid = self._count_completed_designs()
             accepted = self._count_accepted_designs()
-            rejected = total - accepted if total > accepted else 0
+            rejected = self._count_rejected_designs()
             
             print(f"\n{'='*60}")
             print("PIPELINE COMPLETE")
             print(f"{'='*60}")
-            print(f"Total designs generated: {total}")
-            print(f"Accepted: {accepted}")
-            print(f"Rejected: {rejected}")
+            print(f"Total attempts: {attempts}")
+            print(f"Valid designs (passed initial filters): {valid}")
+            print(f"Accepted (passed validation): {accepted}")
+            print(f"Rejected (failed validation): {rejected}")
             if self.args.num_accepted:
                 print(f"Target accepted: {self.args.num_accepted}")
             print(f"\nOutput structure:")
@@ -2241,7 +2275,11 @@ class MultiGPUOrchestrator:
         print(f"🚀 MULTI-GPU ORCHESTRATOR")
         print(f"{'='*70}")
         print(f"GPUs: {self.num_gpus}")
-        print(f"Target designs: {self.args.num_designs}")
+        num_attempts = getattr(self.args, 'num_attempts', None)
+        if num_attempts:
+            print(f"Target attempts: {num_attempts}")
+        if self.args.num_designs:
+            print(f"Target valid designs: {self.args.num_designs}")
         if self.args.num_accepted:
             print(f"Target accepted: {self.args.num_accepted}")
         print(f"Output: {self.save_dir}")
@@ -2280,10 +2318,17 @@ class MultiGPUOrchestrator:
         
         # Initial work distribution - one design per worker
         in_flight = 0
+        num_attempts_target = getattr(self.args, 'num_attempts', None)
+        target_attempts = num_attempts_target or float('inf')
         target_designs = self.args.num_designs or float('inf')
         target_accepted = self.args.num_accepted or float('inf')
         
-        for _ in range(min(self.num_gpus, int(target_designs - completed_count))):
+        # Calculate initial batch size
+        remaining_attempts = int(target_attempts - next_design_idx)
+        remaining_designs = int(target_designs - completed_count)
+        initial_batch = min(self.num_gpus, remaining_attempts, remaining_designs) if remaining_designs != float('inf') else min(self.num_gpus, remaining_attempts)
+        
+        for _ in range(max(0, initial_batch)):
             task_queue.put(next_design_idx)
             next_design_idx += 1
             in_flight += 1
@@ -2292,7 +2337,9 @@ class MultiGPUOrchestrator:
         all_results = []
         rejected_count = 0
         try:
-            while completed_count < target_designs and accepted_count < target_accepted:
+            while (next_design_idx <= target_attempts and 
+                   completed_count < target_designs and 
+                   accepted_count < target_accepted):
                 if in_flight == 0:
                     break  # No more work in flight and targets not met
                 
@@ -2315,8 +2362,16 @@ class MultiGPUOrchestrator:
                 elif result.get("has_valid_pdb") or result.get("error"):
                     rejected_count += 1
                 
-                # Progress update
-                progress_parts = [f"{completed_count}/{int(target_designs)} designs"]
+                # Progress update with clear semantics
+                progress_parts = []
+                if self.args.num_designs:
+                    progress_parts.append(f"{completed_count}/{int(target_designs)} valid designs")
+                else:
+                    progress_parts.append(f"{completed_count} valid designs")
+                if num_attempts_target:
+                    progress_parts.append(f"({next_design_idx}/{int(target_attempts)} attempts)")
+                else:
+                    progress_parts.append(f"({next_design_idx} attempts)")
                 if self.args.num_accepted:
                     progress_parts.append(f"{accepted_count}/{int(target_accepted)} accepted")
                 progress_parts.append(f"{rejected_count} rejected")
@@ -2324,8 +2379,10 @@ class MultiGPUOrchestrator:
                 print(f"Progress: {' | '.join(progress_parts)}")
                 print(f"{'─'*70}\n")
                 
-                # Queue more work if needed
-                if completed_count < target_designs and accepted_count < target_accepted:
+                # Queue more work if none of the targets have been reached
+                if (next_design_idx < target_attempts and 
+                    completed_count < target_designs and 
+                    accepted_count < target_accepted):
                     task_queue.put(next_design_idx)
                     next_design_idx += 1
                     in_flight += 1
@@ -2356,15 +2413,18 @@ class MultiGPUOrchestrator:
     
     def _print_final_summary(self, all_results: list):
         """Print final summary of the multi-GPU run."""
-        completed = self._count_completed_designs()
+        attempts = self._get_next_design_index()
+        valid = self._count_completed_designs()
         accepted = self._count_accepted_designs()
+        rejected = self._count_rejected_designs()
         
         print(f"\n{'='*70}")
         print("MULTI-GPU PIPELINE COMPLETE")
         print(f"{'='*70}")
-        print(f"Total designs generated: {completed}")
-        print(f"Accepted: {accepted}")
-        print(f"Rejected: {completed - accepted}")
+        print(f"Total attempts: {attempts}")
+        print(f"Valid designs (passed initial filters): {valid}")
+        print(f"Accepted (passed validation): {accepted}")
+        print(f"Rejected (failed validation): {rejected}")
         
         # Per-GPU stats
         gpu_counts = {}

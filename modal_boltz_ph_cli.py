@@ -165,7 +165,8 @@ def run_pipeline(
     cyclic: str = "false",
     exclude_p: str = "false",
     # Design parameters
-    num_designs: int = 50,
+    num_attempts: int = 50,
+    num_accepted: Optional[int] = None,
     num_cycles: int = 5,
     contact_residues: Optional[str] = None,
     use_auth_numbering: str = "false",  # NEW: Interpret hotspots in auth/PDB numbering
@@ -216,7 +217,7 @@ def run_pipeline(
     --------
     # Basic design (no validation)
     modal run modal_boltz_ph_cli.py::run_pipeline \\
-        --name "PDL1_binder" --protein-seqs "AFTVTVPK..." --num-designs 5
+        --name "PDL1_binder" --protein-seqs "AFTVTVPK..." --num-attempts 5
 
     # With Protenix validation (RECOMMENDED - fully open-source)
     modal run modal_boltz_ph_cli.py::run_pipeline \\
@@ -240,7 +241,7 @@ def run_pipeline(
 
     # Small molecule binder
     modal run modal_boltz_ph_cli.py::run_pipeline \\
-        --name "SAM_binder" --ligand-ccd "SAM" --num-designs 5
+        --name "SAM_binder" --ligand-ccd "SAM" --num-attempts 5
     
     VALIDATION & SCORING
     --------------------
@@ -353,6 +354,13 @@ def run_pipeline(
     
     # Determine if validation is enabled
     validation_enabled = validation_model != "none"
+    
+    # Validate --num-accepted requires validation
+    if num_accepted is not None and not validation_enabled:
+        print("ERROR: --num-accepted requires validation.")
+        print("  Add --validation-model protenix or --validation-model af3")
+        print("  Or remove --num-accepted and use --num-attempts instead.")
+        return
 
     # Smart MSA mode default based on template and validation
     # - Template provided + no validation: skip MSAs (Boltz has template, no validation needs)
@@ -530,7 +538,9 @@ def run_pipeline(
     print(f"Run ID: {run_id}")
     print(f"Target: {protein_seqs[:50] + '...' if protein_seqs and len(protein_seqs) > 50 else protein_seqs or ligand_ccd or nucleic_seq}")
     print(f"Target type: {target_type}")
-    print(f"Num designs: {num_designs}")
+    print(f"Num attempts: {num_attempts}")
+    if num_accepted:
+        print(f"Target accepted: {num_accepted}")
     print(f"Num cycles: {num_cycles}")
     print(f"GPU: {gpu}")
     print(f"Max concurrent: {max_concurrent if max_concurrent > 0 else 'unlimited'}")
@@ -579,11 +589,11 @@ def run_pipeline(
     
     # Build tasks
     tasks = []
-    for i in range(num_designs):
+    for i in range(num_attempts):
         task = {
             "run_id": run_id,
             "design_idx": i,
-            "total_designs": num_designs,
+            "total_attempts": num_attempts,
             "stream_to_dict": stream,
             # Target
             "protein_seqs": protein_seqs or "",
@@ -1069,41 +1079,80 @@ def run_pipeline(
     effective_concurrency = max_concurrent if max_concurrent > 0 else len(tasks)
     concurrency_str = f"{max_concurrent} GPUs" if max_concurrent > 0 else "unlimited"
     
+    # Track semantic counts for progress display
+    valid_count = 0      # Attempts that produced valid designs (passed initial Boltz filters)
+    accepted_count = 0   # Valid designs that passed validation + scoring
+    rejected_count = 0   # Valid designs that failed validation or scoring
+    early_stop = False   # Flag for early stopping when num_accepted reached
+    
     if validation_enabled:
         # Full pipeline mode: use ThreadPoolExecutor for sequential per-design orchestration
-        print(f"Executing {len(tasks)} tasks [{pipeline_mode}] (concurrency: {concurrency_str})...\n")
+        print(f"Executing {len(tasks)} attempts [{pipeline_mode}] (concurrency: {concurrency_str})...\n")
         
         with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
             futures = {executor.submit(_run_full_pipeline_for_design, t): t for t in tasks}
+            pending_futures = set(futures.keys())
             
             for i, future in enumerate(as_completed(futures)):
                 result = future.result()
                 all_results.append(result)
+                pending_futures.discard(future)
                 
-                # Print completion status
+                # Update semantic counts
                 design_idx = result.get("design_idx", "?")
+                if result.get("status") == "success":
+                    valid_count += 1
+                if result.get("accepted") is True:
+                    accepted_count += 1
+                elif result.get("accepted") is False or result.get("rejection_reason"):
+                    rejected_count += 1
                 
+                # Build progress string
+                progress_parts = [f"{valid_count} valid"]
+                if num_accepted:
+                    progress_parts.append(f"{accepted_count}/{num_accepted} accepted")
+                else:
+                    progress_parts.append(f"{accepted_count} accepted")
+                progress_parts.append(f"{rejected_count} rejected")
+                progress_str = " | ".join(progress_parts)
+                
+                # Print completion status with semantic progress
                 if result.get("af3_iptm") is not None:
                     # Full pipeline completed with AF3 validation
-                    accepted = "✓ ACCEPTED" if result.get("accepted") else "✗ REJECTED"
-                    print(f"\n[{i+1}/{len(tasks)}] Design {design_idx} COMPLETE: "
+                    status_str = "✓ ACCEPTED" if result.get("accepted") else "✗ REJECTED"
+                    print(f"[{i+1}/{len(tasks)} attempts] Attempt {design_idx}: "
                           f"Boltz={result.get('best_iptm', 0):.3f}, AF3={result.get('af3_iptm', 0):.3f}, "
-                          f"dG={result.get('interface_dG', 0):.1f} → {accepted}\n")
+                          f"dG={result.get('interface_dG', 0):.1f} → {status_str}")
+                    print(f"  Progress: {progress_str}")
                 elif result.get("rejection_reason"):
-                    # AF3 was skipped due to Boltz metrics not meeting threshold
-                    print(f"[{i+1}/{len(tasks)}] Design {design_idx}: ✗ REJECTED ({result.get('rejection_reason')})")
+                    # Validation was skipped due to Boltz metrics not meeting threshold
+                    print(f"[{i+1}/{len(tasks)} attempts] Attempt {design_idx}: ✗ REJECTED ({result.get('rejection_reason')})")
+                    print(f"  Progress: {progress_str}")
                 else:
-                    # Design completed but no AF3 result (shouldn't happen normally)
+                    # Design completed but no validation result
                     status = "✓" if result.get("status") == "success" else "✗"
-                    print(f"[{i+1}/{len(tasks)}] {status} Design {design_idx}: ipTM={result.get('best_iptm', 0):.3f}")
+                    print(f"[{i+1}/{len(tasks)} attempts] {status} Attempt {design_idx}: ipTM={result.get('best_iptm', 0):.3f}")
+                    print(f"  Progress: {progress_str}")
+                
+                # Check early stopping condition
+                if num_accepted and accepted_count >= num_accepted:
+                    print(f"\n✓ Target reached: {accepted_count}/{num_accepted} accepted designs")
+                    print(f"  Cancelling {len(pending_futures)} remaining tasks...")
+                    early_stop = True
+                    # Cancel pending futures (best-effort - only works if not yet started)
+                    for f in pending_futures:
+                        f.cancel()
+                    break
     else:
         # Design-only mode: use Modal's native parallelism for maximum throughput
-        print(f"Executing {len(tasks)} tasks [{pipeline_mode}] (concurrency: {concurrency_str})...")
+        print(f"Executing {len(tasks)} attempts [{pipeline_mode}] (concurrency: {concurrency_str})...")
         for i, result in enumerate(gpu_fn.map(tasks)):
             all_results.append(result)
+            if result.get("status") == "success":
+                valid_count += 1
             status = "✓" if result.get("status") == "success" else "✗"
             iptm = result.get("best_iptm", 0)
-            print(f"[{i+1}/{len(tasks)}] {status} Design {result.get('design_idx')}: ipTM={iptm:.3f}")
+            print(f"[{i+1}/{len(tasks)} attempts] {status} Attempt {result.get('design_idx')}: ipTM={iptm:.3f} | {valid_count} valid")
     
     # Stop sync thread
     if sync_thread:
@@ -1256,15 +1305,28 @@ def run_pipeline(
     # PRINT SUMMARY
     # ==========================================================================
     print(f"\n{'='*70}")
-    print("SUMMARY")
+    print("PIPELINE COMPLETE")
     print(f"{'='*70}")
     
-    successful = [r for r in all_results if r.get("status") == "success"]
-    print(f"Successful designs: {len(successful)}/{len(all_results)}")
+    # Compute final counts from all_results
+    final_valid = sum(1 for r in all_results if r.get("status") == "success")
+    final_accepted = sum(1 for r in all_results if r.get("accepted") is True)
+    final_rejected = sum(1 for r in all_results if r.get("accepted") is False or 
+                         (r.get("status") == "success" and r.get("rejection_reason")))
     
+    print(f"Total attempts: {len(all_results)}")
+    print(f"Valid designs (passed initial filters): {final_valid}")
+    print(f"Accepted (passed validation): {final_accepted}")
+    print(f"Rejected (failed validation): {final_rejected}")
+    if early_stop:
+        print(f"Early stop: Yes (target {num_accepted} accepted reached)")
+    if num_accepted:
+        print(f"Target accepted: {num_accepted}")
+    
+    successful = [r for r in all_results if r.get("status") == "success"]
     if successful:
         best_overall = max(successful, key=lambda r: r.get("best_iptm", 0))
-        print(f"Best Boltz ipTM: {name}_d{best_overall['design_idx']} = {best_overall['best_iptm']:.3f}")
+        print(f"\nBest Boltz ipTM: {name}_d{best_overall['design_idx']} = {best_overall['best_iptm']:.3f}")
     
     if validation_enabled:
         validation_results = [r for r in successful if r.get("af3_iptm") is not None]
@@ -1272,11 +1334,6 @@ def run_pipeline(
             best_val = max(validation_results, key=lambda r: r.get("af3_iptm", 0))
             val_label = validation_model.upper()
             print(f"Best {val_label} ipTM: {best_val.get('design_id')} = {best_val.get('af3_iptm', 0):.3f}")
-
-        scoring_label = "Open-source Scoring" if scoring_method == "opensource" else "PyRosetta Filtering"
-        print(f"\n{scoring_label}:")
-        print(f"  Accepted: {len(accepted)}")
-        print(f"  Rejected: {len(rejected)}")
 
         if accepted:
             print("\n  Accepted designs:")

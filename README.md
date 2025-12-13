@@ -173,7 +173,7 @@ python boltz_ph/design.py \
 | `--percent-x` | % of "unknown" residues in initial sequence | 50-100 |
 | `--min-protein-length` | Minimum binder length | 60-80 |
 | `--max-protein-length` | Maximum binder length | 120-150 |
-| `--num-designs` | Independent design attempts | 100+ for a full run (required) |
+| `--num-designs` | Target valid designs (passed initial filters) | 100+ for a full run |
 | `--num-cycles` | Optimization iterations per design | 7 |
 
 ---
@@ -379,13 +379,34 @@ python boltz_ph/design.py \
 |----------|------|---------|-------------|
 | `--name` | str | required | Job name (used for output folder) |
 | `--gpu-id` | int | `0` | GPU device ID |
-| `--num-designs` | int | — | Total designs to generate (at least one of `--num-designs` or `--num-accepted` required) |
-| `--num-accepted` | int | — | Stop after N designs pass filters (requires `--validation-model` != none) |
+| `--num-designs` | int | — | Target number of **valid designs** (passed initial Boltz filters) |
+| `--num-attempts` | int | — | Target number of design **attempts** (compute-budget mode) |
+| `--num-accepted` | int | — | Target number of **accepted designs** (passed validation filters, requires `--validation-model` != none) |
 | `--num-cycles` | int | `5` | Fold→design iterations per run |
 | `--num-gpus` | int | `1` | Number of GPUs for parallel design (multi-GPU mode) |
 | `--mode` | str | `"binder"` | `"binder"` or `"unconditional"` |
 
-**Stopping conditions:** You must specify at least one of `--num-designs` or `--num-accepted`. If both are provided, the pipeline stops when *either* target is reached (OR logic). See [Resumable Execution](#resumable-execution) for details.
+#### Stopping Conditions & Design Terminology
+
+You must specify at least one stopping condition: `--num-designs`, `--num-attempts`, or `--num-accepted`. If multiple are provided, the pipeline stops when *any* target is reached (OR logic).
+
+| Term | Definition | Counted By |
+|------|------------|------------|
+| **Attempt** | Every design cycle run, regardless of outcome | `design_stats.csv` row count |
+| **Valid Design** | Attempt that passed initial Boltz filters (ipTM, pLDDT, %alanine) | PDBs in `best_designs/` |
+| **Accepted** | Valid design that passed validation (AF3/Protenix) and scoring filters | PDBs in `accepted_designs/` |
+| **Rejected** | Valid design that failed validation or scoring filters | PDBs in `rejected/` |
+
+**Example progress output:**
+```
+Progress: 21/100 valid designs | (39/500 attempts) | 3/10 accepted | 8 rejected
+```
+
+**Use cases:**
+- `--num-designs 100` — "I want 100 valid candidates to evaluate"
+- `--num-attempts 500` — "I have compute budget for 500 tries, give me what you can"
+- `--num-accepted 10` — "Stop when I have 10 winners"
+- Combined: `--num-attempts 1000 --num-accepted 50` — "Run up to 1000 attempts, but stop early if we get 50 accepted"
 
 ### Multi-GPU Parallelization (Local)
 
@@ -628,19 +649,19 @@ When using `--validation-model {af3,protenix}` (local or Modal):
 
 ```
 results_my_design/
-├── designs/                         # All design cycles
-│   ├── design_stats.csv
+├── designs/                         # All cycles from all attempts
+│   ├── design_stats.csv             # Metrics for every cycle of every attempt
 │   └── {name}_d{X}_c{Y}.pdb
-├── best_designs/                    # Best cycle per design
-│   ├── best_designs.csv
+├── best_designs/                    # Valid designs (passed initial Boltz filters)
+│   ├── best_designs.csv             # Summary of all valid designs
 │   └── {name}_d{X}_c{Y}.pdb
-├── refolded/                        # Refolded structures (AF3 or Open-source Model)
+├── refolded/                        # Refolded structures (AF3/Protenix)
 │   ├── validation_results.csv
 │   └── *_refolded.cif
-├── accepted_designs/                # Passed all filters (protein targets)
+├── accepted_designs/                # Accepted (passed validation + scoring)
 │   ├── accepted_stats.csv
 │   └── *_relaxed.pdb
-└── rejected/                        # Failed filters
+└── rejected/                        # Rejected (failed validation or scoring)
     ├── rejected_stats.csv
     └── *_relaxed.pdb
 ```
@@ -1010,12 +1031,22 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
     --protein-seqs "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALEHHHHHH" \
     --gpu H100
 
-# Quick test run (fewer designs)
+# Quick test run (fewer attempts)
 modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "quick_test" \
     --protein-seqs "YOUR_TARGET_SEQUENCE" \
-    --num-designs 5 \
+    --num-attempts 5 \
     --num-cycles 5 \
+    --gpu H100
+
+# With early stopping (stop when 3 designs are accepted)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --name "my_design" \
+    --protein-seqs "YOUR_TARGET_SEQUENCE" \
+    --num-attempts 50 \
+    --num-accepted 3 \
+    --validation-model protenix \
+    --scoring-method opensource \
     --gpu H100
 
 # Disable alanine bias (rare)
@@ -1036,6 +1067,15 @@ The Modal CLI uses the same arguments as the local pipeline with these differenc
 **Syntax:** Use kebab-case (`--protein-seqs`). Underscore flags remain as deprecated aliases locally.
 
 **Boolean flags:** Use `--flag=true` or `--flag=false` syntax (e.g., `--alanine-bias=false`)
+
+#### Stopping Conditions (Modal)
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--num-attempts` | int | `50` | Number of design attempts to run |
+| `--num-accepted` | int | — | Stop early when N designs are accepted (requires validation) |
+
+> **Note**: Modal uses `--num-attempts` (local uses both `--num-attempts` and `--num-designs`). In Modal, every dispatched task is an attempt. Add `--num-accepted` to stop early when enough designs pass validation.
 
 #### Modal-Specific Arguments
 
@@ -1082,16 +1122,23 @@ The Modal CLI uses the same arguments as the local pipeline with these differenc
 Modal automatically parallelizes design runs across multiple GPUs:
 
 ```bash
-# Run 16 designs in parallel (uses all available GPUs)
+# Run 16 attempts in parallel (uses all available GPUs)
 modal run modal_boltz_ph_cli.py::run_pipeline \
-    --num-designs 16 \
+    --num-attempts 16 \
     --gpu H100
 
 # Limit to 8 concurrent GPUs (runs in 2 batches)
 modal run modal_boltz_ph_cli.py::run_pipeline \
-    --num-designs 16 \
+    --num-attempts 16 \
     --max-concurrent 8 \
     --gpu H100
+
+# Stop early when 5 designs are accepted (validation + scoring)
+modal run modal_boltz_ph_cli.py::run_pipeline \
+    --num-attempts 100 \
+    --num-accepted 5 \
+    --validation-model protenix \
+    --scoring-method opensource
 ```
 
 **How it works:**
@@ -1143,7 +1190,7 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
 modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "PDL1_binder" \
     --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
-    --num-designs 10 \
+    --num-attempts 10 \
     --num-cycles 5 \
     --min-protein-length 90 \
     --max-protein-length 150 \
@@ -1159,7 +1206,7 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "PDL1_hotspot" \
     --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
     --contact-residues "54,56,66,115,121" \
-    --num-designs 10 \
+    --num-attempts 10 \
     --num-cycles 5 \
     --high-iptm-threshold 0.7 \
     --gpu H100
@@ -1176,7 +1223,7 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
     --template-cif-chain-id "A,B" \
     --contact-residues "|7,8,9,10,11,12,13,14,15,16" \
     --use-auth-numbering=true \
-    --num-designs 16 \
+    --num-attempts 16 \
     --num-cycles 5 \
     --max-concurrent 8 \
     --min-protein-length 60 \
@@ -1194,7 +1241,7 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
 modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "SAM_binder" \
     --ligand-ccd "SAM" \
-    --num-designs 5 \
+    --num-attempts 5 \
     --num-cycles 5 \
     --min-protein-length 130 \
     --max-protein-length 150 \
@@ -1209,7 +1256,7 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
 modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "PDL1_af3" \
     --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
-    --num-designs 10 \
+    --num-attempts 10 \
     --num-cycles 5 \
     --validation-model af3 \
     --scoring-method pyrosetta \
@@ -1236,8 +1283,6 @@ This runs `boltz_ph/pipeline.py` directly on a single Modal GPU, useful for:
 The Modal pipeline supports an **open-source scoring pathway** as an alternative to PyRosetta. This allows running the full design-to-validation pipeline without a PyRosetta license.
 
 The open-source scoring implementation is adapted from [FreeBindCraft](https://github.com/cytokineking/FreeBindCraft) by cytokineking.
-
-> **Note**: Open-source scoring is currently only available in the Modal cloud pipeline, not the local pipeline.
 
 ### What's Included
 
@@ -1295,7 +1340,7 @@ modal run modal_boltz_ph_cli.py::run_pipeline \
     --name "PDL1_opensource" \
     --protein-seqs "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNAPYAAALE" \
     --contact-residues "56,113,115,123" \
-    --num-designs 10 \
+    --num-attempts 10 \
     --num-cycles 5 \
     --gpu A100 \
     --validation-model protenix \

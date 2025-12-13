@@ -77,6 +77,12 @@ def parse_args():
         type=int,
         help="Stop after this many designs pass all filters. Requires validation (--validation-model != none)."
     )
+    parser.add_argument(
+        "--num-attempts", "--num_attempts", dest="num_attempts",
+        default=None,
+        type=int,
+        help="Stop after this many design attempts (regardless of outcome). Use for compute-budget mode."
+    )
     parser.add_argument("--num-cycles", "--num_cycles", dest="num_cycles", default=5, type=int)
     parser.add_argument("--cyclic", action="store_true", default=False, help="Enable cyclic peptide design.")
     parser.add_argument("--min-protein-length", "--min_protein_length", dest="min_protein_length", default=100, type=int)
@@ -227,18 +233,23 @@ def validate_args(args):
     """Validate command-line arguments for stopping conditions."""
     import sys
     
-    # Validate stopping conditions
-    if args.num_designs is None and args.num_accepted is None:
-        print("ERROR: Must specify at least one: --num-designs or --num-accepted")
+    # Validate stopping conditions - need at least one target
+    num_attempts = getattr(args, "num_attempts", None)
+    if args.num_designs is None and args.num_accepted is None and num_attempts is None:
+        print("ERROR: Must specify at least one stopping condition:")
+        print("  --num-designs N    Stop after N valid designs (passed initial filters)")
+        print("  --num-attempts N   Stop after N design attempts (compute-budget mode)")
+        print("  --num-accepted N   Stop after N accepted designs (requires validation)")
         sys.exit(1)
     
     if args.num_accepted is not None and getattr(args, "validation_model", "none") == "none":
         print("ERROR: --num-accepted requires validation. Set --validation-model af3 or protenix.")
         sys.exit(1)
     
-    if args.num_accepted is not None and args.num_designs is None:
-        print("⚠ WARNING: --num-accepted without --num-designs has no upper limit.")
-        print("  Consider adding --num-designs as a safety limit.\n")
+    # Warn about unbounded runs
+    if args.num_accepted is not None and args.num_designs is None and num_attempts is None:
+        print("⚠ WARNING: --num-accepted without --num-designs or --num-attempts has no upper limit.")
+        print("  Consider adding --num-designs or --num-attempts as a safety limit.\n")
 
 
 def validate_dependencies(args):
